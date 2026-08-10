@@ -1,0 +1,375 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { Approval, LocalSession, Task } from './types'
+
+const session: LocalSession = {
+  access_token: 'local-test-token',
+  token_type: 'Bearer',
+  websocket_protocol: 'deskpilot.local.v1',
+}
+
+const task: Task = {
+  task_id: 'task/with spaces?#',
+  conversation_id: null,
+  goal: 'Verify task controls',
+  status: 'running',
+  mode: 'standard',
+  privacy_mode: 'local_only',
+  constraints: [],
+  last_event_seq: 3,
+  event_stream: '/api/v1/ws/tasks/task%2Fwith%20spaces%3F%23',
+  created_at: '2026-08-09T00:00:00Z',
+  updated_at: '2026-08-09T00:00:01Z',
+}
+
+const approval: Approval = {
+  approval_id: 'approval/with spaces?#',
+  decision_id: 'decision-1',
+  task_id: task.task_id,
+  call_id: 'call-1',
+  status: 'pending',
+  decision: null,
+  preview_hash: 'preview-hash-1',
+  title: '确认操作',
+  purpose: '完成任务',
+  tool_name: 'computer.disk_usage',
+  tool_version: '1.0.0',
+  risk_level: 'R1',
+  capabilities: ['filesystem.metadata.read'],
+  resource_scope: [],
+  consequences: [],
+  reversible: true,
+  data_egress: { enabled: false, destination: null },
+  policy_rule_id: 'rule-1',
+  policy_revision: 'deskpilot-policy-v1',
+  reason_code: 'ASK_FOR_TEST',
+  requested_at: '2026-08-09T00:00:00Z',
+  expires_at: '2026-08-09T00:05:00Z',
+  resolved_at: null,
+  consumed_at: null,
+  resolution_reason: null,
+  updated_at: '2026-08-09T00:00:00Z',
+}
+
+function jsonResponse(body: unknown, init?: ResponseInit): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+    ...init,
+  })
+}
+
+function expectAuthenticatedRequest(
+  fetchMock: ReturnType<typeof vi.fn>,
+  callIndex: number,
+  expectedPath: string,
+  expectedMethod?: string,
+): RequestInit {
+  const [url, init] = fetchMock.mock.calls[callIndex] as [string, RequestInit]
+  const headers = new Headers(init.headers)
+
+  expect(url).toBe(expectedPath)
+  expect(init.method).toBe(expectedMethod)
+  expect(init.credentials).toBe('omit')
+  expect(headers.get('Authorization')).toBe('Bearer local-test-token')
+  expect(headers.get('X-DeskPilot-Client')).toBe('deskpilot-web-v1')
+
+  return init
+}
+
+describe('task API', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  it('uses encoded task paths, correct methods, normalized reasons, and local-session auth', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(session))
+      .mockResolvedValueOnce(jsonResponse(task))
+      .mockResolvedValueOnce(jsonResponse({ ...task, status: 'paused' }))
+      .mockResolvedValueOnce(jsonResponse(task))
+      .mockResolvedValueOnce(jsonResponse({ ...task, status: 'cancelled' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { buildTaskSocketUrl, cancelTask, getTask, pauseTask, resumeTask } = await import('./api')
+    const taskId = task.task_id
+
+    await getTask(taskId)
+    await pauseTask(taskId, { reason: '  operator requested  ' })
+    await resumeTask(taskId, { reason: '   ' })
+    await cancelTask(taskId)
+
+    expect(buildTaskSocketUrl(taskId, 7)).toContain(
+      '/api/v1/ws/tasks/task%2Fwith%20spaces%3F%23?after_seq=7',
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+    expect(fetchMock.mock.calls[0]).toEqual([
+      '/api/v1/session',
+      {
+        cache: 'no-store',
+        credentials: 'omit',
+        headers: { 'X-DeskPilot-Client': 'deskpilot-web-v1' },
+      },
+    ])
+
+    const encodedId = 'task%2Fwith%20spaces%3F%23'
+    const getInit = expectAuthenticatedRequest(
+      fetchMock,
+      1,
+      `/api/v1/tasks/${encodedId}`,
+    )
+    expect(getInit.cache).toBe('no-store')
+    expect(getInit.body).toBeUndefined()
+    expect(new Headers(getInit.headers).has('Content-Type')).toBe(false)
+
+    const pauseInit = expectAuthenticatedRequest(
+      fetchMock,
+      2,
+      `/api/v1/tasks/${encodedId}:pause`,
+      'POST',
+    )
+    expect(pauseInit.body).toBe(JSON.stringify({ reason: 'operator requested' }))
+    expect(new Headers(pauseInit.headers).get('Content-Type')).toBe('application/json')
+
+    const resumeInit = expectAuthenticatedRequest(
+      fetchMock,
+      3,
+      `/api/v1/tasks/${encodedId}:resume`,
+      'POST',
+    )
+    expect(resumeInit.body).toBeUndefined()
+    expect(new Headers(resumeInit.headers).has('Content-Type')).toBe(false)
+
+    const cancelInit = expectAuthenticatedRequest(
+      fetchMock,
+      4,
+      `/api/v1/tasks/${encodedId}:cancel`,
+      'POST',
+    )
+    expect(cancelInit.body).toBeUndefined()
+    expect(new Headers(cancelInit.headers).has('Content-Type')).toBe(false)
+  })
+
+  it('does not replay a control request after a network TypeError', async () => {
+    const networkError = new TypeError('Failed to fetch')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(session))
+      .mockRejectedValueOnce(networkError)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { pauseTask } = await import('./api')
+
+    await expect(pauseTask('task-1', { reason: 'pause once' })).rejects.toBe(networkError)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expectAuthenticatedRequest(fetchMock, 1, '/api/v1/tasks/task-1:pause', 'POST')
+  })
+
+  it('任务历史查询使用有界分页、状态筛选和 no-store', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(session))
+      .mockResolvedValueOnce(jsonResponse({
+        items: [task],
+        total: 1,
+        limit: 25,
+        offset: 50,
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { listTasks } = await import('./api')
+
+    await listTasks('running', 25, 50)
+
+    const init = expectAuthenticatedRequest(
+      fetchMock,
+      1,
+      '/api/v1/tasks?limit=25&offset=50&status=running',
+    )
+    expect(init.cache).toBe('no-store')
+    expect(init.body).toBeUndefined()
+  })
+
+  it('审批 API 使用编码路径、no-store 预览和精确的单次 scope', async () => {
+    const approved = { ...approval, status: 'approved' as const }
+    const rejected = { ...approval, status: 'rejected' as const }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(session))
+      .mockResolvedValueOnce(jsonResponse([approval]))
+      .mockResolvedValueOnce(jsonResponse(approval))
+      .mockResolvedValueOnce(jsonResponse({ approval: approved, task, replayed: false }))
+      .mockResolvedValueOnce(jsonResponse({ approval: rejected, task, replayed: false }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const {
+      approveApproval,
+      getApproval,
+      listPendingApprovals,
+      rejectApproval,
+    } = await import('./api')
+
+    await listPendingApprovals(task.task_id)
+    await getApproval(approval.approval_id)
+    await approveApproval(approval.approval_id, approval.preview_hash)
+    await rejectApproval(approval.approval_id, approval.preview_hash, '  目标不正确  ')
+
+    const listInit = expectAuthenticatedRequest(
+      fetchMock,
+      1,
+      '/api/v1/approvals?status=pending&task_id=task%2Fwith+spaces%3F%23',
+    )
+    expect(listInit.cache).toBe('no-store')
+
+    const encodedApprovalId = 'approval%2Fwith%20spaces%3F%23'
+    const getInit = expectAuthenticatedRequest(
+      fetchMock,
+      2,
+      `/api/v1/approvals/${encodedApprovalId}`,
+    )
+    expect(getInit.cache).toBe('no-store')
+
+    const approveInit = expectAuthenticatedRequest(
+      fetchMock,
+      3,
+      `/api/v1/approvals/${encodedApprovalId}:approve`,
+      'POST',
+    )
+    expect(approveInit.body).toBe(JSON.stringify({
+      preview_hash: 'preview-hash-1',
+      scope: 'once',
+    }))
+
+    const rejectInit = expectAuthenticatedRequest(
+      fetchMock,
+      4,
+      `/api/v1/approvals/${encodedApprovalId}:reject`,
+      'POST',
+    )
+    expect(rejectInit.body).toBe(JSON.stringify({
+      preview_hash: 'preview-hash-1',
+      scope: 'once',
+      reason: '目标不正确',
+    }))
+  })
+
+  it('网络错误后不自动重放审批 POST', async () => {
+    const networkError = new TypeError('Failed to fetch')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(session))
+      .mockRejectedValueOnce(networkError)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { approveApproval } = await import('./api')
+
+    await expect(approveApproval('approval-1', 'preview-1')).rejects.toBe(networkError)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expectAuthenticatedRequest(
+      fetchMock,
+      1,
+      '/api/v1/approvals/approval-1:approve',
+      'POST',
+    )
+  })
+
+  it('对账证据 API 使用编码路径、no-store 查询和无调用重放语义的刷新 POST', async () => {
+    const reconciliationId = 'reconciliation/with spaces?#'
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(session))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ reconciliation_id: reconciliationId }))
+      .mockResolvedValueOnce(jsonResponse({ replayed: false }))
+      .mockResolvedValueOnce(jsonResponse({ replayed: false }))
+      .mockResolvedValueOnce(jsonResponse({ replayed: false, task }))
+      .mockResolvedValueOnce(jsonResponse({ replayed: false, task }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const {
+      getReconciliation,
+      listReconciliations,
+      refreshReconciliationEvidence,
+      resolveReconciliation,
+      createReconciliationAttempt,
+      createReconciliationCompensation,
+    } = await import('./api')
+
+    await listReconciliations(task.task_id, 'pending')
+    await getReconciliation(reconciliationId)
+    await refreshReconciliationEvidence(reconciliationId)
+    await resolveReconciliation(
+      reconciliationId,
+      'confirmed_no_effect',
+      '  已核对外部状态  ',
+      'resolve-key-once',
+    )
+    await createReconciliationAttempt(reconciliationId, 'attempt-key-once')
+    await createReconciliationCompensation(reconciliationId, 'compensation-key-once')
+
+    const listInit = expectAuthenticatedRequest(
+      fetchMock,
+      1,
+      '/api/v1/reconciliations?status=pending&task_id=task%2Fwith+spaces%3F%23',
+    )
+    expect(listInit.cache).toBe('no-store')
+
+    const encodedId = 'reconciliation%2Fwith%20spaces%3F%23'
+    const getInit = expectAuthenticatedRequest(
+      fetchMock,
+      2,
+      `/api/v1/reconciliations/${encodedId}`,
+    )
+    expect(getInit.cache).toBe('no-store')
+
+    const refreshInit = expectAuthenticatedRequest(
+      fetchMock,
+      3,
+      `/api/v1/reconciliations/${encodedId}:refresh-evidence`,
+      'POST',
+    )
+    expect(refreshInit.body).toBeUndefined()
+    expect(new Headers(refreshInit.headers).has('Content-Type')).toBe(false)
+    expect(new Headers(refreshInit.headers).has('Idempotency-Key')).toBe(false)
+
+    const resolveInit = expectAuthenticatedRequest(
+      fetchMock,
+      4,
+      `/api/v1/reconciliations/${encodedId}:resolve`,
+      'POST',
+    )
+    expect(resolveInit.body).toBe(JSON.stringify({
+      outcome: 'confirmed_no_effect',
+      evidence_summary: '已核对外部状态',
+    }))
+    expect(new Headers(resolveInit.headers).get('Idempotency-Key')).toBe(
+      'resolve-key-once',
+    )
+
+    const attemptInit = expectAuthenticatedRequest(
+      fetchMock,
+      5,
+      `/api/v1/reconciliations/${encodedId}:create-attempt`,
+      'POST',
+    )
+    expect(attemptInit.body).toBeUndefined()
+    expect(new Headers(attemptInit.headers).get('Idempotency-Key')).toBe(
+      'attempt-key-once',
+    )
+    expect(new Headers(attemptInit.headers).has('Content-Type')).toBe(false)
+
+    const compensationInit = expectAuthenticatedRequest(
+      fetchMock,
+      6,
+      `/api/v1/reconciliations/${encodedId}:create-compensation`,
+      'POST',
+    )
+    expect(compensationInit.body).toBeUndefined()
+    expect(new Headers(compensationInit.headers).get('Idempotency-Key')).toBe(
+      'compensation-key-once',
+    )
+    expect(new Headers(compensationInit.headers).has('Content-Type')).toBe(false)
+  })
+})

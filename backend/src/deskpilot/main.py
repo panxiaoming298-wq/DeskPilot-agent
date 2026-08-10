@@ -1,0 +1,345 @@
+"""DeskPilot FastAPI composition root."""
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException
+
+from deskpilot.api.problem_details import (
+    ProblemException,
+    http_exception_handler,
+    internal_exception_handler,
+    problem_exception_handler,
+    validation_exception_handler,
+)
+from deskpilot.api.routes import (
+    approvals,
+    health,
+    model_providers,
+    reconciliations,
+    session,
+    tasks,
+    websocket,
+)
+from deskpilot.api.security_middleware import LocalApiSecurityMiddleware
+from deskpilot.application.credential_resolver import CredentialResolver
+from deskpilot.application.event_broker import EventBroker
+from deskpilot.application.model_gateway import (
+    ModelGateway,
+    ModelProvider,
+)
+from deskpilot.application.outbox_publisher import OutboxPublisher
+from deskpilot.application.policy_engine import BuiltinPolicyEngine, PolicyEngine
+from deskpilot.application.processor import TaskProcessor
+from deskpilot.application.provider_catalog import ProviderCatalogService
+from deskpilot.application.provider_health_service import ProviderHealthService
+from deskpilot.application.provider_management_service import (
+    ProviderManagementService,
+)
+from deskpilot.application.provider_runtime_codec import ProviderRuntimeConfigCodec
+from deskpilot.application.provider_runtime_store import RuntimeConfigProtector
+from deskpilot.application.runner_client import RunnerClient
+from deskpilot.application.runner_supervisor import RunnerSupervisor
+from deskpilot.application.task_checkpoint_codec import TaskCheckpointCodec
+from deskpilot.application.task_service import TaskService
+from deskpilot.core.config import Settings
+from deskpilot.core.security import LocalSessionSecurity
+from deskpilot.domain.provider_management import (
+    ProviderCatalogDefinition,
+    ProviderCatalogDefinitionEntry,
+)
+from deskpilot.infrastructure.credential_resolvers import (
+    create_default_credential_resolver,
+)
+from deskpilot.infrastructure.database import Database
+from deskpilot.infrastructure.provider_catalog_repository import (
+    SqlAlchemyProviderCatalogRepository,
+)
+from deskpilot.infrastructure.provider_management_repository import (
+    SqlAlchemyProviderManagementRepository,
+)
+from deskpilot.infrastructure.windows_dpapi import WindowsDpapiProtector
+from deskpilot.model_providers.factory import (
+    effective_model_provider_configs,
+)
+from deskpilot.tools import create_builtin_registry
+from deskpilot.tools.files import (
+    FILE_MOVE_DESTINATION_CAPABILITY,
+    FILE_MOVE_SOURCE_CAPABILITY,
+)
+
+
+def create_app(
+    settings: Settings | None = None,
+    *,
+    model_provider: ModelProvider | None = None,
+    credential_resolver: CredentialResolver | None = None,
+    runtime_config_protector: RuntimeConfigProtector | None = None,
+    runner_supervisor: RunnerSupervisor | None = None,
+    policy_engine: PolicyEngine | None = None,
+) -> FastAPI:
+    resolved_settings = settings or Settings()
+    session_security = LocalSessionSecurity.create(
+        resolved_settings.session_token,
+        resolved_settings.cors_origins,
+    )
+    model_gateway = ModelGateway(
+        default_provider_id=resolved_settings.model_default_provider_id,
+        policy=resolved_settings.model_gateway_policy,
+    )
+    provider_configs = effective_model_provider_configs(resolved_settings)
+    canonical_disk_usage_path = str(
+        Path(resolved_settings.disk_usage_path).expanduser().resolve(strict=True)
+    )
+    provider_catalog_definition: ProviderCatalogDefinition | None = None
+    if model_provider is not None:
+        model_gateway.register(model_provider)
+        model_gateway.validate_configuration()
+        provider_catalog_definition = ProviderCatalogDefinition(
+            default_provider_id=resolved_settings.model_default_provider_id,
+            providers=(
+                ProviderCatalogDefinitionEntry(
+                    descriptor=model_provider.descriptor,
+                    enabled=True,
+                ),
+            ),
+        )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        database = Database(resolved_settings.database_url)
+        resolved_runtime_config_protector = (
+            runtime_config_protector or WindowsDpapiProtector()
+        )
+        provider_health_service = ProviderHealthService(
+            model_gateway,
+            cache_ttl_seconds=resolved_settings.model_health_cache_ttl_seconds,
+            max_concurrency=resolved_settings.model_health_max_concurrency,
+            probe_timeout_seconds=(
+                resolved_settings.model_health_probe_timeout_seconds
+            ),
+        )
+        provider_management: ProviderManagementService | None = None
+        try:
+            await database.migrate()
+            provider_catalog_repository = SqlAlchemyProviderCatalogRepository(
+                database
+            )
+            if model_provider is not None:
+                if provider_catalog_definition is None:
+                    raise RuntimeError("Injected Provider catalog is missing")
+                await provider_catalog_repository.import_definition(
+                    provider_catalog_definition
+                )
+            else:
+                resolved_credential_resolver = (
+                    credential_resolver or create_default_credential_resolver()
+                )
+                management_repository = (
+                    SqlAlchemyProviderManagementRepository(
+                        database,
+                        ProviderRuntimeConfigCodec(
+                            resolved_runtime_config_protector
+                        ),
+                    )
+                )
+                provider_management = ProviderManagementService(
+                    store=management_repository,
+                    credential_resolver=resolved_credential_resolver,
+                    gateway=model_gateway,
+                    health_service=provider_health_service,
+                )
+                await provider_management.initialize(
+                    provider_configs,
+                    default_provider_id=(
+                        resolved_settings.model_default_provider_id
+                    ),
+                )
+        except BaseException:
+            await provider_health_service.shutdown()
+            await database.dispose()
+            raise
+        provider_catalog = ProviderCatalogService(
+            store=provider_catalog_repository,
+            health_service=provider_health_service,
+        )
+        broker = EventBroker()
+        outbox_publisher = OutboxPublisher(
+            database,
+            broker,
+            poll_interval_seconds=resolved_settings.outbox_poll_interval_seconds,
+            batch_size=resolved_settings.outbox_batch_size,
+            retry_base_seconds=resolved_settings.outbox_retry_base_seconds,
+            retry_max_seconds=resolved_settings.outbox_retry_max_seconds,
+        )
+        task_service = TaskService(
+            database,
+            resolved_settings.api_prefix,
+            outbox_notify=outbox_publisher.notify,
+            checkpoint_codec=TaskCheckpointCodec(
+                resolved_runtime_config_protector
+            ),
+        )
+        registry = create_builtin_registry()
+        resolved_policy_engine = policy_engine or BuiltinPolicyEngine(
+            allowed_capabilities=(
+                "filesystem.metadata.read",
+                FILE_MOVE_DESTINATION_CAPABILITY,
+                FILE_MOVE_SOURCE_CAPABILITY,
+            ),
+            allowed_resource_scopes=(
+                ("filesystem_path", canonical_disk_usage_path),
+            ),
+            allow_user_selected_file_move=True,
+            require_approval_for_r0=(
+                resolved_settings.policy_require_approval_for_r0
+            ),
+            approval_ttl_seconds=resolved_settings.policy_approval_ttl_seconds,
+        )
+        resolved_runner_supervisor = runner_supervisor or RunnerSupervisor(
+            client_factory=lambda: RunnerClient(
+                registry=registry,
+                heartbeat_interval_seconds=(
+                    resolved_settings.runner_heartbeat_interval_seconds
+                ),
+                heartbeat_timeout_seconds=(
+                    resolved_settings.runner_heartbeat_timeout_seconds
+                ),
+                startup_timeout_seconds=(
+                    resolved_settings.runner_startup_timeout_seconds
+                ),
+                shutdown_timeout_seconds=(
+                    resolved_settings.runner_shutdown_timeout_seconds
+                ),
+                require_windows_sandbox=(
+                    resolved_settings.runner_require_windows_sandbox
+                ),
+                require_network_isolation=(
+                    resolved_settings.runner_require_network_isolation
+                ),
+                worker_runtime_root=(
+                    resolved_settings.runner_worker_runtime_root
+                ),
+                appcontainer_profile_journal_path=(
+                    resolved_settings.runner_appcontainer_profile_journal_path
+                ),
+                commit_receipt_database_path=(
+                    resolved_settings.runner_commit_receipt_database_path
+                ),
+                worker_memory_limit_bytes=(
+                    resolved_settings.runner_worker_memory_limit_bytes
+                ),
+                worker_active_process_limit=(
+                    resolved_settings.runner_worker_active_process_limit
+                ),
+            ),
+            restart_base_delay_seconds=(
+                resolved_settings.runner_restart_base_delay_seconds
+            ),
+            restart_max_delay_seconds=(
+                resolved_settings.runner_restart_max_delay_seconds
+            ),
+            circuit_failure_threshold=(
+                resolved_settings.runner_circuit_failure_threshold
+            ),
+            circuit_recovery_timeout_seconds=(
+                resolved_settings.runner_circuit_recovery_timeout_seconds
+            ),
+            stable_window_seconds=resolved_settings.runner_stable_window_seconds,
+        )
+        processor = TaskProcessor(
+            task_service,
+            model_gateway,
+            resolved_policy_engine,
+            resolved_runner_supervisor,
+            step_delay_seconds=resolved_settings.fake_step_delay_seconds,
+            disk_usage_path=canonical_disk_usage_path,
+            model_timeout_seconds=resolved_settings.model_request_timeout_seconds,
+        )
+
+        app.state.database = database
+        app.state.event_broker = broker
+        app.state.outbox_publisher = outbox_publisher
+        app.state.task_service = task_service
+        app.state.processor = processor
+        app.state.model_gateway = model_gateway
+        app.state.policy_engine = resolved_policy_engine
+        app.state.provider_catalog = provider_catalog
+        app.state.provider_management = provider_management
+        app.state.runner_client = resolved_runner_supervisor
+        app.state.runner_supervisor = resolved_runner_supervisor
+        app.state.session_security = session_security
+
+        try:
+            app.state.task_runtime_recovery = (
+                await processor.prepare_durable_recovery()
+            )
+            app.state.approval_recovery = (
+                await task_service.recover_pending_approvals(
+                    recoverable_task_ids=(
+                        app.state.task_runtime_recovery.restored_task_ids
+                    )
+                )
+            )
+            app.state.tool_call_recovery = (
+                await task_service.recover_incomplete_tool_calls(
+                    recoverable_requested_call_ids=(
+                        app.state.task_runtime_recovery
+                        .recoverable_requested_call_ids
+                    )
+                )
+            )
+            await resolved_runner_supervisor.start()
+            outbox_publisher.start()
+            processor.activate_durable_recovery()
+            yield
+        finally:
+            await provider_catalog.shutdown()
+            await processor.shutdown()
+            await resolved_runner_supervisor.stop()
+            await outbox_publisher.shutdown()
+            await database.dispose()
+
+    app = FastAPI(
+        title=resolved_settings.app_name,
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+    app.add_exception_handler(ProblemException, problem_exception_handler)
+    app.add_exception_handler(HTTPException, http_exception_handler)
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.add_exception_handler(Exception, internal_exception_handler)
+    app.add_middleware(
+        LocalApiSecurityMiddleware,
+        security=session_security,
+        api_prefix=resolved_settings.api_prefix,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=resolved_settings.cors_origins,
+        allow_credentials=False,
+        allow_methods=["DELETE", "GET", "POST", "PUT"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Idempotency-Key",
+            "If-Match",
+            "X-DeskPilot-Client",
+        ],
+        expose_headers=["ETag"],
+    )
+    app.include_router(health.router, prefix=resolved_settings.api_prefix)
+    app.include_router(session.router, prefix=resolved_settings.api_prefix)
+    app.include_router(model_providers.router, prefix=resolved_settings.api_prefix)
+    app.include_router(tasks.router, prefix=resolved_settings.api_prefix)
+    app.include_router(approvals.router, prefix=resolved_settings.api_prefix)
+    app.include_router(reconciliations.router, prefix=resolved_settings.api_prefix)
+    app.include_router(websocket.router, prefix=resolved_settings.api_prefix)
+    return app
+
+
+app = create_app()
