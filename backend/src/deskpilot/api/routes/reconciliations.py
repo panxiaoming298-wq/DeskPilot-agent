@@ -17,6 +17,8 @@ from deskpilot.application.task_service import (
     ReconciliationAttemptNotAllowedError,
     ReconciliationCompensationAlreadyCreatedError,
     ReconciliationCompensationNotAllowedError,
+    ReconciliationGraphRecoveryAlreadyAppliedError,
+    ReconciliationGraphRecoveryNotAllowedError,
     ReconciliationIdempotencyConflictError,
     ReconciliationNotFoundError,
     TaskService,
@@ -25,9 +27,11 @@ from deskpilot.domain.reconciliations import (
     ReconciliationAttemptRead,
     ReconciliationCompensationRead,
     ReconciliationEvidenceRefreshRead,
+    ReconciliationGraphRecoveryRead,
     ReconciliationRead,
     ReconciliationResolutionRead,
     ReconciliationStatus,
+    RecoverGraphCommand,
     ResolveReconciliationCommand,
 )
 from deskpilot.domain.schemas import TaskStatus
@@ -149,6 +153,51 @@ async def resolve_reconciliation(
 
 
 @router.post(
+    "/{reconciliation_id}:recover-graph",
+    response_model=ReconciliationGraphRecoveryRead,
+)
+async def recover_reconciliation_graph(
+    reconciliation_id: str,
+    command: RecoverGraphCommand,
+    processor: ProcessorDependency,
+    response: Response,
+    idempotency_key: IdempotencyHeader = None,
+) -> ReconciliationGraphRecoveryRead:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await processor.recover_reconciliation_graph(
+            reconciliation_id,
+            action=command.action,
+            idempotency_key=_idempotency_key(idempotency_key),
+        )
+    except ReconciliationNotFoundError as error:
+        raise _not_found(reconciliation_id) from error
+    except ReconciliationGraphRecoveryNotAllowedError as error:
+        raise ProblemException(
+            status_code=409,
+            code=error.code,
+            title="不能恢复 Tool effect graph",
+            detail="当前裁决、回执、图状态或受保护检查点不足以安全执行该动作。",
+            extensions={"reason_code": error.reason_code},
+        ) from error
+    except ReconciliationGraphRecoveryAlreadyAppliedError as error:
+        raise ProblemException(
+            status_code=409,
+            code=error.code,
+            title="图恢复动作已经提交",
+            detail="同一条 reconciliation 只允许提交一次图恢复动作。",
+            extensions={"action": error.action.value},
+        ) from error
+    except ReconciliationIdempotencyConflictError as error:
+        raise ProblemException(
+            status_code=409,
+            code=error.code,
+            title="幂等键冲突",
+            detail="该 Idempotency-Key 已用于另一项 reconciliation 写请求。",
+        ) from error
+
+
+@router.post(
     "/{reconciliation_id}:create-compensation",
     response_model=ReconciliationCompensationRead,
     status_code=201,
@@ -218,9 +267,8 @@ async def create_reconciliation_attempt(
             reconciliation_id,
             idempotency_key=_idempotency_key(idempotency_key),
         )
-        if (
-            result.task.status is TaskStatus.CREATED
-            and not processor.has_runtime(result.task.task_id)
+        if result.task.status is TaskStatus.CREATED and not processor.has_runtime(
+            result.task.task_id
         ):
             processor.start(
                 result.task.task_id,

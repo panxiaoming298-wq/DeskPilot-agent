@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { createTask } from './api'
 import ApprovalCard from './components/ApprovalCard.vue'
+import EffectRuntimeOperations from './components/EffectRuntimeOperations.vue'
 import ProviderSettings from './components/ProviderSettings.vue'
 import ReconciliationEvidenceCard from './components/ReconciliationEvidenceCard.vue'
 import ReconciliationCenter from './components/ReconciliationCenter.vue'
@@ -22,10 +23,11 @@ import type {
 } from './types'
 
 const goal = ref('验证 DeskPilot 前后端任务事件闭环')
-const taskKind = ref<'disk_usage' | 'file_move'>('disk_usage')
+const taskKind = ref<'disk_usage' | 'file_move' | 'disk_pressure_guarded_file_move'>('disk_usage')
 const sourcePath = ref('')
 const destinationPath = ref('')
-const activeView = ref<'tasks' | 'reconciliations' | 'providers'>('tasks')
+const maximumUsedPercent = ref(80)
+const activeView = ref<'tasks' | 'reconciliations' | 'providers' | 'operations'>('tasks')
 const privacyMode = ref<TaskCreate['privacy_mode']>('local_only')
 const submitting = ref(false)
 const submitError = ref<string | null>(null)
@@ -89,12 +91,24 @@ const planSteps = computed<PlanStep[]>(() => {
   })
 })
 
+const branchDecision = computed(() => {
+  const event = [...events.value].reverse().find((item) => item.type === 'effect.branch.decided')
+  if (!event || event.payload.decision_key !== 'disk_pressure_route') return null
+  const outcome = event.payload.outcome
+  if (outcome !== 'move' && outcome !== 'defer') return null
+  return {
+    outcome,
+    label: outcome === 'move' ? '压力允许，进入移动审批' : '压力过高，已安全推迟写入',
+  }
+})
+
 const statusLabel = computed(() => {
   const labels: Partial<Record<TaskStatus, string>> = {
     created: '已创建',
     classifying: '正在分类',
     running: '执行中',
     waiting_approval: '等待审批',
+    waiting_reconciliation: '等待对账恢复',
     succeeded: '已完成',
     failed: '失败',
     cancelled: '已取消',
@@ -112,11 +126,25 @@ const fileMoveInputsValid = computed(() => {
   const destination = destinationPath.value.trim()
   return source.length > 0 && destination.length > 0 && source !== destination
 })
+const diskPressureThresholdValid = computed(() =>
+  Number.isFinite(maximumUsedPercent.value) &&
+  maximumUsedPercent.value >= 0 &&
+  maximumUsedPercent.value <= 100,
+)
 const canSubmit = computed(() =>
   goal.value.trim().length > 0 &&
   !submitting.value &&
   !taskInProgress.value &&
-  (taskKind.value === 'disk_usage' || fileMoveInputsValid.value),
+  (
+    taskKind.value === 'disk_usage' ||
+    (
+      fileMoveInputsValid.value &&
+      (
+        taskKind.value !== 'disk_pressure_guarded_file_move' ||
+        diskPressureThresholdValid.value
+      )
+    )
+  ),
 )
 
 const connectionLabel = computed(() => {
@@ -149,8 +177,31 @@ const pageHeading = computed(() =>
     ? '让任务过程成为可验证的数据'
     : activeView.value === 'reconciliations'
       ? '集中核对结果不确定的工具调用'
-      : '在本地安全切换云端与本地模型',
+      : activeView.value === 'providers'
+        ? '在本地安全切换云端与本地模型'
+        : '用数据库真值观察并保护运行时',
 )
+
+const pageEyebrow = computed(() => ({
+  tasks: 'WINDOWS MULTI-AGENT SYSTEM',
+  reconciliations: 'DURABLE EXECUTION LEDGER',
+  providers: 'OPENAI-COMPATIBLE GATEWAY',
+  operations: 'FENCED RUNTIME CONTROL PLANE',
+})[activeView.value])
+
+const stageTitle = computed(() => ({
+  tasks: '阶段 2 · 可控任务',
+  reconciliations: '阶段 2 · 持久化对账',
+  providers: '阶段 2 · 模型控制面',
+  operations: '阶段 2 · 受保护运维',
+})[activeView.value])
+
+const stageDescription = computed(() => ({
+  tasks: '通过检查点、实时事件和控制命令验证执行闭环。',
+  reconciliations: '查看任务历史、Runner 证据、裁决与后继血缘。',
+  providers: '管理可切换的模型连接、健康状态与配置审计。',
+  operations: '读取四域数据库真值，审计采样、retention 与 DLQ requeue。',
+})[activeView.value])
 
 async function submitTask() {
   const normalizedGoal = goal.value.trim()
@@ -169,6 +220,12 @@ async function submitTask() {
             'no_overwrite',
             ...(privacyMode.value === 'local_only' ? ['no_cloud'] : []),
           ]
+        : taskKind.value === 'disk_pressure_guarded_file_move'
+          ? [
+              'trusted_conditional_graph',
+              'no_overwrite',
+              ...(privacyMode.value === 'local_only' ? ['no_cloud'] : []),
+            ]
         : privacyMode.value === 'local_only'
           ? ['read_only', 'no_cloud']
           : ['read_only'],
@@ -178,6 +235,13 @@ async function submitTask() {
             source: sourcePath.value.trim(),
             destination: destinationPath.value.trim(),
           }
+        : taskKind.value === 'disk_pressure_guarded_file_move'
+          ? {
+              kind: 'disk_pressure_guarded_file_move',
+              source: sourcePath.value.trim(),
+              destination: destinationPath.value.trim(),
+              maximum_used_percent: maximumUsedPercent.value,
+            }
         : undefined,
     })
     reset()
@@ -257,19 +321,23 @@ function handleOpenHistoricalTask(snapshot: Task): void {
           <span>模型与设置</span>
           <span class="nav-count">03</span>
         </button>
+        <button class="nav-item" :class="{ active: activeView === 'operations' }" type="button" @click="activeView = 'operations'">
+          <span>运行时运维</span>
+          <span class="nav-count">04</span>
+        </button>
       </nav>
 
       <div class="stage-card">
         <span class="eyebrow">CURRENT STAGE</span>
-        <strong>{{ activeView === 'tasks' ? '阶段 2 · 可控任务' : activeView === 'reconciliations' ? '阶段 2 · 持久化对账' : '阶段 2 · 模型控制面' }}</strong>
-        <p>{{ activeView === 'tasks' ? '通过检查点、实时事件和控制命令验证执行闭环。' : activeView === 'reconciliations' ? '查看任务历史、Runner 证据、裁决与后继血缘。' : '管理可切换的模型连接、健康状态与配置审计。' }}</p>
+        <strong>{{ stageTitle }}</strong>
+        <p>{{ stageDescription }}</p>
       </div>
     </aside>
 
     <section class="main-panel">
       <header class="topbar">
         <div>
-          <span class="eyebrow">{{ activeView === 'tasks' ? 'WINDOWS MULTI-AGENT SYSTEM' : activeView === 'reconciliations' ? 'DURABLE EXECUTION LEDGER' : 'OPENAI-COMPATIBLE GATEWAY' }}</span>
+          <span class="eyebrow">{{ pageEyebrow }}</span>
           <h1>{{ pageHeading }}</h1>
         </div>
         <div
@@ -290,7 +358,8 @@ function handleOpenHistoricalTask(snapshot: Task): void {
           <span class="eyebrow">NEW TASK</span>
           <h2 id="task-heading">创建可暂停的任务闭环</h2>
           <p v-if="taskKind === 'disk_usage'">默认使用离线 Fake 模型与只读工具，不会联网或修改电脑。</p>
-          <p v-else>文件移动使用固定应用计划；只有审批卡中的单个源和目标会进入受控提交。</p>
+          <p v-else-if="taskKind === 'file_move'">文件移动使用固定应用计划；只有审批卡中的单个源和目标会进入受控提交。</p>
+          <p v-else>先读取目标磁盘使用率，由受信条件证明决定进入移动审批或安全推迟分支。</p>
         </div>
         <form @submit.prevent="submitTask">
           <label for="goal">任务目标</label>
@@ -306,9 +375,10 @@ function handleOpenHistoricalTask(snapshot: Task): void {
             <select v-model="taskKind" data-testid="task-kind">
               <option value="disk_usage">读取磁盘容量（只读）</option>
               <option value="file_move">移动单个文件（需要审批）</option>
+              <option value="disk_pressure_guarded_file_move">磁盘压力保护移动（条件图）</option>
             </select>
           </label>
-          <div v-if="taskKind === 'file_move'" class="file-move-fields">
+          <div v-if="taskKind !== 'disk_usage'" class="file-move-fields">
             <label class="path-field" for="source-path">
               <span>源文件</span>
               <input
@@ -331,8 +401,26 @@ function handleOpenHistoricalTask(snapshot: Task): void {
                 placeholder="例如 D:\\Documents\\archive\\draft.txt"
               />
             </label>
+            <label
+              v-if="taskKind === 'disk_pressure_guarded_file_move'"
+              class="path-field"
+              for="maximum-used-percent"
+            >
+              <span>允许移动的最高磁盘使用率（%）</span>
+              <input
+                id="maximum-used-percent"
+                v-model.number="maximumUsedPercent"
+                data-testid="maximum-used-percent"
+                type="number"
+                min="0"
+                max="100"
+                step="0.01"
+              />
+            </label>
             <p class="file-move-notice">
-              仅支持同一磁盘内的普通单文件移动，不覆盖目标；提交前会再次验证源文件版本。
+              {{ taskKind === 'disk_pressure_guarded_file_move'
+                ? '使用已持久化的磁盘 Tool 结果计算分支；只有 move 分支会创建一次性写审批。'
+                : '仅支持同一磁盘内的普通单文件移动，不覆盖目标；提交前会再次验证源文件版本。' }}
             </p>
           </div>
           <div class="composer-actions">
@@ -375,6 +463,17 @@ function handleOpenHistoricalTask(snapshot: Task): void {
               <div><dt>隐私模式</dt><dd>{{ task.privacy_mode }}</dd></div>
               <div><dt>事件数量</dt><dd>{{ events.length }}</dd></div>
             </dl>
+            <div
+              v-if="branchDecision"
+              class="stream-notice"
+              :data-tone="branchDecision.outcome === 'move' ? 'success' : 'warning'"
+              data-testid="branch-decision-summary"
+            >
+              <div>
+                <strong>受信条件分支</strong>
+                <p>{{ branchDecision.label }}</p>
+              </div>
+            </div>
             <div v-if="status" class="task-controls-slot">
               <TaskControls
                 :status="status"
@@ -464,7 +563,8 @@ function handleOpenHistoricalTask(snapshot: Task): void {
         :task-switch-locked="taskInProgress"
         @open-task="handleOpenHistoricalTask"
       />
-      <ProviderSettings v-else />
+      <ProviderSettings v-else-if="activeView === 'providers'" />
+      <EffectRuntimeOperations v-else />
     </section>
   </main>
 </template>

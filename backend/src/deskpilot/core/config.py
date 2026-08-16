@@ -1,6 +1,6 @@
 """Application settings."""
 
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,11 +23,69 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     database_url: str = "sqlite+aiosqlite:///./data/deskpilot.db"
     fake_step_delay_seconds: float = 0.15
+    graph_lease_ttl_seconds: float = Field(default=15, ge=1, le=3_600)
+    effect_dag_global_concurrency: int = Field(default=8, ge=1, le=1_024)
+    effect_dag_graph_concurrency: int = Field(default=4, ge=1, le=32)
+    effect_dag_tool_concurrency: int = Field(default=4, ge=1, le=1_024)
+    effect_dag_ready_page_size: int = Field(default=64, ge=1, le=1_000)
+    effect_dag_admission_lease_ttl_seconds: int = Field(default=15, ge=1, le=3_600)
+    effect_dag_admission_poll_interval_seconds: float = Field(
+        default=0.05,
+        gt=0,
+        le=60,
+    )
+    effect_graph_control_poll_interval_seconds: float = Field(
+        default=0.05,
+        gt=0,
+        le=60,
+    )
+    effect_graph_control_claim_ttl_seconds: float = Field(
+        default=15,
+        ge=1,
+        le=3_600,
+    )
+    effect_graph_control_request_timeout_seconds: float = Field(
+        default=30,
+        gt=0,
+        le=3_600,
+    )
     session_token: SecretStr | None = None
     outbox_poll_interval_seconds: float = Field(default=0.05, gt=0, le=60)
     outbox_batch_size: int = Field(default=100, ge=1, le=1_000)
     outbox_retry_base_seconds: float = Field(default=0.25, ge=0, le=60)
     outbox_retry_max_seconds: float = Field(default=30.0, ge=0, le=3_600)
+    outbox_claim_ttl_seconds: float = Field(default=15.0, ge=1, le=3_600)
+    outbox_max_attempts: int = Field(default=8, ge=1, le=1_000)
+    event_transport: Literal["local", "rabbitmq"] = "local"
+    rabbitmq_url: SecretStr | None = None
+    rabbitmq_exchange: str = Field(
+        default="deskpilot.events.v1",
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    rabbitmq_queue: str = Field(
+        default="deskpilot.task-events.websocket.v1",
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    rabbitmq_routing_key: str = Field(
+        default="task.event",
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    rabbitmq_prefetch_count: int = Field(default=32, ge=1, le=1_000)
+    rabbitmq_connection_timeout_seconds: float = Field(default=10, gt=0, le=120)
+    rabbitmq_publish_timeout_seconds: float = Field(default=10, gt=0, le=120)
+    operations_retention_days: int = Field(default=30, ge=1, le=3_650)
+    operations_retention_interval_seconds: float = Field(
+        default=3_600,
+        ge=1,
+        le=604_800,
+    )
+    operations_metrics_interval_seconds: float = Field(
+        default=300,
+        ge=1,
+        le=86_400,
+    )
+    operations_retention_batch_size: int = Field(default=1_000, ge=1, le=10_000)
+    operations_stalled_after_seconds: float = Field(default=60, ge=1, le=86_400)
     runner_heartbeat_interval_seconds: float = Field(default=0.5, ge=0.1, le=60)
     runner_heartbeat_timeout_seconds: float = Field(default=3.0, gt=0.1, le=300)
     runner_startup_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
@@ -63,19 +121,13 @@ class Settings(BaseSettings):
     policy_require_approval_for_r0: bool = False
     policy_approval_ttl_seconds: int = Field(default=300, ge=10, le=3_600)
     disk_usage_path: str = Field(default=".", min_length=1, max_length=32_767)
-    model_default_provider_id: str = Field(
-        default="fake-local", pattern=r"^[a-z][a-z0-9_-]{1,63}$"
-    )
-    fake_model_provider_id: str = Field(
-        default="fake-local", pattern=r"^[a-z][a-z0-9_-]{1,63}$"
-    )
+    model_default_provider_id: str = Field(default="fake-local", pattern=r"^[a-z][a-z0-9_-]{1,63}$")
+    fake_model_provider_id: str = Field(default="fake-local", pattern=r"^[a-z][a-z0-9_-]{1,63}$")
     fake_model_name: str = Field(default="deskpilot-fake-v1", min_length=1, max_length=200)
     fake_model_delay_seconds: float = Field(default=0, ge=0, le=60)
     model_providers: tuple[ProviderConfig, ...] = Field(default=(), max_length=32)
     model_request_timeout_seconds: float = Field(default=10, gt=0, le=600)
-    model_gateway_policy: ModelGatewayPolicy = Field(
-        default_factory=_default_model_gateway_policy
-    )
+    model_gateway_policy: ModelGatewayPolicy = Field(default_factory=_default_model_gateway_policy)
     model_health_cache_ttl_seconds: float = Field(default=15, gt=0, le=300)
     model_health_max_concurrency: int = Field(default=4, ge=1, le=16)
     model_health_probe_timeout_seconds: float = Field(default=5, gt=0, le=30)
@@ -105,12 +157,21 @@ class Settings(BaseSettings):
     def validate_runner_recovery_policy(self) -> Self:
         if self.runner_heartbeat_timeout_seconds <= self.runner_heartbeat_interval_seconds:
             raise ValueError(
-                "runner_heartbeat_timeout_seconds must exceed "
-                "runner_heartbeat_interval_seconds"
+                "runner_heartbeat_timeout_seconds must exceed runner_heartbeat_interval_seconds"
             )
         if self.runner_restart_max_delay_seconds < self.runner_restart_base_delay_seconds:
             raise ValueError(
                 "runner_restart_max_delay_seconds must be at least "
                 "runner_restart_base_delay_seconds"
             )
+        if self.effect_dag_graph_concurrency > self.effect_dag_global_concurrency:
+            raise ValueError(
+                "effect_dag_graph_concurrency must not exceed effect_dag_global_concurrency"
+            )
+        if self.effect_dag_tool_concurrency > self.effect_dag_global_concurrency:
+            raise ValueError(
+                "effect_dag_tool_concurrency must not exceed effect_dag_global_concurrency"
+            )
+        if self.event_transport == "rabbitmq" and self.rabbitmq_url is None:
+            raise ValueError("rabbitmq_url is required when event_transport is rabbitmq")
         return self

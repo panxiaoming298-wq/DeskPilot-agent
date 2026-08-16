@@ -1,19 +1,30 @@
 """Task command/query endpoints."""
 
 import asyncio
+import os
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
 from deskpilot.api.dependencies import get_processor, get_task_service
 from deskpilot.api.problem_details import ProblemException
+from deskpilot.application.effect_graph_control_router import (
+    EffectGraphControlDeliveryTimeoutError,
+)
 from deskpilot.application.processor import TaskProcessor, TaskRuntimeUnavailableError
 from deskpilot.application.task_service import (
+    EffectGraphNotFoundError,
     InvalidTaskTransitionError,
     TaskNotFoundError,
     TaskService,
 )
+from deskpilot.domain.effect_graph import EffectGraphRead
 from deskpilot.domain.schemas import (
+    DiskPressureGuardedFileMoveRequest,
+    FileMoveDagOperation,
+    FileMoveDagRequest,
+    FileMoveSagaOperation,
+    FileMoveSagaRequest,
     FileMoveTaskRequest,
     TaskControlCommand,
     TaskCreate,
@@ -49,9 +60,7 @@ def _transition_problem(error: InvalidTaskTransitionError) -> ProblemException:
         status_code=409,
         code="TASK_TRANSITION_NOT_ALLOWED",
         title="任务状态不允许此操作",
-        detail=(
-            f"任务当前为 {error.current.value}，不能切换到 {error.target.value}。"
-        ),
+        detail=(f"任务当前为 {error.current.value}，不能切换到 {error.target.value}。"),
         extensions={
             "current_status": error.current.value,
             "target_status": error.target.value,
@@ -98,6 +107,103 @@ async def _normalize_task_command(command: TaskCreate) -> TaskCreate:
     request = command.tool_request
     if request is None:
         return command
+    if isinstance(request, DiskPressureGuardedFileMoveRequest):
+        try:
+            normalized = await asyncio.to_thread(
+                normalize_file_move_input,
+                FileMoveInput(source=request.source, destination=request.destination),
+            )
+        except (OSError, ToolExecutorError) as error:
+            raise ProblemException(
+                status_code=422,
+                code="DISK_PRESSURE_GUARDED_FILE_MOVE_REQUEST_INVALID",
+                title="磁盘压力保护文件移动请求无效",
+                detail=("请选择现有普通源文件和同一磁盘上尚不存在的目标路径。"),
+            ) from error
+        return command.model_copy(
+            update={
+                "tool_request": DiskPressureGuardedFileMoveRequest(
+                    source=normalized.source,
+                    destination=normalized.destination,
+                    maximum_used_percent=request.maximum_used_percent,
+                )
+            }
+        )
+    if isinstance(request, (FileMoveSagaRequest, FileMoveDagRequest)):
+        normalized_operations: list[FileMoveSagaOperation | FileMoveDagOperation] = []
+        resource_paths: set[str] = set()
+        try:
+            for operation in request.operations:
+                normalized = await asyncio.to_thread(
+                    normalize_file_move_input,
+                    FileMoveInput(
+                        source=operation.source,
+                        destination=operation.destination,
+                    ),
+                )
+                canonical_paths = {
+                    os.path.normcase(normalized.source),
+                    os.path.normcase(normalized.destination),
+                }
+                if resource_paths.intersection(canonical_paths):
+                    raise ToolExecutorError(
+                        "Saga operations must use disjoint source and destination paths"
+                    )
+                resource_paths.update(canonical_paths)
+                operation_type = (
+                    FileMoveDagOperation
+                    if isinstance(request, FileMoveDagRequest)
+                    else FileMoveSagaOperation
+                )
+                normalized_operations.append(
+                    operation_type(
+                        operation_id=operation.operation_id,
+                        source=normalized.source,
+                        destination=normalized.destination,
+                        **(
+                            {"depends_on": operation.depends_on}
+                            if isinstance(operation, FileMoveDagOperation)
+                            else {}
+                        ),
+                    )
+                )
+        except (OSError, ToolExecutorError) as error:
+            raise ProblemException(
+                status_code=422,
+                code=(
+                    "FILE_MOVE_DAG_REQUEST_INVALID"
+                    if isinstance(request, FileMoveDagRequest)
+                    else "FILE_MOVE_SAGA_REQUEST_INVALID"
+                ),
+                title=(
+                    "DAG 文件移动请求无效"
+                    if isinstance(request, FileMoveDagRequest)
+                    else "多步文件移动请求无效"
+                ),
+                detail=(
+                    "每个源必须是现有普通文件，目标必须不存在且位于同一磁盘；"
+                    "各步骤的源和目标路径不能重叠。"
+                ),
+            ) from error
+        normalized_request = (
+            FileMoveDagRequest(
+                operations=tuple(
+                    operation
+                    for operation in normalized_operations
+                    if isinstance(operation, FileMoveDagOperation)
+                )
+            )
+            if isinstance(request, FileMoveDagRequest)
+            else FileMoveSagaRequest(
+                operations=tuple(
+                    operation
+                    for operation in normalized_operations
+                    if isinstance(operation, FileMoveSagaOperation)
+                    and not isinstance(operation, FileMoveDagOperation)
+                )
+            )
+        )
+        return command.model_copy(update={"tool_request": normalized_request})
     try:
         normalized = await asyncio.to_thread(
             normalize_file_move_input,
@@ -108,9 +214,7 @@ async def _normalize_task_command(command: TaskCreate) -> TaskCreate:
             status_code=422,
             code="FILE_MOVE_REQUEST_INVALID",
             title="文件移动请求无效",
-            detail=(
-                "请选择一个存在的普通源文件和同一磁盘上尚不存在的目标路径。"
-            ),
+            detail=("请选择一个存在的普通源文件和同一磁盘上尚不存在的目标路径。"),
         ) from error
     return command.model_copy(
         update={
@@ -120,6 +224,24 @@ async def _normalize_task_command(command: TaskCreate) -> TaskCreate:
             )
         }
     )
+
+
+@router.get("/{task_id}/effect-graph", response_model=EffectGraphRead)
+async def get_task_effect_graph(
+    task_id: str,
+    service: TaskServiceDependency,
+) -> EffectGraphRead:
+    try:
+        return await service.get_effect_graph(task_id)
+    except TaskNotFoundError as error:
+        raise _not_found_problem(task_id) from error
+    except EffectGraphNotFoundError as error:
+        raise ProblemException(
+            status_code=404,
+            code="EFFECT_GRAPH_NOT_FOUND",
+            title="Tool effect graph 不存在",
+            detail="此任务尚未建立可查询的 Tool effect graph。",
+        ) from error
 
 
 @router.get("/{task_id}", response_model=TaskRead)
@@ -216,7 +338,10 @@ async def cancel_task(
         if task.status is not TaskStatus.CANCELLED:
             if task.status.is_terminal:
                 raise InvalidTaskTransitionError(task_id, task.status, TaskStatus.CANCELLED)
-            await processor.cancel(task_id)
+            await processor.cancel(
+                task_id,
+                reason=command.reason if command else None,
+            )
         cancelled = await service.cancel_task(
             task_id,
             reason=command.reason if command else None,
@@ -225,5 +350,16 @@ async def cancel_task(
         return cancelled
     except TaskNotFoundError as error:
         raise _not_found_problem(task_id) from error
+    except EffectGraphControlDeliveryTimeoutError as error:
+        raise ProblemException(
+            status_code=503,
+            code=error.code,
+            title="Graph cancellation routing is still pending",
+            detail=(
+                "The cancellation command is durable, but its live graph owner "
+                "has not acknowledged it yet. Read the task before retrying."
+            ),
+            extensions={"control_id": error.control_id},
+        ) from error
     except InvalidTaskTransitionError as error:
         raise _transition_problem(error) from error

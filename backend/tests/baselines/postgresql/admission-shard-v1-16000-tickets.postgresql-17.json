@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "baseline_id": "admission-shard-v1-16000-tickets-pg17",
+  "captured_at": "2026-08-15T15:48:09.686415+00:00",
+  "workload": {
+    "shard_count": 16,
+    "pending_ticket_count": 16000,
+    "pending_tickets_per_shard": 1000,
+    "candidate_limit": 101,
+    "expected_rows": 101
+  },
+  "query_shape_sha256": "6c4f9863051036b90af311a164286986c956ebdd45788f8c03835f5de4b1b626",
+  "postgresql": {
+    "version": "PostgreSQL 17.10 (Debian 17.10-1.pgdg12+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit",
+    "server_version": "17.10 (Debian 17.10-1.pgdg12+1)",
+    "server_version_num": 170010
+  },
+  "comparison_policy": {
+    "execution_time_max_ratio": 5.0,
+    "execution_time_slack_ms": 5.0,
+    "scan_rows_max_ratio": 1.05,
+    "shared_blocks_max_ratio": 1.5,
+    "shared_blocks_slack": 128
+  },
+  "summary": {
+    "planning_time_ms": 0.379,
+    "execution_time_ms": 0.136,
+    "root_actual_rows": 101,
+    "scan_actual_rows": 101,
+    "rows_removed": 0,
+    "shared_hit_blocks": 79,
+    "shared_read_blocks": 0,
+    "shared_total_blocks": 79,
+    "index_names": [
+      "ix_tool_effect_dag_admissions_shard_route"
+    ],
+    "node_type_counts": {
+      "Index Scan": 1,
+      "Limit": 1
+    },
+    "scan_nodes": [
+      {
+        "node_type": "Index Scan",
+        "relation_name": "tool_effect_dag_admissions",
+        "index_name": "ix_tool_effect_dag_admissions_shard_route",
+        "actual_rows": 101,
+        "actual_loops": 1
+      }
+    ]
+  },
+  "plan": [
+    {
+      "Plan": {
+        "Node Type": "Limit",
+        "Parallel Aware": false,
+        "Async Capable": false,
+        "Startup Cost": 0.41,
+        "Total Cost": 208.85,
+        "Plan Rows": 101,
+        "Plan Width": 287,
+        "Actual Startup Time": 0.089,
+        "Actual Total Time": 0.119,
+        "Actual Rows": 101,
+        "Actual Loops": 1,
+        "Shared Hit Blocks": 79,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0,
+        "Plans": [
+          {
+            "Node Type": "Index Scan",
+            "Parent Relationship": "Outer",
+            "Parallel Aware": false,
+            "Async Capable": false,
+            "Scan Direction": "Forward",
+            "Index Name": "ix_tool_effect_dag_admissions_shard_route",
+            "Relation Name": "tool_effect_dag_admissions",
+            "Alias": "tool_effect_dag_admissions",
+            "Startup Cost": 0.41,
+            "Total Cost": 2066.21,
+            "Plan Rows": 1001,
+            "Plan Width": 287,
+            "Actual Startup Time": 0.087,
+            "Actual Total Time": 0.111,
+            "Actual Rows": 101,
+            "Actual Loops": 1,
+            "Index Cond": "((scheduling_shard = 6) AND ((status)::text = 'pending'::text) AND (expires_at > '2026-08-15 15:48:09.60076+00'::timestamp with time zone))",
+            "Rows Removed by Index Recheck": 0,
+            "Shared Hit Blocks": 79,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        ]
+      },
+      "Planning": {
+        "Shared Hit Blocks": 100,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      },
+      "Planning Time": 0.379,
+      "Triggers": [],
+      "Execution Time": 0.136
+    }
+  ]
+}

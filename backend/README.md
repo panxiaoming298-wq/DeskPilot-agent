@@ -1,6 +1,6 @@
 # DeskPilot Backend
 
-FastAPI 控制面最小骨架。当前 TaskProcessor 的磁盘容量任务通过 Model Gateway 的离线 Fake Provider 获得结构化分类和计划；显式单文件移动使用受信任应用计划模板和本地用户提供的结构化路径。两者都经过确定性 Policy/Approval，再由独立签名 Runner 执行。Runner 已支持自动换代、退避/熔断、持久化调用账本、`unknown` 人工对账/签名回执证据与受限显式新 attempt、Windows 每调用 Job/Low Integrity、句柄核验 resource broker、内容寻址 AppContainer worker bundle、专用 capability ACL 和孤儿 profile reaper，以及 R1 `file.move@1.0.0` prepare/commit/receipt 受控写闭环；受保护结构化请求/阶段 checkpoint、任务历史 API、Provider catalog、安全凭据、角色路由与模型韧性预算也已完成。默认首次 seed 仍只使用离线 Fake Provider。
+FastAPI 控制面最小骨架。当前 TaskProcessor 的磁盘容量任务通过 Model Gateway 的离线 Fake Provider 获得结构化分类和计划；显式单文件移动、线性 saga 与受信 `file_move_dag` 使用应用计划模板和本地用户提供的结构化路径。写路径不从模型文本提取，每个 v2 DAG 节点都独立经过 Tool ledger、Policy/Approval、graph+node fence、签名 Runner 和 commit receipt，并支持受持久化 plan 约束的逐 wave 并行补偿。DAG 采用进程级公平 admission、有界 ready proof 页和持久化跨 API graph control mailbox；任一 API 收到取消后都能将命令路由给 live graph owner，由其对当前 node fence 的在途 Runner call 发出 generation-bound cancel IPC。Runner 已支持自动换代、退避/熔断、持久化调用账本、`unknown` 人工对账/签名回执证据与受限显式新 attempt、Windows 每调用 Job/Low Integrity、句柄核验 resource broker、内容寻址 AppContainer worker bundle、专用 capability ACL 和孤儿 profile reaper，以及 R1 `file.move@1.0.0` prepare/commit/receipt 受控写闭环。任务历史 API、Provider catalog、安全凭据、角色路由与模型韧性预算也已完成。默认首次 seed 仍只使用离线 Fake Provider。
 
 ## 启动
 
@@ -32,11 +32,11 @@ POST /api/v1/tasks/{task_id}:resume
 POST /api/v1/tasks/{task_id}:cancel
 ```
 
-请求体可省略，也可以传 `{"reason":"..."}`。暂停只允许从 `running` 进入，在已提交事件之间的安全点生效；恢复从当前进程或受保护且可验证的跨 API 重启 checkpoint 继续，不重复已经持久化的 Tool 事件。取消可用于所有非终态任务，并以 `task.cancelled` 结束事件流。
+请求体可省略，也可以传 `{"reason":"..."}`。暂停只允许从 `running` 进入，在已提交事件之间的安全点生效；恢复从当前进程或受保护且可验证的跨 API 重启 checkpoint 继续，不重复已经持久化的 Tool 事件。取消可用于所有非终态任务，并以 `task.cancelled` 结束事件流。v2 DAG 即使由另一个 API 实例持有，也会先持久化内容寻址 control message，再按当前 graph owner/fence 路由；若在配置的等待时间内尚未收到 fenced ack，API 返回 `503 EFFECT_GRAPH_CONTROL_PENDING`，命令仍保留在数据库中继续投递。
 
-重复暂停已暂停任务、重复取消已取消任务是幂等操作，不会增加事件序号。非法转换返回 `409 TASK_TRANSITION_NOT_ALLOWED`；没有能与事件、Tool 账本、Policy 和审批同时证明一致的 checkpoint 时，恢复返回 `409 TASK_RUNTIME_UNAVAILABLE`。
+重复暂停已暂停任务、重复取消已取消任务是幂等操作，不会增加事件序号。非法转换返回 `409 TASK_TRANSITION_NOT_ALLOWED`；没有能与事件、Tool 账本、Policy、审批和 effect graph 当前节点同时证明一致的 checkpoint 时，恢复返回 `409 TASK_RUNTIME_UNAVAILABLE`。
 
-任务历史使用 `GET /api/v1/tasks?status=&limit=&offset=` 查询。`limit` 限定为 1～100，结果按创建时间稳定倒序并返回 `items/total/limit/offset`，响应禁止缓存且不包含事件 payload 或 Tool 参数。
+任务历史使用 `GET /api/v1/tasks?status=&limit=&offset=` 查询。`limit` 限定为 1～100，结果按创建时间稳定倒序并返回 `items/total/limit/offset`，响应禁止缓存且不包含事件 payload 或 Tool 参数。多步执行的脱敏证明投影使用 `GET /api/v1/tasks/{task_id}/effect-graph` 查询。
 
 应用启动时会自动执行 Alembic upgrade。也可以手动检查或执行迁移：
 
@@ -46,13 +46,27 @@ POST /api/v1/tasks/{task_id}:cancel
 .\.venv\Scripts\alembic.exe check
 ```
 
-第一版 migration 可初始化空库，也能接管首个开发版本通过 `create_all` 创建的数据库，原有任务数据不会被重建。当前 head 为 `0012_task_runtime_checkpoints`；在不保存原始参数或密钥的 `tool_calls` 恢复账本之外，现已包括人工对账、内容寻址 Runner 回执证据、Reconciliation API 幂等回执、`key_required` Tool 幂等键占用回执、受控提交证据投影、回执绑定的单补偿血缘和 current-user DPAPI 受保护任务 checkpoint。
+第一版 migration 可初始化空库，也能接管早期数据库而不重建原有任务。当前 head 为 `0026_alert_notifications`；现已包括人工对账、Runner 回执证据、并发幂等归一化、版本化 effect graph、数据库时间 lease/fencing、v2 DAG 逐节点 Tool 账本/批量审批/并行 Runner/补偿 wave barrier、条件边与内容寻址分支决策、owner/fence 定向 graph control mailbox、数据库协调的集群级 admission/容量 fence、PostgreSQL 16-shard admission 调度与 graph-control 原生批量 claim、增量 ready membership/count 投影与 v6 keyset 分页证明、四域受保护运维/retention/hash-chain 审计、告警 lifecycle 通知链与冻结 audit 导出、Outbox delivery/DLQ、Inbox 去重、PostgreSQL 原生批量 claim 与显式选入的性能/backend terminate/lock timeout/多主幂等实库门禁，以及 current-user DPAPI 受保护任务 checkpoint。
 
 ## 事件可靠投递
 
-任务状态、`task_events` 和 `outbox_messages` 在同一事务提交。后台 `OutboxPublisher` 提交后唤醒，同时保留轮询兜底；发送失败按指数退避重试，API 重启后会继续处理未发布消息。
+任务状态、`task_events` 和 `outbox_messages` 在同一事务提交。后台 `OutboxPublisher` 为每次尝试生成 delivery ID，按指数退避重试，达到 `DESKPILOT_OUTBOX_MAX_ATTEMPTS` 后进入 DLQ；`InboxConsumer` 以 consumer + logical message 去重，并提供显式 requeue/retention cleanup 原语。
 
 投递语义是 **at-least-once**：进程若在发送成功、写入 `published_at` 之前退出，消息可能再次发送。WebSocket 端以任务内单调 `seq` 去重，事件补拉仍以数据库 `task_events` 为真值。
+
+## Effect runtime 运维 API
+
+```text
+GET  /api/v1/operations/effect-runtime
+GET  /api/v1/operations/effect-runtime/audit
+GET  /api/v1/operations/effect-runtime/alerts
+GET  /api/v1/operations/effect-runtime/audit/export
+POST /api/v1/operations/effect-runtime:sample
+POST /api/v1/operations/effect-runtime:run-retention
+POST /api/v1/operations/outbox/{message_id}:requeue
+```
+
+全部接口都要求本地 Bearer session，写请求还要求可信 Origin/Fetch Metadata；retention 和 DLQ requeue 另要求 `Idempotency-Key`。snapshot 只返回身份、状态、revision/fence、时间和摘要，不返回 control reason、Outbox payload/error 原文或 Tool 参数。自动 retention 只清理安全终态图的派生运维数据、已发布 Outbox 与旧 Inbox receipt；DLQ、active/compensating/blocked graph 和 TaskEvent 永不自动删除。完整边界见 [`doc/50-受保护运行时运维面与Retention审计.md`](../doc/50-受保护运行时运维面与Retention审计.md)。
 
 ## Tool Contract 与 Runner IPC
 
@@ -75,7 +89,9 @@ POST /api/v1/tasks/{task_id}:cancel
 
 完整协议见 [`doc/14-Tool-Contract与Runner-IPC协议.md`](../doc/14-Tool-Contract与Runner-IPC协议.md)，进程实现见 [`doc/15-独立Runner与首个R0工具实现.md`](../doc/15-独立Runner与首个R0工具实现.md)，自动恢复和调用账本见 [`doc/27-Runner故障恢复与unknown调用持久化.md`](../doc/27-Runner故障恢复与unknown调用持久化.md)，执行前授权见 [`doc/28-Policy-Approval执行前授权主干.md`](../doc/28-Policy-Approval执行前授权主干.md)，Windows 每调用隔离见 [`doc/29-Windows-Runner进程隔离与低完整性实现.md`](../doc/29-Windows-Runner进程隔离与低完整性实现.md)，人工对账和新 attempt 见 [`doc/30-unknown人工对账与显式新attempt实现.md`](../doc/30-unknown人工对账与显式新attempt实现.md)，capability broker/commit/禁网边界见 [`doc/31-Contract能力Broker受控提交与Windows禁网边界.md`](../doc/31-Contract能力Broker受控提交与Windows禁网边界.md)，专用 runtime 与 profile 回收见 [`doc/32-AppContainer专用Worker运行时与Profile回收.md`](../doc/32-AppContainer专用Worker运行时与Profile回收.md)，首个受控写闭环见 [`doc/33-file.move受控提交与持久化回执.md`](../doc/33-file.move受控提交与持久化回执.md)，显式任务与审批入口见 [`doc/34-file.move显式任务入口与一次性审批.md`](../doc/34-file.move显式任务入口与一次性审批.md)，unknown 回执证据见 [`doc/35-unknown-Runner回执证据采集与前端展示.md`](../doc/35-unknown-Runner回执证据采集与前端展示.md)，回执驱动补偿见 [`doc/36-file.move回执驱动显式补偿闭环.md`](../doc/36-file.move回执驱动显式补偿闭环.md)，集中历史与对账见 [`doc/37-任务历史与集中Reconciliation中心.md`](../doc/37-任务历史与集中Reconciliation中心.md)。
 
-受保护 checkpoint 的完整存储、证明与不重放边界见 [`doc/38-结构化Tool请求与可证明跨重启检查点.md`](../doc/38-结构化Tool请求与可证明跨重启检查点.md)。
+受保护 checkpoint 的完整存储、证明与不重放边界见 [`doc/38-结构化Tool请求与可证明跨重启检查点.md`](../doc/38-结构化Tool请求与可证明跨重启检查点.md)，多步图、原子节点转换与 saga 补偿见 [`doc/39-版本化Tool-effect-graph与Saga补偿.md`](../doc/39-版本化Tool-effect-graph与Saga补偿.md)，跨实例 graph 所有权、统一事务命令和图级恢复见 [`doc/40-跨实例Graph所有权与图级Reconciliation恢复.md`](../doc/40-跨实例Graph所有权与图级Reconciliation恢复.md)，数据库 claim、Outbox fencing 与 v2 DAG 并行恢复见 [`doc/41-数据库原子Claim与DAG并行恢复证明.md`](../doc/41-数据库原子Claim与DAG并行恢复证明.md)，dispatcher/reducer 与可靠投递见 [`doc/42-DAG并行Dispatcher与可靠消息投递.md`](../doc/42-DAG并行Dispatcher与可靠消息投递.md)，v2 逐节点账本与并行补偿见 [`doc/43-v2可信Tool账本与并行补偿执行.md`](../doc/43-v2可信Tool账本与并行补偿执行.md)，条件边、分支决策内容证明与重启恢复见 [`doc/44-条件边与内容寻址分支决策证明.md`](../doc/44-条件边与内容寻址分支决策证明.md)，在途取消与 graph/node fence 见 [`doc/45-在途Runner取消与Fence语义.md`](../doc/45-在途Runner取消与Fence语义.md)，进程内公平 admission 与 ready proof 分页见 [`doc/46-DAG公平调度分页与Backpressure.md`](../doc/46-DAG公平调度分页与Backpressure.md)，跨 API 持久化取消路由见 [`doc/47-跨实例Graph取消控制邮箱.md`](../doc/47-跨实例Graph取消控制邮箱.md)，数据库协调的集群级 admission 与 node-claim 容量 fence 见 [`doc/48-集群级DAG-Admission与容量Fence.md`](../doc/48-集群级DAG-Admission与容量Fence.md)，数据库增量 ready 索引和 v4 页证明见 [`doc/49-增量Ready投影与v4分页证明.md`](../doc/49-增量Ready投影与v4分页证明.md)，受保护运维面、retention 和审计链见 [`doc/50-受保护运行时运维面与Retention审计.md`](../doc/50-受保护运行时运维面与Retention审计.md)，ready v5 keyset 与 PostgreSQL 验收门禁见 [`doc/51-Ready-v5-Keyset与PostgreSQL验收门禁.md`](../doc/51-Ready-v5-Keyset与PostgreSQL验收门禁.md)，backend terminate、锁超时与多主幂等门禁见 [`doc/52-PostgreSQL连接终止与多主幂等门禁.md`](../doc/52-PostgreSQL连接终止与多主幂等门禁.md)，对应的前端受保护运维台见 [`doc/53-前端受保护运行时运维台.md`](../doc/53-前端受保护运行时运维台.md)，Docker PostgreSQL 17.10 真库验收与兼容修复见 [`doc/54-Docker-PostgreSQL真库验收与兼容修复.md`](../doc/54-Docker-PostgreSQL真库验收与兼容修复.md)。
+
+最新 ready membership/count、TTL 接管、漂移门禁与 PostgreSQL v6 JSON plan 见 [`doc/58-Ready-membership-count投影与漂移门禁.md`](../doc/58-Ready-membership-count投影与漂移门禁.md)；admission 分片、跨 shard 容量证明和 16000-ticket plan 见 [`doc/59-Admission分片与PostgreSQL原生调度.md`](../doc/59-Admission分片与PostgreSQL原生调度.md)；graph-control 原生批量领取、TTL/fence 接管和 16000-control plan 见 [`doc/60-Graph-control-PostgreSQL原生批量Claim.md`](../doc/60-Graph-control-PostgreSQL原生批量Claim.md)；告警生命周期通知与冻结 audit 导出见 [`doc/61-运行时告警通知与Audit冻结导出.md`](../doc/61-运行时告警通知与Audit冻结导出.md)。
 
 Runner 由 API lifespan 自动启动和关闭，不应单独手工运行。初次启动失败时 API 以 degraded 状态继续启动，Supervisor 在后台恢复；旧代在途调用绝不自动发往新代。相关配置见 `.env.example`。
 
@@ -190,4 +206,42 @@ GET Catalog 返回形如 `"provider-catalog-v3"` 的 ETag。所有写请求必�
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-当前全量结果为 `282 passed`；Ruff 和 105 个源码文件的 mypy 检查均通过。Alembic 当前为 `0012_task_runtime_checkpoints (head)` 且 `alembic check` 无漂移；前端为 15 个文件、122 项测试通过，type-check/build 通过。
+阶段 61 将 operations 稳定告警持久化为 opened/updated/resolved hash-chain 通知，并以冻结数据库 head、opaque cursor、after/through digest 和 page digest 提供完整脱敏 audit 导出；PostgreSQL 双 engine 唯一 opened 与并发 append 冻结门禁已实际通过。RabbitMQ 仍为可选 transport，默认 local 模式不联网，也不参与告警或导出正确性。默认后端全量为 `396 passed, 12 skipped, 1 warning`（408 collected）；Ruff、mypy 140 个生产源码、依赖锁和 Alembic check 通过，Alembic head 为 `0026_alert_notifications`。前端为 17 文件/134 项测试，type-check 与 build 通过。
+
+默认 `DESKPILOT_EVENT_TRANSPORT=local`，不会连接外部 broker。启用 RabbitMQ 时先复制 `infrastructure/rabbitmq/.env.example`，启动专用容器，并配置 `DESKPILOT_EVENT_TRANSPORT=rabbitmq` 与 SecretStr `DESKPILOT_RABBITMQ_URL`。真实门禁还要求 loopback/test-vhost/二次确认：
+
+```powershell
+$env:DESKPILOT_TEST_RABBITMQ_URL = "amqp://user:password@127.0.0.1:5672/deskpilot_test"
+$env:DESKPILOT_TEST_RABBITMQ_ALLOW = "1"
+.\.venv\Scripts\python.exe -m pytest tests/test_rabbitmq_fault_injection.py -vv
+```
+
+详细语义和未覆盖边界见 [`doc/57-RabbitMQ真实Broker重投与Inbox门禁.md`](../doc/57-RabbitMQ真实Broker重投与Inbox门禁.md)。
+
+PostgreSQL 门禁只应指向可抛弃测试库；它要求 `postgresql+asyncpg` URL、库名包含 `test` 和二次确认：
+
+```powershell
+$env:DESKPILOT_TEST_POSTGRESQL_URL = "postgresql+asyncpg://user:password@127.0.0.1:5432/deskpilot_test"
+$env:DESKPILOT_TEST_POSTGRESQL_ALLOW = "1"
+.\.venv\Scripts\python.exe -m pytest -m postgresql_integration -vv
+```
+
+它会迁移该库并运行 1000-node keyset `EXPLAIN ANALYZE/BUFFERS`、双独立 engine claim 竞争、engine-pool drop 后 TTL/fence 接管、未提交 claim 事务的 backend terminate 回滚、graph `lock_timeout`/SQLSTATE `55P03` 和双实例同键审计幂等验证。以上门禁已在 Docker PostgreSQL 17.10 实际通过；详细安全边界与真库结果见 [`doc/51-Ready-v5-Keyset与PostgreSQL验收门禁.md`](../doc/51-Ready-v5-Keyset与PostgreSQL验收门禁.md)、[`doc/52-PostgreSQL连接终止与多主幂等门禁.md`](../doc/52-PostgreSQL连接终止与多主幂等门禁.md)和[`doc/54-Docker-PostgreSQL真库验收与兼容修复.md`](../doc/54-Docker-PostgreSQL真库验收与兼容修复.md)。
+
+1000-node 用例默认还会把当前 JSON plan 与 `tests/baselines/postgresql/` 下的 PostgreSQL 17 版本化基线比较；只在有意更新并准备审阅 diff 时，临时设置 `DESKPILOT_TEST_POSTGRESQL_PLAN_BASELINE_MODE=record` 重新生成。指标、阈值和安全流程见 [`doc/55-PostgreSQL-JSON-Plan版本化基线.md`](../doc/55-PostgreSQL-JSON-Plan版本化基线.md)。
+
+同一专用 PostgreSQL marker 还包含 `test_postgresql_process_fault_injection.py`：最小 API claimant 子进程在 graph/node claim commit 后、Runner 派发前报告 checkpoint，父测试强杀实际解释器 PID，随后只使用数据库时间等待 TTL，并断言 graph/node fence 从 1 精确接管到 2、旧 owner/旧 node fence 全拒绝且 Tool ledger 始终为零。
+
+`test_postgresql_container_restart_fault_injection.py` 会实际重启专用 PostgreSQL 容器，因此还需额外显式选入。它只接受固定的 `deskpilot-postgres`，并在重启前核对 Compose project/service、loopback 端口、健康状态和专用数据卷；Docker CLI 不在 PATH 时必须给出其绝对路径：
+
+```powershell
+$env:DESKPILOT_TEST_POSTGRESQL_RESTART_ALLOW = "1"
+$env:DESKPILOT_TEST_DOCKER_CLI = "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
+.\.venv\Scripts\python.exe -m pytest tests/test_postgresql_container_restart_fault_injection.py -vv
+```
+
+该门禁证明 restart 使旧 backend 连接失效且 postmaster 启动时间递增；恢复后只依据 PostgreSQL `current_timestamp` 等待 graph/node/Outbox TTL，三个 fence 都从 1 接管为 2。旧 graph owner、旧 node owner/fence 和旧 publisher owner/fence/delivery 全部被拒绝，当前 fence 仍可 ack Outbox 并完成 recovered node。
+
+`test_postgresql_transaction_fault_injection.py` 覆盖 `statement_timeout`、多行 deadlock 和 terminal commit 连接中断。实测精确命中 SQLSTATE `57014` 与 `40P01`，并证明 graph/node/witness 失败事务整体回滚。连接中断场景直接调用生产 `finish_tool_call()`，在 transaction commit 前终止测试自身 backend；新连接看不到部分 terminal ledger/event/Outbox，startup recovery 只生成一次 `unknown` 和 pending reconciliation，不生成新 call 或 `tool.completed`。详细证明见 [`doc/56-PostgreSQL事务超时死锁与连接中断门禁.md`](../doc/56-PostgreSQL事务超时死锁与连接中断门禁.md)。
+
+`test_runner_commit_boundary_fault_injection.py` 另使用真实独立 Runner 和每调用 worker，在 `file.move` prepared、committing 和 OS move 已完成但 receipt 尚未写入的精确 checkpoint 强杀实际 PID。重启后只查询 durable receipt，分别断言确定 `no_effect`、已提交效果的 receipt 恢复，以及不可证状态进入单一 pending reconciliation 且不透明重放。故障 observer 只注册在测试 Runner，生产 `file.move` provider 默认无 observer。

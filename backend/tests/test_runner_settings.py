@@ -46,3 +46,31 @@ def test_runner_recovery_settings_reject_invalid_cross_field_values(
 ) -> None:
     with pytest.raises(ValidationError, match=message):
         Settings(_env_file=None, **overrides)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {
+                "effect_dag_global_concurrency": 2,
+                "effect_dag_graph_concurrency": 3,
+            },
+            "effect_dag_graph_concurrency must not exceed",
+        ),
+        (
+            {
+                "effect_dag_global_concurrency": 2,
+                "effect_dag_graph_concurrency": 2,
+                "effect_dag_tool_concurrency": 3,
+            },
+            "effect_dag_tool_concurrency must not exceed",
+        ),
+    ],
+)
+def test_effect_dag_scheduler_rejects_limits_above_global_capacity(
+    overrides: dict[str, int],
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        Settings(_env_file=None, **overrides)  # type: ignore[arg-type]

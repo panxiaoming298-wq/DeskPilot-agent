@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from deskpilot.domain.effect_graph import EffectGraphRead
 from deskpilot.domain.schemas import TaskRead
 from deskpilot.domain.tool_commit import ToolCommitReceipt
 from deskpilot.domain.tool_contracts import ToolIdempotency
@@ -26,6 +27,17 @@ class ReconciliationEvidenceKind(StrEnum):
     COMMIT_RECEIPT = "commit_receipt"
     NO_RECEIPT = "no_receipt"
     QUERY_FAILED = "query_failed"
+
+
+class GraphRecoveryStatus(StrEnum):
+    NOT_APPLICABLE = "not_applicable"
+    PENDING = "pending"
+    APPLIED = "applied"
+
+
+class GraphRecoveryAction(StrEnum):
+    CONTINUE = "continue"
+    TERMINATE = "terminate"
 
 
 class ToolIdempotencyReceiptRead(BaseModel):
@@ -80,6 +92,10 @@ class ReconciliationRead(BaseModel):
     resolved_by: str | None
     unknown_at: datetime
     resolved_at: datetime | None
+    graph_recovery_status: GraphRecoveryStatus
+    graph_recovery_action: GraphRecoveryAction | None
+    graph_recovery_event_id: str | None
+    graph_recovered_at: datetime | None
     can_create_attempt: bool
     new_attempt_task_id: str | None
     new_attempt_created_at: datetime | None
@@ -128,3 +144,19 @@ class ReconciliationCompensationRead(BaseModel):
     reconciliation: ReconciliationRead
     task: TaskRead
     replayed: bool
+
+
+class RecoverGraphCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: GraphRecoveryAction
+
+
+class ReconciliationGraphRecoveryRead(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    reconciliation: ReconciliationRead
+    task: TaskRead
+    graph: EffectGraphRead
+    replayed: bool
+    resumed: bool

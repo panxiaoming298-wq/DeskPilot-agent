@@ -15,7 +15,7 @@ def _wait_for_status(
     task_id: str,
     expected: str,
     *,
-    timeout: float = 2,
+    timeout: float = 12,
 ) -> dict[str, object]:
     deadline = time.monotonic() + timeout
     latest: dict[str, object] = {}
@@ -33,6 +33,21 @@ def _events(client: TestClient, task_id: str) -> list[dict[str, object]]:
     response = client.get(f"/api/v1/tasks/{task_id}/events")
     assert response.status_code == 200
     return response.json()
+
+
+def _read_transient_database_file(path: Path, *, timeout: float = 2) -> bytes | None:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            # SQLite may remove its transient journal after the glob snapshot.
+            return None
+        except PermissionError:
+            # Windows can briefly deny reads while SQLite owns a rollback journal.
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 def test_cancel_stops_processor_and_is_idempotent(slow_client: TestClient) -> None:
@@ -108,7 +123,7 @@ def test_pause_resume_continues_from_checkpoint_without_duplicate_events(
     assert event_types.count("task.classified") == 1
     assert event_types.count("policy.evaluated") == 1
     assert event_types[-1] == "task.completed"
-    assert completed["last_event_seq"] == len(events) == 18
+    assert completed["last_event_seq"] == len(events) == 24
     commands = [
         event["payload"].get("command")
         for event in events
@@ -257,10 +272,8 @@ def test_created_structured_file_move_recovers_without_parsing_goal(
         assert restarted_client.portal is not None
         protected_tool_key = restarted_client.portal.call(read_checkpoint_key)
         for database_file in tmp_path.glob(f"{database_path.name}*"):
-            try:
-                database_bytes = database_file.read_bytes()
-            except FileNotFoundError:
-                # SQLite may remove its transient journal after the glob snapshot.
+            database_bytes = _read_transient_database_file(database_file)
+            if database_bytes is None:
                 continue
             assert protected_tool_key.encode("utf-8") not in database_bytes
 

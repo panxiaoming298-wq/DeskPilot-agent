@@ -221,7 +221,7 @@ def _create_unknown(client: TestClient) -> tuple[str, dict[str, object]]:
     )
     assert created.status_code == 201
     task_id = str(created.json()["task_id"])
-    _wait_for_status(client, task_id, "failed")
+    _wait_for_status(client, task_id, "waiting_reconciliation")
     listed = client.get(
         "/api/v1/reconciliations",
         params={"status": "pending", "task_id": task_id},
@@ -267,7 +267,7 @@ def _create_receipted_unknown_move(
         json={"preview_hash": approval["preview_hash"], "scope": "once"},
     )
     assert approved.status_code == 200
-    _wait_for_status(client, task_id, "failed")
+    _wait_for_status(client, task_id, "waiting_reconciliation")
     assert not source.exists()
     assert destination.read_text(encoding="utf-8") == "receipt-bound compensation"
     reconciliation = client.get(
@@ -386,7 +386,7 @@ def test_reconciliation_receipts_survive_restart_and_never_blindly_replay(
         attempt_task_id = str(created_attempt.json()["task"]["task_id"])
         assert attempt_task_id != original_task_id
         assert created_attempt.json()["replayed"] is False
-        _wait_for_status(client, attempt_task_id, "failed")
+        _wait_for_status(client, attempt_task_id, "waiting_reconciliation")
         assert len(second_runner.calls) == 1
 
         replayed_attempt = client.post(
@@ -396,7 +396,7 @@ def test_reconciliation_receipts_survive_restart_and_never_blindly_replay(
         assert replayed_attempt.status_code == 201
         assert replayed_attempt.json()["replayed"] is True
         assert replayed_attempt.json()["task"]["task_id"] == attempt_task_id
-        assert replayed_attempt.json()["task"]["status"] == "failed"
+        assert replayed_attempt.json()["task"]["status"] == "waiting_reconciliation"
         assert len(second_runner.calls) == 1
 
         original_events = client.get(
@@ -491,7 +491,7 @@ def test_receipt_query_failure_is_sanitized_and_later_receipt_is_positive_eviden
             json={"preview_hash": approvals[0]["preview_hash"], "scope": "once"},
         )
         assert approved.status_code == 200
-        _wait_for_status(client, task_id, "failed")
+        _wait_for_status(client, task_id, "waiting_reconciliation")
         reconciliation = client.get(
             "/api/v1/reconciliations",
             params={"task_id": task_id},

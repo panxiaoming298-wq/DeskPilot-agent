@@ -10,6 +10,7 @@ from deskpilot.domain.policy import (
     ToolAuthorizationRequest,
 )
 from deskpilot.domain.tool_contracts import ToolRiskLevel
+from deskpilot.tools.computer import DISK_USAGE_CONTRACT
 from deskpilot.tools.files import (
     FILE_MOVE_CONTRACT,
     FILE_MOVE_DESTINATION_CAPABILITY,
@@ -33,6 +34,7 @@ class BuiltinPolicyEngine:
         allowed_capabilities: Iterable[str] = ("filesystem.metadata.read",),
         allowed_resource_scopes: Iterable[tuple[str, str]] = (),
         allow_user_selected_file_move: bool = False,
+        allow_user_selected_disk_usage: bool = False,
         require_approval_for_r0: bool = False,
         enable_r3: bool = False,
         policy_revision: str = DEFAULT_POLICY_REVISION,
@@ -41,6 +43,7 @@ class BuiltinPolicyEngine:
         self._allowed_capabilities = frozenset(allowed_capabilities)
         self._allowed_resource_scopes = frozenset(allowed_resource_scopes)
         self._allow_user_selected_file_move = allow_user_selected_file_move
+        self._allow_user_selected_disk_usage = allow_user_selected_disk_usage
         self._require_approval_for_r0 = require_approval_for_r0
         self._enable_r3 = enable_r3
         self._policy_revision = policy_revision
@@ -191,6 +194,22 @@ class BuiltinPolicyEngine:
         if all(
             resource.scope_key in self._allowed_resource_scopes
             for resource in request.resources
+        ):
+            return True
+        if (
+            self._allow_user_selected_disk_usage
+            and request.actor == "local_user"
+            and (request.tool_name, request.tool_version) == DISK_USAGE_CONTRACT.key
+            and request.contract_digest == DISK_USAGE_CONTRACT.digest
+            and request.risk_level is ToolRiskLevel.R0
+            and request.capabilities == DISK_USAGE_CONTRACT.security.capabilities
+            and len(request.resources) == 1
+            and request.resources[0].kind == "filesystem_path"
+            and request.resources[0].operations == DISK_USAGE_CONTRACT.security.capabilities
+            and not request.side_effects
+            and not request.reversible
+            and not request.network_access
+            and not request.data_egress
         ):
             return True
         if not self._allow_user_selected_file_move:

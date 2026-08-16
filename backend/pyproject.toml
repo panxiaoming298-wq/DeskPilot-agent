@@ -9,8 +9,10 @@ description = "DeskPilot local-first multi-agent control plane"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "aio-pika>=9.5,<10",
   "aiosqlite>=0.20,<1",
   "alembic>=1.14,<2",
+  "asyncpg>=0.30,<1",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
   "pydantic-settings>=2.7,<3",
@@ -33,6 +35,10 @@ packages = ["src/deskpilot"]
 addopts = "-q"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "postgresql_integration: opt-in tests requiring a dedicated PostgreSQL test database",
+  "rabbitmq_integration: opt-in tests requiring a dedicated loopback RabbitMQ test broker",
+]
 
 [tool.ruff]
 target-version = "py312"

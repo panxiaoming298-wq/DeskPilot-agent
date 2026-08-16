@@ -44,6 +44,13 @@ vi.mock('./components/ReconciliationCenter.vue', () => ({
   },
 }))
 
+vi.mock('./components/EffectRuntimeOperations.vue', () => ({
+  default: {
+    name: 'EffectRuntimeOperations',
+    template: '<section data-testid="runtime-operations-stub">受保护运行时运维</section>',
+  },
+}))
+
 vi.mock('./composables/useTaskEvents', () => ({
   useTaskEvents: eventComposableMocks.useTaskEvents,
 }))
@@ -280,6 +287,21 @@ describe('App task workspace', () => {
     expect(wrapper.text()).toContain('DURABLE EXECUTION LEDGER')
   })
 
+  it('从侧栏进入受保护运行时运维页', async () => {
+    const wrapper = mountApp()
+    const operationsNav = wrapper.findAll('nav button').find(
+      (button) => button.text().includes('运行时运维'),
+    )
+
+    expect(operationsNav).toBeDefined()
+    await operationsNav?.trigger('click')
+
+    expect(wrapper.find('[data-testid="runtime-operations-stub"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('用数据库真值观察并保护运行时')
+    expect(wrapper.text()).toContain('FENCED RUNTIME CONTROL PLANE')
+    expect(wrapper.text()).toContain('阶段 2 · 受保护运维')
+  })
+
   it('创建补偿后切换到新任务并重建事件与审批上下文', async () => {
     reconciliation.value = {} as Reconciliation
     const wrapper = mount(App, {
@@ -476,6 +498,47 @@ describe('App task workspace', () => {
         destination: 'D:\\archive\\draft.txt',
       },
     })
+  })
+
+  it('submits and presents the trusted disk-pressure conditional graph', async () => {
+    const wrapper = mountApp()
+    await wrapper.get('[data-testid="task-kind"]').setValue('disk_pressure_guarded_file_move')
+    await wrapper.get('[data-testid="source-path"]').setValue('D:\\input\\draft.txt')
+    await wrapper
+      .get('[data-testid="destination-path"]')
+      .setValue('D:\\archive\\draft.txt')
+    await wrapper.get('[data-testid="maximum-used-percent"]').setValue('72.5')
+    apiMocks.createTask.mockResolvedValueOnce(
+      makeTask('created', {
+        constraints: ['trusted_conditional_graph', 'no_overwrite', 'no_cloud'],
+      }),
+    )
+
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(apiMocks.createTask).toHaveBeenCalledWith({
+      goal: '验证 DeskPilot 前后端任务事件闭环',
+      privacy_mode: 'local_only',
+      constraints: ['trusted_conditional_graph', 'no_overwrite', 'no_cloud'],
+      tool_request: {
+        kind: 'disk_pressure_guarded_file_move',
+        source: 'D:\\input\\draft.txt',
+        destination: 'D:\\archive\\draft.txt',
+        maximum_used_percent: 72.5,
+      },
+    })
+
+    events.value = [
+      makeEvent(6, 'effect.branch.decided', {
+        decision_key: 'disk_pressure_route',
+        outcome: 'defer',
+      }),
+    ]
+    await nextTick()
+    expect(wrapper.get('[data-testid="branch-decision-summary"]').text()).toContain(
+      '压力过高，已安全推迟写入',
+    )
   })
 
   it('shows reconnect details, retries immediately, and then reports recovery', async () => {

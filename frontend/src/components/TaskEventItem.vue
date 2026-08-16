@@ -15,6 +15,8 @@ const eventMeta: Record<string, { label: string; tone: string }> = {
   'tool.failed': { label: '工具执行失败', tone: 'danger' },
   'tool.cancelled': { label: '工具执行已取消', tone: 'danger' },
   'tool.unknown': { label: '工具结果待核对', tone: 'danger' },
+  'effect.branch.decided': { label: '受信条件分支已决定', tone: 'active' },
+  'effect.node.skipped': { label: '未选分支已跳过', tone: 'neutral' },
   'approval.required': { label: '需要用户审批', tone: 'warning' },
   'approval.expired': { label: '审批已过期', tone: 'danger' },
   'approval.invalidated': { label: '审批授权已失效', tone: 'danger' },

@@ -90,14 +90,19 @@ class _RestartingRunner:
         )
 
 
-def _wait_for_terminal(client: TestClient, task_id: str) -> dict[str, object]:
+def _wait_for_stable(client: TestClient, task_id: str) -> dict[str, object]:
     deadline = time.monotonic() + 3
     snapshot: dict[str, object] = {}
     while time.monotonic() < deadline:
         response = client.get(f"/api/v1/tasks/{task_id}")
         assert response.status_code == 200
         snapshot = response.json()
-        if snapshot["status"] in {"succeeded", "failed", "cancelled"}:
+        if snapshot["status"] in {
+            "succeeded",
+            "failed",
+            "cancelled",
+            "waiting_reconciliation",
+        }:
             return snapshot
         time.sleep(0.01)
     raise AssertionError(f"Task did not finish; latest={snapshot}")
@@ -130,24 +135,24 @@ def test_lost_runner_call_becomes_unknown_without_replay_and_next_task_recovers(
         headers=headers,
     ) as client:
         first = client.post("/api/v1/tasks", json={"goal": "第一次调用丢失结果"}).json()
-        first_snapshot = _wait_for_terminal(client, str(first["task_id"]))
+        first_snapshot = _wait_for_stable(client, str(first["task_id"]))
         first_events = client.get(
             f"/api/v1/tasks/{first['task_id']}/events"
         ).json()
 
         second = client.post("/api/v1/tasks", json={"goal": "恢复后执行新任务"}).json()
-        second_snapshot = _wait_for_terminal(client, str(second["task_id"]))
+        second_snapshot = _wait_for_stable(client, str(second["task_id"]))
         second_events = client.get(
             f"/api/v1/tasks/{second['task_id']}/events"
         ).json()
 
     first_types = [event["type"] for event in first_events]
-    assert first_snapshot["status"] == "failed"
+    assert first_snapshot["status"] == "waiting_reconciliation"
     assert first_types.count("tool.requested") == 1
     assert first_types.count("tool.started") == 1
     assert first_types.count("tool.unknown") == 1
     assert "tool.completed" not in first_types
-    assert first_types[-1] == "task.failed"
+    assert first_types[-1] == "task.waiting_reconciliation"
     unknown = next(event for event in first_events if event["type"] == "tool.unknown")
     assert unknown["payload"]["runner_id"] == "runner-before-crash"
     assert unknown["payload"]["code"] == "RUNNER_EXITED"

@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "baseline_id": "ready-v6-membership-1000-nodes-pg17",
+  "captured_at": "2026-08-15T15:08:26.853589+00:00",
+  "workload": {
+    "graph_node_count": 1000,
+    "page_size": 100,
+    "sentinel_rows": 1,
+    "after_ordinal": 898,
+    "expected_rows": 101
+  },
+  "query_shape_sha256": "10491c6d239e67a6d9b1e969c5a2738e29e970685feba2eb6e6420c676407673",
+  "postgresql": {
+    "version": "PostgreSQL 17.10 (Debian 17.10-1.pgdg12+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit",
+    "server_version": "17.10 (Debian 17.10-1.pgdg12+1)",
+    "server_version_num": 170010
+  },
+  "comparison_policy": {
+    "execution_time_max_ratio": 5.0,
+    "execution_time_slack_ms": 5.0,
+    "scan_rows_max_ratio": 1.05,
+    "shared_blocks_max_ratio": 1.5,
+    "shared_blocks_slack": 32
+  },
+  "summary": {
+    "planning_time_ms": 0.316,
+    "execution_time_ms": 0.314,
+    "root_actual_rows": 101,
+    "scan_actual_rows": 202,
+    "rows_removed": 0,
+    "shared_hit_blocks": 310,
+    "shared_read_blocks": 0,
+    "shared_total_blocks": 310,
+    "index_names": [
+      "tool_effect_nodes_pkey",
+      "uq_effect_dag_ready_nodes_ordinal"
+    ],
+    "node_type_counts": {
+      "Index Scan": 2,
+      "Limit": 1,
+      "Nested Loop": 1
+    },
+    "scan_nodes": [
+      {
+        "node_type": "Index Scan",
+        "relation_name": "tool_effect_dag_ready_nodes",
+        "index_name": "uq_effect_dag_ready_nodes_ordinal",
+        "actual_rows": 101,
+        "actual_loops": 1
+      },
+      {
+        "node_type": "Index Scan",
+        "relation_name": "tool_effect_nodes",
+        "index_name": "tool_effect_nodes_pkey",
+        "actual_rows": 101,
+        "actual_loops": 101
+      }
+    ]
+  },
+  "plan": [
+    {
+      "Plan": {
+        "Node Type": "Limit",
+        "Parallel Aware": false,
+        "Async Capable": false,
+        "Startup Cost": 0.55,
+        "Total Cost": 14.37,
+        "Plan Rows": 1,
+        "Plan Width": 757,
+        "Actual Startup Time": 0.037,
+        "Actual Total Time": 0.279,
+        "Actual Rows": 101,
+        "Actual Loops": 1,
+        "Shared Hit Blocks": 310,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0,
+        "Plans": [
+          {
+            "Node Type": "Nested Loop",
+            "Parent Relationship": "Outer",
+            "Parallel Aware": false,
+            "Async Capable": false,
+            "Join Type": "Inner",
+            "Startup Cost": 0.55,
+            "Total Cost": 14.37,
+            "Plan Rows": 1,
+            "Plan Width": 757,
+            "Actual Startup Time": 0.036,
+            "Actual Total Time": 0.271,
+            "Actual Rows": 101,
+            "Actual Loops": 1,
+            "Inner Unique": true,
+            "Shared Hit Blocks": 310,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Plans": [
+              {
+                "Node Type": "Index Scan",
+                "Parent Relationship": "Outer",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Scan Direction": "Forward",
+                "Index Name": "uq_effect_dag_ready_nodes_ordinal",
+                "Relation Name": "tool_effect_dag_ready_nodes",
+                "Alias": "tool_effect_dag_ready_nodes",
+                "Startup Cost": 0.28,
+                "Total Cost": 6.05,
+                "Plan Rows": 1,
+                "Plan Width": 229,
+                "Actual Startup Time": 0.026,
+                "Actual Total Time": 0.077,
+                "Actual Rows": 101,
+                "Actual Loops": 1,
+                "Index Cond": "(((graph_id)::text = 'teg_03aab69dcd554ec3a48c38d0e6f56ce41c8c38ad646d4afbe043556a0bbce055'::text) AND (ordinal > 898))",
+                "Rows Removed by Index Recheck": 0,
+                "Filter": "(membership_ready IS TRUE)",
+                "Rows Removed by Filter": 0,
+                "Shared Hit Blocks": 7,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              {
+                "Node Type": "Index Scan",
+                "Parent Relationship": "Inner",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Scan Direction": "Forward",
+                "Index Name": "tool_effect_nodes_pkey",
+                "Relation Name": "tool_effect_nodes",
+                "Alias": "tool_effect_nodes",
+                "Startup Cost": 0.28,
+                "Total Cost": 8.29,
+                "Plan Rows": 1,
+                "Plan Width": 528,
+                "Actual Startup Time": 0.002,
+                "Actual Total Time": 0.002,
+                "Actual Rows": 1,
+                "Actual Loops": 101,
+                "Index Cond": "((node_id)::text = (tool_effect_dag_ready_nodes.node_id)::text)",
+                "Rows Removed by Index Recheck": 0,
+                "Shared Hit Blocks": 303,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              }
+            ]
+          }
+        ]
+      },
+      "Planning": {
+        "Shared Hit Blocks": 12,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      },
+      "Planning Time": 0.316,
+      "Triggers": [],
+      "Execution Time": 0.314
+    }
+  ]
+}

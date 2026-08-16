@@ -5,6 +5,7 @@ from typing import cast
 from fastapi import Request
 
 from deskpilot.api.problem_details import ProblemException
+from deskpilot.application.effect_runtime_operations import EffectRuntimeOperationsService
 from deskpilot.application.event_broker import EventBroker
 from deskpilot.application.model_gateway import ModelGateway
 from deskpilot.application.processor import TaskProcessor
@@ -25,6 +26,13 @@ def get_processor(request: Request) -> TaskProcessor:
 
 def get_event_broker(request: Request) -> EventBroker:
     return cast(EventBroker, request.app.state.event_broker)
+
+
+def get_effect_runtime_operations(request: Request) -> EffectRuntimeOperationsService:
+    return cast(
+        EffectRuntimeOperationsService,
+        request.app.state.effect_runtime_operations,
+    )
 
 
 def get_provider_catalog(request: Request) -> ProviderCatalogService:

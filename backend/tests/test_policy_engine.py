@@ -15,6 +15,11 @@ from deskpilot.domain.policy import (
     ToolAuthorizationRequest,
 )
 from deskpilot.domain.tool_contracts import ToolRiskLevel
+from deskpilot.tools.computer import (
+    DISK_USAGE_CONTRACT,
+    DiskUsageInput,
+    project_disk_usage_resources,
+)
 from deskpilot.tools.files import (
     FILE_MOVE_CONTRACT,
     FileMoveInput,
@@ -241,6 +246,46 @@ def test_user_selected_file_move_scope_requires_exact_local_user_facts(
     assert allowed.effect is PolicyEffect.REQUIRE_APPROVAL
     assert allowed.effective_risk is ToolRiskLevel.R1
     assert allowed.reason_code == "APPROVAL_REQUIRED"
+    assert model_attributed.effect is PolicyEffect.DENY
+    assert model_attributed.reason_code == "RESOURCE_SCOPE_DENIED"
+
+
+def test_user_selected_disk_usage_scope_requires_exact_local_user_contract(
+    tmp_path: Path,
+) -> None:
+    arguments = DiskUsageInput(path=str(tmp_path))
+    resources = project_disk_usage_resources(arguments)
+    request = ToolAuthorizationRequest(
+        task_id="tsk-disk-policy",
+        step_id="inspect-capacity",
+        call_id="call-disk-policy",
+        actor="local_user",
+        origin="builtin",
+        tool_name=DISK_USAGE_CONTRACT.name,
+        tool_version=DISK_USAGE_CONTRACT.version,
+        contract_digest=DISK_USAGE_CONTRACT.digest,
+        arguments_digest=sha256_digest(arguments),
+        risk_level=DISK_USAGE_CONTRACT.risk_level,
+        side_effects=DISK_USAGE_CONTRACT.side_effects,
+        reversible=DISK_USAGE_CONTRACT.reversible,
+        capabilities=DISK_USAGE_CONTRACT.security.capabilities,
+        network_access=False,
+        data_egress=False,
+        resources=resources,
+        expected_resource_versions_digest=sha256_digest({}),
+        interactive=True,
+        batch_count=1,
+    )
+    engine = BuiltinPolicyEngine(
+        allowed_capabilities=("filesystem.metadata.read",),
+        allow_user_selected_disk_usage=True,
+    )
+
+    allowed = engine.evaluate(request)
+    model_attributed = engine.evaluate(request.model_copy(update={"actor": "model:fake"}))
+
+    assert allowed.effect is PolicyEffect.ALLOW
+    assert allowed.reason_code == "DEFAULT_R0_ALLOW"
     assert model_attributed.effect is PolicyEffect.DENY
     assert model_attributed.reason_code == "RESOURCE_SCOPE_DENIED"
 

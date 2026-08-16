@@ -12,6 +12,7 @@ vi.mock('../api', async (importOriginal) => {
     listReconciliations: vi.fn(),
     listTasks: vi.fn(),
     refreshReconciliationEvidence: vi.fn(),
+    recoverReconciliationGraph: vi.fn(),
     resolveReconciliation: vi.fn(),
   }
 })
@@ -24,6 +25,7 @@ import {
   listReconciliations,
   listTasks,
   refreshReconciliationEvidence,
+  recoverReconciliationGraph,
   resolveReconciliation,
 } from '../api'
 import type { Reconciliation, Task } from '../types'
@@ -36,6 +38,7 @@ const getTaskMock = vi.mocked(getTask)
 const listReconciliationsMock = vi.mocked(listReconciliations)
 const listTasksMock = vi.mocked(listTasks)
 const refreshMock = vi.mocked(refreshReconciliationEvidence)
+const recoverGraphMock = vi.mocked(recoverReconciliationGraph)
 const resolveMock = vi.mocked(resolveReconciliation)
 
 function makeTask(taskId = 'task-1', overrides: Partial<Task> = {}): Task {
@@ -81,6 +84,10 @@ function makeReconciliation(
     resolved_by: null,
     unknown_at: '2026-08-10T00:00:01Z',
     resolved_at: null,
+    graph_recovery_status: 'not_applicable',
+    graph_recovery_action: null,
+    graph_recovery_event_id: null,
+    graph_recovered_at: null,
     can_create_attempt: false,
     new_attempt_task_id: null,
     new_attempt_created_at: null,
@@ -103,6 +110,7 @@ beforeEach(() => {
   listReconciliationsMock.mockReset()
   listTasksMock.mockReset()
   refreshMock.mockReset()
+  recoverGraphMock.mockReset()
   resolveMock.mockReset()
   keyMock.mockReturnValue('center-key')
   listTasksMock.mockResolvedValue({
@@ -269,5 +277,49 @@ describe('useReconciliationCenter', () => {
     expect(getTaskMock).not.toHaveBeenCalled()
     expect(await center.taskForNavigation('task-remote')).toEqual(remote)
     expect(getTaskMock).toHaveBeenCalledWith('task-remote')
+  })
+
+  it('图恢复失败时复用幂等键，成功后更新 reconciliation 和原任务', async () => {
+    const pending = makeReconciliation({
+      status: 'resolved',
+      outcome: 'confirmed_succeeded',
+      graph_recovery_status: 'pending',
+    })
+    const resumedTask = makeTask('task-1', { status: 'running' })
+    const applied = makeReconciliation({
+      ...pending,
+      graph_recovery_status: 'applied',
+      graph_recovery_action: 'continue',
+    })
+    listReconciliationsMock.mockResolvedValue([pending])
+    keyMock.mockReturnValue('recover-graph-key')
+    recoverGraphMock
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({
+        reconciliation: applied,
+        task: resumedTask,
+        graph: {
+          graph_id: 'graph-1',
+          task_id: 'task-1',
+          status: 'active',
+          fencing_token: 2,
+          revision: 8,
+        },
+        replayed: true,
+        resumed: true,
+      })
+    const center = useReconciliationCenter()
+    await flushPromises()
+
+    expect(await center.recoverGraph('continue')).toBeNull()
+    expect(await center.recoverGraph('continue')).toEqual(resumedTask)
+    expect(recoverGraphMock).toHaveBeenNthCalledWith(
+      2,
+      'reconciliation-1',
+      'continue',
+      'recover-graph-key',
+    )
+    expect(center.tasks.value[0]).toEqual(resumedTask)
+    expect(center.selected.value).toEqual(applied)
   })
 })

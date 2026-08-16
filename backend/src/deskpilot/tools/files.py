@@ -3,7 +3,9 @@
 import hashlib
 import os
 import stat
+from collections.abc import Callable
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from threading import Event
 
@@ -111,6 +113,21 @@ class FileMoveNoEffectError(ToolExecutorError):
     code = "TOOL_COMMIT_CONFIRMED_NO_EFFECT"
 
 
+class FileMoveCommitCheckpoint(StrEnum):
+    """Durable boundaries exposed to deterministic process-fault tests."""
+
+    PREPARED = "prepared"
+    COMMITTING = "committing"
+    EXTERNAL_EFFECT_APPLIED = "external_effect_applied"
+    COMMITTED = "committed"
+
+
+FileMoveCommitObserver = Callable[
+    [FileMoveCommitCheckpoint, PreparedCommitRecord],
+    None,
+]
+
+
 def _canonical_source(path: str) -> Path:
     candidate = Path(path).expanduser()
     try:
@@ -143,9 +160,10 @@ def _canonical_destination(path: str) -> Path:
 
 def _same_volume(source: Path, destination: Path) -> bool:
     if os.name == "nt":
-        return os.path.splitdrive(str(source))[0].casefold() == os.path.splitdrive(
-            str(destination)
-        )[0].casefold()
+        return (
+            os.path.splitdrive(str(source))[0].casefold()
+            == os.path.splitdrive(str(destination))[0].casefold()
+        )
     return source.stat().st_dev == destination.parent.stat().st_dev
 
 
@@ -266,6 +284,9 @@ class FileMoveCommitProvider:
 
     contract_key = FILE_MOVE_CONTRACT.key
 
+    def __init__(self, observer: FileMoveCommitObserver | None = None) -> None:
+        self._observer = observer
+
     def recover(self, store: CommitReceiptStore) -> None:
         for record in store.list_incomplete(*self.contract_key):
             self._recover_record(store, record)
@@ -303,9 +324,9 @@ class FileMoveCommitProvider:
         idempotency_key_digest = hashlib.sha256(
             call.request.idempotency_key.encode("utf-8")
         ).hexdigest()
-        receipt_id = f"cmt_{sha256_digest(
-            {'call_id': call.request.call_id, 'prepare': prepare_digest}
-        )}"
+        receipt_id = (
+            f"cmt_{sha256_digest({'call_id': call.request.call_id, 'prepare': prepare_digest})}"
+        )
         now = datetime.now(UTC)
         staged = PreparedCommitRecord(
             receipt_id=receipt_id,
@@ -333,6 +354,7 @@ class FileMoveCommitProvider:
             updated_at=now,
         )
         existing = store.stage(staged)
+        self._observe(FileMoveCommitCheckpoint.PREPARED, existing)
         if existing.state == "committed" and existing.receipt is not None:
             output = self._output(prepared, existing.receipt)
             boundary.mark_committing()
@@ -361,9 +383,7 @@ class FileMoveCommitProvider:
                     "The earlier file.move commit is proven to have produced no effect"
                 )
             boundary.mark_unknown()
-            raise FileMoveCommitUnknownError(
-                "The earlier file.move commit could not be reconciled"
-            )
+            raise FileMoveCommitUnknownError("The earlier file.move commit could not be reconciled")
 
         if cancellation.is_set():
             store.mark_no_effect(receipt_id)
@@ -381,10 +401,14 @@ class FileMoveCommitProvider:
             raise ToolExecutionCancelledError("file.move was cancelled before commit")
         commit_started_at = datetime.now(UTC)
         try:
-            store.mark_committing(receipt_id, commit_started_at=commit_started_at)
+            committing = store.mark_committing(
+                receipt_id,
+                commit_started_at=commit_started_at,
+            )
         except Exception:
             boundary.mark_no_effect()
             raise
+        self._observe(FileMoveCommitCheckpoint.COMMITTING, committing)
         try:
             _move_no_replace(Path(prepared.source), Path(prepared.destination))
         except Exception as error:
@@ -403,6 +427,7 @@ class FileMoveCommitProvider:
             raise FileMoveCommitUnknownError(
                 "file.move failed after crossing the commit boundary"
             ) from error
+        self._observe(FileMoveCommitCheckpoint.EXTERNAL_EFFECT_APPLIED, committing)
 
         destination_version = read_file_version(prepared.destination)
         if destination_version != prepared.source_version:
@@ -416,7 +441,8 @@ class FileMoveCommitProvider:
             commit_started_at=commit_started_at,
             recorded_at=datetime.now(UTC),
         )
-        store.mark_committed(receipt)
+        committed = store.mark_committed(receipt)
+        self._observe(FileMoveCommitCheckpoint.COMMITTED, committed)
         output = self._output(prepared, receipt)
         boundary.mark_committed(output, receipt)
         return output
@@ -463,9 +489,7 @@ class FileMoveCommitProvider:
         if source != Path(prepared.source) or destination != Path(prepared.destination):
             raise FileMoveValidationError("file.move canonical paths changed after prepare")
         if read_file_version(source) != prepared.source_version:
-            raise FileMoveStaleResourceError(
-                "file.move source changed after approval"
-            )
+            raise FileMoveStaleResourceError("file.move source changed after approval")
         if not _same_volume(source, destination):
             raise FileMoveValidationError("file.move destination volume changed")
 
@@ -504,6 +528,14 @@ class FileMoveCommitProvider:
             if source_version == prepared.source_version:
                 return store.mark_no_effect(record.receipt_id)
         return store.mark_unknown(record.receipt_id)
+
+    def _observe(
+        self,
+        checkpoint: FileMoveCommitCheckpoint,
+        record: PreparedCommitRecord,
+    ) -> None:
+        if self._observer is not None:
+            self._observer(checkpoint, record)
 
     @staticmethod
     def _receipt(
@@ -555,6 +587,8 @@ FILE_MOVE_COMMIT_PROVIDER = FileMoveCommitProvider()
 __all__ = [
     "FILE_MOVE_COMMIT_PROVIDER",
     "FILE_MOVE_CONTRACT",
+    "FileMoveCommitCheckpoint",
+    "FileMoveCommitProvider",
     "FileMoveInput",
     "FileMoveOutput",
     "FileMovePrepare",

@@ -446,7 +446,9 @@ async def test_requested_call_admission_failure_atomically_fails_task(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_unknown_result_and_task_failure_commit_atomically(tmp_path: Path) -> None:
+async def test_unknown_result_and_waiting_reconciliation_commit_atomically(
+    tmp_path: Path,
+) -> None:
     database, service = await _service(tmp_path)
     try:
         task_id = await _running_task(service, "uncertain call")
@@ -466,12 +468,15 @@ async def test_unknown_result_and_task_failure_commit_atomically(tmp_path: Path)
             resolution_source="control_plane",
         )
 
-        assert [event.type for event in events] == ["tool.unknown", "task.failed"]
+        assert [event.type for event in events] == [
+            "tool.unknown",
+            "task.waiting_reconciliation",
+        ]
         assert events[0].payload["requires_reconciliation"] is True
         assert events[0].payload["retryable"] is False
         assert events[1].payload["code"] == "TOOL_RESULT_UNKNOWN"
         task = await service.get_task(task_id)
-        assert task.status is TaskStatus.FAILED
+        assert task.status is TaskStatus.WAITING_RECONCILIATION
         async with database.session() as session:
             call = await session.get(ToolCallRecord, "call-unknown")
             reconciliation = await session.scalar(
@@ -550,7 +555,7 @@ async def test_unknown_transition_rolls_back_ledger_events_outbox_and_task(
         original_to_outbox = TaskService._to_outbox
 
         def fail_task_outbox(event: object) -> OutboxMessageRecord:
-            if getattr(event, "type", None) == "task.failed":
+            if getattr(event, "type", None) == "task.waiting_reconciliation":
                 raise RuntimeError("injected task outbox failure")
             return original_to_outbox(event)  # type: ignore[arg-type]
 
@@ -575,7 +580,9 @@ async def test_unknown_transition_rolls_back_ledger_events_outbox_and_task(
                 .select_from(TaskEventRecord)
                 .where(
                     TaskEventRecord.task_id == task_id,
-                    TaskEventRecord.type.in_(("tool.unknown", "task.failed")),
+                    TaskEventRecord.type.in_(
+                        ("tool.unknown", "task.waiting_reconciliation")
+                    ),
                 )
             )
         after = await service.get_task(task_id)
@@ -624,7 +631,7 @@ async def test_startup_recovery_is_atomic_and_idempotent_for_requested_and_runni
 
         assert recovered.requested_failed == 1
         assert recovered.running_unknown == 1
-        assert recovered.tasks_failed == 2
+        assert recovered.tasks_failed == 1
         assert recovered.events_created == 4
         assert requested_events[-2].type == "tool.failed"
         assert requested_events[-2].payload["code"] == ("TOOL_CALL_NOT_DISPATCHED_AFTER_RESTART")
@@ -632,7 +639,7 @@ async def test_startup_recovery_is_atomic_and_idempotent_for_requested_and_runni
         assert requested_events[-1].payload["code"] == ("TOOL_CALL_INTERRUPTED_BEFORE_DISPATCH")
         assert running_events[-2].type == "tool.unknown"
         assert running_events[-2].payload["code"] == ("TOOL_RESULT_UNCERTAIN_AFTER_RESTART")
-        assert running_events[-1].type == "task.failed"
+        assert running_events[-1].type == "task.waiting_reconciliation"
         assert running_events[-1].payload["code"] == "TOOL_RESULT_UNKNOWN"
         assert repeated.requested_failed == 0
         assert repeated.running_unknown == 0
@@ -673,7 +680,10 @@ async def test_startup_recovery_is_atomic_and_idempotent_for_requested_and_runni
         assert running_reconciliation is not None
         assert running_call.status == "unknown"
         assert running_call.resolution_source == "startup_recovery"
-        assert {task.status for task in tasks} == {"failed"}
+        assert {task.status for task in tasks} == {
+            "failed",
+            "waiting_reconciliation",
+        }
     finally:
         await database.dispose()
 
@@ -711,6 +721,57 @@ async def test_tool_idempotency_receipt_blocks_cross_task_key_reuse(
                 (await session.scalars(select(ToolIdempotencyReceiptRecord))).all()
             )
         assert [receipt.call_id for receipt in receipts] == ["call-key-owner"]
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_tool_idempotency_unique_race_becomes_one_domain_conflict(
+    tmp_path: Path,
+) -> None:
+    database, first = await _service(tmp_path, "tool-key-race.db")
+    second = TaskService(database, "/api/v1")
+    try:
+        first_task = await _running_task(first, "first concurrent key owner")
+        second_task = await _running_task(first, "second concurrent key owner")
+
+        results = await asyncio.gather(
+            first.record_tool_requested(
+                first_task,
+                call_id="call-key-race-first",
+                step_id="step-1",
+                tool_name="computer.disk_usage",
+                tool_version="1.0.0",
+                contract_digest=CONTRACT_DIGEST,
+                arguments={"path": "."},
+                idempotency=ToolIdempotency.KEY_REQUIRED,
+                idempotency_key="shared-concurrent-key",
+            ),
+            second.record_tool_requested(
+                second_task,
+                call_id="call-key-race-second",
+                step_id="step-1",
+                tool_name="computer.disk_usage",
+                tool_version="1.0.0",
+                contract_digest=CONTRACT_DIGEST,
+                arguments={"path": "different"},
+                idempotency=ToolIdempotency.KEY_REQUIRED,
+                idempotency_key="shared-concurrent-key",
+            ),
+            return_exceptions=True,
+        )
+
+        assert sum(not isinstance(result, Exception) for result in results) == 1
+        conflicts = [
+            result
+            for result in results
+            if isinstance(result, ToolIdempotencyKeyAlreadyUsedError)
+        ]
+        assert len(conflicts) == 1
+        assert conflicts[0].existing_call_id in {
+            "call-key-race-first",
+            "call-key-race-second",
+        }
     finally:
         await database.dispose()
 
@@ -760,13 +821,15 @@ async def test_reconciliation_verdict_and_explicit_attempt_are_durable_and_idemp
                 idempotency_key="resolve-no-effect-key",
             )
 
+        second_instance = TaskService(database, "/api/v1")
+        command_instances = (service, second_instance, service, second_instance)
         concurrent_attempts = await asyncio.gather(
             *(
-                service.create_reconciliation_attempt(
+                command_service.create_reconciliation_attempt(
                     reconciliation_id,
                     idempotency_key="create-explicit-attempt-key",
                 )
-                for _ in range(4)
+                for command_service in command_instances
             )
         )
         attempt = next(result for result in concurrent_attempts if not result.replayed)
@@ -912,6 +975,8 @@ async def test_new_attempt_rolls_back_task_lineage_outbox_and_receipt_together(
                 select(func.count()).select_from(TaskRecord)
             )
         assert task_count == 1
-        assert (await service.get_task(original_task_id)).status is TaskStatus.FAILED
+        assert (
+            await service.get_task(original_task_id)
+        ).status is TaskStatus.WAITING_RECONCILIATION
     finally:
         await database.dispose()

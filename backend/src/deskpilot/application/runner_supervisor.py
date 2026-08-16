@@ -58,6 +58,8 @@ class RunnerClientPort(Protocol):
 
     async def wait_for_failure(self) -> RunnerClientError: ...
 
+    async def cancel_call(self, call_id: str, reason: str) -> None: ...
+
     async def call_tool(
         self,
         *,
@@ -181,8 +183,7 @@ class RunnerSupervisor:
         lease = self._lease
         return (
             lease is not None
-            and self._state
-            in {RunnerSupervisorState.READY, RunnerSupervisorState.HALF_OPEN}
+            and self._state in {RunnerSupervisorState.READY, RunnerSupervisorState.HALF_OPEN}
             and lease.client.is_running
         )
 
@@ -200,16 +201,10 @@ class RunnerSupervisor:
             consecutive_failures=self._consecutive_failures,
             total_failures=self._total_failures,
             next_retry_at_monotonic=next_retry_at,
-            retry_in_seconds=(
-                max(0.0, next_retry_at - now) if next_retry_at is not None else None
-            ),
+            retry_in_seconds=(max(0.0, next_retry_at - now) if next_retry_at is not None else None),
             stable_since_monotonic=stable_since,
-            stable_for_seconds=(
-                max(0.0, now - stable_since) if stable_since is not None else None
-            ),
-            last_failure_code=(
-                self._last_failure.code if self._last_failure is not None else None
-            ),
+            stable_for_seconds=(max(0.0, now - stable_since) if stable_since is not None else None),
+            last_failure_code=(self._last_failure.code if self._last_failure is not None else None),
         )
 
     async def start(self) -> None:
@@ -220,9 +215,7 @@ class RunnerSupervisor:
                 self._stopping = False
                 self._first_attempt_complete = asyncio.Event()
                 self._state = RunnerSupervisorState.STARTING
-                lifecycle = asyncio.create_task(
-                    self._run_lifecycle(), name="runner-supervisor"
-                )
+                lifecycle = asyncio.create_task(self._run_lifecycle(), name="runner-supervisor")
                 self._lifecycle_task = lifecycle
             first_attempt_complete = self._first_attempt_complete
         await first_attempt_complete.wait()
@@ -248,16 +241,13 @@ class RunnerSupervisor:
             self._stable_since = None
             self._first_attempt_complete.set()
 
-    def ensure_ready(
-        self, *, expected_runner_id: str | None = None
-    ) -> RunnerLease:
+    def ensure_ready(self, *, expected_runner_id: str | None = None) -> RunnerLease:
         lease = self._lease
         if self._state is RunnerSupervisorState.OPEN:
             raise RunnerCircuitOpenError("Tool Runner recovery circuit is open")
         if (
             lease is None
-            or self._state
-            not in {RunnerSupervisorState.READY, RunnerSupervisorState.HALF_OPEN}
+            or self._state not in {RunnerSupervisorState.READY, RunnerSupervisorState.HALF_OPEN}
             or not lease.client.is_running
         ):
             raise RunnerSupervisorUnavailableError(
@@ -312,6 +302,17 @@ class RunnerSupervisor:
             call_id,
             timeout_seconds=timeout_seconds,
         )
+
+    async def cancel_call(
+        self,
+        call_id: str,
+        reason: str,
+        *,
+        expected_runner_id: str | None = None,
+    ) -> None:
+        """Send cancellation only to the generation that owns the durable call."""
+        lease = self.ensure_ready(expected_runner_id=expected_runner_id)
+        await lease.client.cancel_call(call_id, reason)
 
     async def _run_lifecycle(self) -> None:
         half_open_attempt = False
@@ -376,9 +377,7 @@ class RunnerSupervisor:
                     self._lease = None
                 self._stable_since = None
                 self._record_failure(failure)
-                self._state = self._recovery_state(
-                    force_open=failed_while_half_open
-                )
+                self._state = self._recovery_state(force_open=failed_while_half_open)
                 await self._safe_stop(client)
                 half_open_attempt = await self._wait_before_restart(
                     force_open=failed_while_half_open
@@ -437,17 +436,13 @@ class RunnerSupervisor:
                     task.cancel()
             await asyncio.gather(failure_task, stable_task, return_exceptions=True)
 
-    def _failure_task_result(
-        self, task: asyncio.Task[RunnerClientError]
-    ) -> RunnerClientError:
+    def _failure_task_result(self, task: asyncio.Task[RunnerClientError]) -> RunnerClientError:
         try:
             return task.result()
         except RunnerClientError as error:
             return error
         except Exception as error:
-            return RunnerUnavailableError(
-                f"Runner failure monitor failed: {type(error).__name__}"
-            )
+            return RunnerUnavailableError(f"Runner failure monitor failed: {type(error).__name__}")
 
     def _record_failure(self, failure: RunnerClientError) -> None:
         self._last_failure = failure
@@ -474,10 +469,7 @@ class RunnerSupervisor:
         return next_attempt_half_open
 
     def _recovery_state(self, *, force_open: bool) -> RunnerSupervisorState:
-        if (
-            force_open
-            or self._consecutive_failures >= self._circuit_failure_threshold
-        ):
+        if force_open or self._consecutive_failures >= self._circuit_failure_threshold:
             return RunnerSupervisorState.OPEN
         return RunnerSupervisorState.BACKOFF
 
@@ -492,6 +484,4 @@ class RunnerSupervisor:
     def _normalize_failure(error: Exception) -> RunnerClientError:
         if isinstance(error, RunnerClientError):
             return error
-        return RunnerStartupError(
-            f"Tool Runner startup raised {type(error).__name__}"
-        )
+        return RunnerStartupError(f"Tool Runner startup raised {type(error).__name__}")

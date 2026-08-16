@@ -5,6 +5,7 @@ const TASK_STATUSES: ReadonlySet<TaskStatus> = new Set([
   'classifying',
   'running',
   'waiting_approval',
+  'waiting_reconciliation',
   'succeeded',
   'failed',
   'cancelled',
@@ -27,6 +28,9 @@ function eventStatus(event: TaskEvent): TaskStatus | null {
   }
   if (event.type === 'task.cancelled') {
     return 'cancelled'
+  }
+  if (event.type === 'task.waiting_reconciliation') {
+    return 'waiting_reconciliation'
   }
 
   return null

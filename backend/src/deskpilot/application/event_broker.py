@@ -5,6 +5,7 @@ from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from deskpilot.domain.messaging import OutboxDeliveryEnvelope
 from deskpilot.domain.schemas import TaskEventRead
 
 
@@ -41,3 +42,9 @@ class EventBroker:
                 except asyncio.QueueEmpty:
                     pass
             queue.put_nowait(event)
+
+    async def publish_delivery(self, delivery: OutboxDeliveryEnvelope) -> None:
+        """Accept a durable envelope while preserving the existing WebSocket payload."""
+        if delivery.topic != "task.event":
+            raise ValueError(f"Unsupported delivery topic: {delivery.topic}")
+        await self.publish(TaskEventRead.model_validate(delivery.payload))

@@ -9,10 +9,12 @@ import {
   listReconciliations,
   listTasks,
   refreshReconciliationEvidence,
+  recoverReconciliationGraph,
   resolveReconciliation,
 } from '../api'
 import type {
   Reconciliation,
+  GraphRecoveryAction,
   ReconciliationOutcome,
   ReconciliationStatus,
   Task,
@@ -21,7 +23,12 @@ import type {
 
 type ReconciliationFilter = ReconciliationStatus | 'all'
 type TaskFilter = TaskStatus | 'all'
-type CenterAction = 'attempt' | 'compensation' | 'resolve'
+type CenterAction =
+  | 'attempt'
+  | 'compensation'
+  | 'resolve'
+  | 'recover_continue'
+  | 'recover_terminate'
 
 interface ResolveRetry {
   reconciliationId: string
@@ -107,6 +114,14 @@ export function useReconciliationCenter() {
       snapshot,
       ...tasks.value.filter((item) => item.task_id !== snapshot.task_id),
     ].slice(0, PAGE_SIZE)
+  }
+
+  function replaceTask(snapshot: Task): void {
+    const index = tasks.value.findIndex((item) => item.task_id === snapshot.task_id)
+    if (index < 0) return
+    const next = [...tasks.value]
+    next[index] = snapshot
+    tasks.value = next
   }
 
   async function reload(): Promise<void> {
@@ -286,6 +301,50 @@ export function useReconciliationCenter() {
     }
   }
 
+  async function recoverGraph(action: GraphRecoveryAction): Promise<Task | null> {
+    const current = selected.value
+    if (
+      !current
+      || current.status !== 'resolved'
+      || current.graph_recovery_status !== 'pending'
+      || (
+        action === 'continue'
+        && !['confirmed_succeeded', 'confirmed_no_effect'].includes(current.outcome ?? '')
+      )
+      || activeAction.value !== null
+    ) return null
+    const centerAction = action === 'continue'
+      ? 'recover_continue'
+      : 'recover_terminate'
+    const scope = `${centerAction}:${current.reconciliation_id}`
+    activeAction.value = centerAction
+    message.value = null
+    error.value = null
+    try {
+      const result = await recoverReconciliationGraph(
+        current.reconciliation_id,
+        action,
+        actionKey(centerAction, current.reconciliation_id),
+      )
+      if (selectedId.value !== current.reconciliation_id) return null
+      replaceReconciliation(result.reconciliation)
+      replaceTask(result.task)
+      actionKeys.delete(scope)
+      message.value = result.replayed
+        ? '已恢复先前提交的图恢复命令。'
+        : result.resumed
+          ? '原 effect graph 已按裁决恢复执行。'
+          : '原 effect graph 已终止，不会重放 unknown call。'
+      return result.task
+    } catch (caught) {
+      if (selectedId.value !== current.reconciliation_id) return null
+      error.value = `提交图恢复命令失败：${originalErrorMessage(caught)}`
+      return null
+    } finally {
+      activeAction.value = null
+    }
+  }
+
   async function taskForNavigation(taskId: string): Promise<Task | null> {
     const cached = tasks.value.find((item) => item.task_id === taskId)
     if (cached) return cached
@@ -340,6 +399,7 @@ export function useReconciliationCenter() {
     resolveSelected,
     createAttempt,
     createCompensation,
+    recoverGraph,
     taskForNavigation,
     previousTasks,
     nextTasks,

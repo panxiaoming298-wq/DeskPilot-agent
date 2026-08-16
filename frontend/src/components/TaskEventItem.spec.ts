@@ -68,4 +68,18 @@ describe('TaskEventItem', () => {
     expect(wrapper.text()).toContain('agent.custom_event')
     expect(wrapper.attributes('data-tone')).toBe('neutral')
   })
+
+  it('明确展示受信条件决定事件', () => {
+    const wrapper = mount(TaskEventItem, {
+      props: {
+        event: makeEvent('effect.branch.decided', {
+          decision_key: 'disk_pressure_route',
+          outcome: 'move',
+        }),
+      },
+    })
+
+    expect(wrapper.text()).toContain('受信条件分支已决定')
+    expect(wrapper.attributes('data-tone')).toBe('active')
+  })
 })

@@ -15,6 +15,8 @@ import type {
   ReconciliationAttemptResponse,
   ReconciliationCompensationResponse,
   ReconciliationEvidenceRefreshResponse,
+  GraphRecoveryAction,
+  ReconciliationGraphRecoveryResponse,
   ReconciliationOutcome,
   ReconciliationResolutionResponse,
   ReconciliationStatus,
@@ -23,6 +25,13 @@ import type {
   TaskControlCommand,
   TaskCreate,
   TaskHistoryPage,
+  EffectRuntimeAuditPage,
+  EffectRuntimeAuditExportPage,
+  EffectRuntimeOperationsSnapshot,
+  MetricsAuditResult,
+  OutboxRequeueResult,
+  OperationsAlertNotificationPage,
+  RetentionRunResult,
 } from './types'
 
 const configuredBase = (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, '')
@@ -264,6 +273,21 @@ export function resolveReconciliation(
   )
 }
 
+export function recoverReconciliationGraph(
+  reconciliationId: string,
+  action: GraphRecoveryAction,
+  idempotencyKey: string,
+): Promise<ReconciliationGraphRecoveryResponse> {
+  return request<ReconciliationGraphRecoveryResponse>(
+    `/api/v1/reconciliations/${encodeURIComponent(reconciliationId)}:recover-graph`,
+    {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify({ action }),
+    },
+  )
+}
+
 export function createReconciliationAttempt(
   reconciliationId: string,
   idempotencyKey: string,
@@ -434,5 +458,90 @@ export function deleteProvider(
 export function checkProviderHealth(providerId: string): Promise<ProviderHealthSnapshot> {
   return request<ProviderHealthSnapshot>(
     `/api/v1/model-providers/${encodeURIComponent(providerId)}/health`,
+  )
+}
+
+export function getEffectRuntimeOperations(
+  sampleLimit = 50,
+): Promise<EffectRuntimeOperationsSnapshot> {
+  const query = new URLSearchParams({ sample_limit: String(sampleLimit) })
+  return request<EffectRuntimeOperationsSnapshot>(
+    `/api/v1/operations/effect-runtime?${query}`,
+    { cache: 'no-store' },
+  )
+}
+
+export function getEffectRuntimeAudit(
+  afterSequence = 0,
+  limit = 100,
+): Promise<EffectRuntimeAuditPage> {
+  const query = new URLSearchParams({
+    after_sequence: String(afterSequence),
+    limit: String(limit),
+  })
+  return request<EffectRuntimeAuditPage>(
+    `/api/v1/operations/effect-runtime/audit?${query}`,
+    { cache: 'no-store' },
+  )
+}
+
+export function getEffectRuntimeAlertNotifications(
+  afterSequence = 0,
+  limit = 100,
+): Promise<OperationsAlertNotificationPage> {
+  const query = new URLSearchParams({
+    after_sequence: String(afterSequence),
+    limit: String(limit),
+  })
+  return request<OperationsAlertNotificationPage>(
+    `/api/v1/operations/effect-runtime/alerts?${query}`,
+    { cache: 'no-store' },
+  )
+}
+
+export function getEffectRuntimeAuditExport(
+  cursor: string | null = null,
+  limit = 500,
+): Promise<EffectRuntimeAuditExportPage> {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (cursor) query.set('cursor', cursor)
+  return request<EffectRuntimeAuditExportPage>(
+    `/api/v1/operations/effect-runtime/audit/export?${query}`,
+    { cache: 'no-store' },
+  )
+}
+
+export function sampleEffectRuntimeMetrics(sampleLimit = 50): Promise<MetricsAuditResult> {
+  const query = new URLSearchParams({ sample_limit: String(sampleLimit) })
+  return request<MetricsAuditResult>(
+    `/api/v1/operations/effect-runtime:sample?${query}`,
+    { method: 'POST' },
+  )
+}
+
+export function runEffectRuntimeRetention(
+  retentionDays: number | null,
+  idempotencyKey: string,
+): Promise<RetentionRunResult> {
+  return request<RetentionRunResult>(
+    '/api/v1/operations/effect-runtime:run-retention',
+    {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify({ retention_days: retentionDays }),
+    },
+  )
+}
+
+export function requeueOutboxDeadLetter(
+  messageId: string,
+  idempotencyKey: string,
+): Promise<OutboxRequeueResult> {
+  return request<OutboxRequeueResult>(
+    `/api/v1/operations/outbox/${encodeURIComponent(messageId)}:requeue`,
+    {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+    },
   )
 }

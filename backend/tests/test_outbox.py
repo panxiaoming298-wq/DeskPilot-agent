@@ -1,8 +1,9 @@
 import asyncio
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from deskpilot.application.event_broker import EventBroker
@@ -14,6 +15,7 @@ from deskpilot.infrastructure.models import (
     OutboxMessageRecord,
     TaskEventRecord,
     TaskRecord,
+    utc_now,
 )
 
 
@@ -229,4 +231,63 @@ async def test_control_transition_writes_event_and_outbox_atomically(tmp_path: P
     assert cancelled.status is TaskStatus.CANCELLED
     assert [event.type for event in events] == ["task.created", "task.cancelled"]
     assert [message.event_id for message in messages] == [event.event_id for event in events]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_two_publishers_claim_one_message_only_once(tmp_path: Path) -> None:
+    database = Database(_database_url(tmp_path / "multi-instance.db"))
+    await database.migrate()
+    service = TaskService(database, "/api/v1")
+    task = await service.create_task(TaskCreate(goal="multi-instance outbox claim"))
+    broker = RecordingBroker(expected_count=1)
+    first = OutboxPublisher(database, broker, instance_id="publisher_first")
+    second = OutboxPublisher(database, broker, instance_id="publisher_second")
+
+    results = await asyncio.gather(
+        first.publish_pending(),
+        second.publish_pending(),
+    )
+
+    assert sum(result.attempted for result in results) == 1
+    assert sum(result.published for result in results) == 1
+    assert [event.task_id for event in broker.published] == [task.task_id]
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_expired_outbox_claim_is_reclaimed_and_stale_fence_cannot_ack(
+    tmp_path: Path,
+) -> None:
+    database = Database(_database_url(tmp_path / "outbox-fence.db"))
+    await database.migrate()
+    service = TaskService(database, "/api/v1")
+    task = await service.create_task(TaskCreate(goal="outbox fence takeover"))
+    broker = RecordingBroker(expected_count=1)
+    stale = OutboxPublisher(database, broker, instance_id="publisher_stale")
+    current = OutboxPublisher(database, broker, instance_id="publisher_current")
+
+    stale_claims = await stale._claim_batch()
+    assert len(stale_claims) == 1
+    async with database.session() as session:
+        async with session.begin():
+            await session.execute(
+                update(OutboxMessageRecord)
+                .where(OutboxMessageRecord.task_id == task.task_id)
+                .values(claim_expires_at=utc_now() - timedelta(seconds=1))
+            )
+
+    result = await current.publish_pending()
+    assert (result.attempted, result.published, result.fenced) == (1, 1, 0)
+    assert not await stale._mark_published(stale_claims[0])
+
+    async with database.session() as session:
+        message = await session.scalar(
+            select(OutboxMessageRecord).where(
+                OutboxMessageRecord.task_id == task.task_id
+            )
+        )
+        assert message is not None
+        assert message.published_at is not None
+        assert message.claim_fencing_token == 2
     await database.dispose()

@@ -196,6 +196,7 @@ select {
 }
 .status-pill[data-status="running"], .status-pill[data-status="classifying"] { color: #9fb8ff; border-color: rgba(87, 130, 255, 0.28); }
 .status-pill[data-status="waiting_approval"] { color: #f0cb84; border-color: rgba(234, 185, 104, 0.32); background: rgba(112, 80, 30, 0.14); }
+.status-pill[data-status="waiting_reconciliation"] { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.34); background: rgba(91, 59, 166, 0.16); }
 .status-pill[data-status="paused"] { color: #e8c887; border-color: rgba(234, 185, 104, 0.28); }
 .status-pill[data-status="succeeded"] { color: #8fe3c5; border-color: rgba(42, 211, 158, 0.25); }
 .status-pill[data-status="failed"] { color: #ff9c9c; border-color: rgba(255, 99, 99, 0.25); }

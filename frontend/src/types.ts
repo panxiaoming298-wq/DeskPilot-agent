@@ -3,6 +3,7 @@ export type TaskStatus =
   | 'classifying'
   | 'running'
   | 'waiting_approval'
+  | 'waiting_reconciliation'
   | 'succeeded'
   | 'failed'
   | 'cancelled'
@@ -20,6 +21,13 @@ export interface FileMoveToolRequest {
   destination: string
 }
 
+export interface DiskPressureGuardedFileMoveToolRequest {
+  kind: 'disk_pressure_guarded_file_move'
+  source: string
+  destination: string
+  maximum_used_percent: number
+}
+
 export type TaskStreamState =
   | 'idle'
   | 'connecting'
@@ -34,7 +42,7 @@ export interface TaskCreate {
   goal: string
   privacy_mode: 'local_only' | 'local_preferred' | 'balanced' | 'quality_first'
   constraints: string[]
-  tool_request?: FileMoveToolRequest | null
+  tool_request?: FileMoveToolRequest | DiskPressureGuardedFileMoveToolRequest | null
 }
 
 export interface Task {
@@ -133,6 +141,8 @@ export interface ApprovalResolutionResponse {
 }
 
 export type ReconciliationStatus = 'pending' | 'resolved'
+export type GraphRecoveryStatus = 'not_applicable' | 'pending' | 'applied'
+export type GraphRecoveryAction = 'continue' | 'terminate'
 export type ReconciliationOutcome =
   | 'confirmed_succeeded'
   | 'confirmed_failed'
@@ -202,6 +212,10 @@ export interface Reconciliation {
   resolved_by: string | null
   unknown_at: string
   resolved_at: string | null
+  graph_recovery_status: GraphRecoveryStatus
+  graph_recovery_action: GraphRecoveryAction | null
+  graph_recovery_event_id: string | null
+  graph_recovered_at: string | null
   can_create_attempt: boolean
   new_attempt_task_id: string | null
   new_attempt_created_at: string | null
@@ -235,6 +249,22 @@ export interface ReconciliationAttemptResponse {
   reconciliation: Reconciliation
   task: Task
   replayed: boolean
+}
+
+export interface EffectGraphRecoverySnapshot {
+  graph_id: string
+  task_id: string
+  status: string
+  fencing_token: number
+  revision: number
+}
+
+export interface ReconciliationGraphRecoveryResponse {
+  reconciliation: Reconciliation
+  task: Task
+  graph: EffectGraphRecoverySnapshot
+  replayed: boolean
+  resumed: boolean
 }
 
 export interface PlanStep {
@@ -421,4 +451,238 @@ export interface ModelGatewayRoutingSnapshot {
   active_task_budget_count: number
   routes: ModelRoleRouteSnapshot[]
   providers: ModelProviderRoutingSnapshot[]
+}
+
+export type OperationsAlertSeverity = 'warning' | 'critical'
+
+export interface OperationsAlert {
+  code: string
+  severity: OperationsAlertSeverity
+  domain: string
+  count: number
+}
+
+export type OperationsAlertTransition = 'opened' | 'updated' | 'resolved'
+
+export interface OperationsAlertNotification {
+  notification_id: string
+  sequence: number
+  alert_code: string
+  transition: OperationsAlertTransition
+  severity: OperationsAlertSeverity
+  domain: string
+  count: number
+  alert_revision: number
+  snapshot_digest: string
+  audit_event_id: string
+  audit_sequence: number
+  previous_event_digest: string | null
+  event_digest: string
+  occurred_at: string
+}
+
+export interface OperationsAlertNotificationPage {
+  notifications: OperationsAlertNotification[]
+  next_after_sequence: number
+  has_more: boolean
+}
+
+export interface GraphControlOperationsMetrics {
+  total: number
+  pending: number
+  processing: number
+  applied: number
+  superseded: number
+  actionable: number
+  claim_expired: number
+  unrouted: number
+  oldest_actionable_at: string | null
+}
+
+export interface AdmissionOperationsMetrics {
+  total: number
+  pending: number
+  granted: number
+  released: number
+  cancelled: number
+  withdrawn: number
+  expired: number
+  live_pending: number
+  live_granted: number
+  expired_leases: number
+  scheduler_revision: number
+  next_grant_sequence: number
+  configuration_digest: string | null
+  global_limit: number | null
+  per_graph_limit: number | null
+  default_tool_limit: number | null
+}
+
+export interface ReadyProjectionOperationsMetrics {
+  projected_graphs: number
+  projected_nodes: number
+  ready_nodes: number
+  missing_live_graphs: number
+  event_drift_graphs: number
+  row_count_drift_graphs: number
+  rebuilds_observed: number
+  last_rebuilt_at: string | null
+}
+
+export interface OutboxOperationsMetrics {
+  total: number
+  pending_ready: number
+  retry_scheduled: number
+  in_flight: number
+  published: number
+  dead_lettered: number
+  inbox_receipts: number
+  oldest_pending_at: string | null
+  oldest_dead_lettered_at: string | null
+}
+
+export interface GraphControlOperationsRead {
+  control_id: string
+  task_id: string
+  graph_id: string
+  command: string
+  request_digest: string
+  status: string
+  revision: number
+  attempt_count: number
+  target_owner_id: string | null
+  target_fencing_token: number | null
+  claim_owner_id: string | null
+  claim_fencing_token: number
+  claim_expires_at: string | null
+  last_error_code: string | null
+  updated_at: string
+}
+
+export interface AdmissionOperationsRead {
+  admission_id: string
+  batch_id: string
+  graph_id: string
+  node_id: string
+  tool_name: string
+  owner_id: string
+  status: string
+  revision: number
+  fencing_token: number
+  grant_sequence: number | null
+  expires_at: string
+  updated_at: string
+}
+
+export interface ReadyProjectionOperationsRead {
+  graph_id: string
+  graph_status: string
+  graph_event_seq: number
+  projection_revision: number
+  projection_event_seq: number
+  content_digest: string
+  rebuild_count: number
+  last_rebuild_duration_ms: number | null
+  projected_nodes: number
+  dependency_ready_nodes: number
+  rebuilt_at: string
+  updated_at: string
+}
+
+export type OutboxOperationsState = 'pending' | 'in_flight' | 'published' | 'dead_lettered'
+
+export interface OutboxOperationsRead {
+  message_id: string
+  task_id: string
+  event_id: string
+  event_seq: number
+  topic: string
+  state: OutboxOperationsState
+  payload_digest: string
+  attempt_count: number
+  claim_owner_id: string | null
+  claim_fencing_token: number
+  available_at: string
+  claim_expires_at: string | null
+  published_at: string | null
+  dead_lettered_at: string | null
+  error_digest: string | null
+  created_at: string
+}
+
+export interface EffectRuntimeOperationsSnapshot {
+  schema_version: 'deskpilot.effect-runtime-operations.v1'
+  database_time: string
+  graph_controls: GraphControlOperationsMetrics
+  admissions: AdmissionOperationsMetrics
+  ready_projection: ReadyProjectionOperationsMetrics
+  outbox: OutboxOperationsMetrics
+  alerts: OperationsAlert[]
+  graph_control_samples: GraphControlOperationsRead[]
+  admission_samples: AdmissionOperationsRead[]
+  ready_projection_samples: ReadyProjectionOperationsRead[]
+  outbox_samples: OutboxOperationsRead[]
+  snapshot_digest: string
+}
+
+export interface EffectRuntimeAuditEvent {
+  event_id: string
+  sequence: number
+  action: string
+  actor_id: string
+  request_digest: string
+  result_digest: string
+  previous_event_digest: string | null
+  event_digest: string
+  details: Record<string, unknown>
+  occurred_at: string
+}
+
+export interface EffectRuntimeAuditPage {
+  events: EffectRuntimeAuditEvent[]
+  next_after_sequence: number
+  has_more: boolean
+}
+
+export interface EffectRuntimeAuditExportPage {
+  schema_version: 'deskpilot.effect-runtime-audit-export.v1'
+  export_id: string
+  database_time: string
+  through_sequence: number
+  through_event_digest: string | null
+  events: EffectRuntimeAuditEvent[]
+  page_digest: string
+  next_cursor: string | null
+  has_more: boolean
+}
+
+export interface MetricsAuditResult {
+  snapshot: EffectRuntimeOperationsSnapshot
+  audit_event: EffectRuntimeAuditEvent
+  alert_notifications: OperationsAlertNotification[]
+}
+
+export interface RetentionCounts {
+  graph_controls: number
+  admissions: number
+  ready_checkpoints: number
+  ready_nodes: number
+  ready_states: number
+  published_outbox: number
+  inbox_receipts: number
+}
+
+export interface RetentionRunResult {
+  cutoff: string
+  counts: RetentionCounts
+  manifest_digest: string
+  audit_event: EffectRuntimeAuditEvent
+}
+
+export interface OutboxRequeueResult {
+  message_id: string
+  attempt_count: number
+  claim_fencing_token: number
+  available_at: string
+  audit_event: EffectRuntimeAuditEvent
 }

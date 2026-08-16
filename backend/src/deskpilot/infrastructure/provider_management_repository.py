@@ -1,9 +1,11 @@
 """Atomic SQLAlchemy repository for Provider management mutations."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deskpilot.application.provider_catalog_store import (
@@ -80,11 +82,7 @@ class SqlAlchemyProviderManagementRepository:
         async with self._database.session() as session:
             async with session.begin():
                 existing_count = len(
-                    (
-                        await session.scalars(
-                            select(ProviderRuntimeConfigRecord.provider_id)
-                        )
-                    ).all()
+                    (await session.scalars(select(ProviderRuntimeConfigRecord.provider_id))).all()
                 )
                 if existing_count:
                     return await self._load_state(session)
@@ -141,13 +139,10 @@ class SqlAlchemyProviderManagementRepository:
                             action=ProviderConfigAuditAction.CREATED,
                             audit=audit,
                             config_revision=1,
-                            changed_fields=tuple(
-                                sorted(bundle.config.model_dump(mode="json"))
-                            ),
+                            changed_fields=tuple(sorted(bundle.config.model_dump(mode="json"))),
                             credential_disposition=(
                                 CredentialAuditDisposition.REFERENCE_ATTACHED
-                                if self._credential_reference(bundle.config)
-                                is not None
+                                if self._credential_reference(bundle.config) is not None
                                 else CredentialAuditDisposition.NOT_APPLICABLE
                             ),
                             occurred_at=timestamp,
@@ -191,6 +186,27 @@ class SqlAlchemyProviderManagementRepository:
         self,
         mutation: PreparedProviderMutation,
     ) -> ProviderManagementCommit:
+        """Let a durable replay receipt normalize cross-instance write races."""
+        for attempt in range(3):
+            try:
+                return await self._commit_once(mutation)
+            except (
+                IntegrityError,
+                OperationalError,
+                ProviderCatalogVersionConflictError,
+            ):
+                replay = await self.replay(mutation.idempotency)
+                if replay is not None:
+                    return ProviderManagementCommit(result=replay, replayed=True)
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(0.01 * (attempt + 1))
+        raise RuntimeError("Provider idempotency race retry was exhausted")
+
+    async def _commit_once(
+        self,
+        mutation: PreparedProviderMutation,
+    ) -> ProviderManagementCommit:
         normalized, normalized_bundles = self._validate_candidate(
             mutation.definition,
             mutation.bundles,
@@ -213,21 +229,14 @@ class SqlAlchemyProviderManagementRepository:
                         actual_version=current_state.catalog_version,
                     )
 
-                current = {
-                    item.bundle.provider_id: item
-                    for item in current_state.providers
-                }
-                candidate = {
-                    bundle.provider_id: bundle for bundle in normalized_bundles
-                }
+                current = {item.bundle.provider_id: item for item in current_state.providers}
+                candidate = {bundle.provider_id: bundle for bundle in normalized_bundles}
                 current_configs = {
-                    provider_id: snapshot.bundle
-                    for provider_id, snapshot in current.items()
+                    provider_id: snapshot.bundle for provider_id, snapshot in current.items()
                 }
                 state_changed = (
                     current_configs != candidate
-                    or current_state.default_provider_id
-                    != normalized.default_provider_id
+                    or current_state.default_provider_id != normalized.default_provider_id
                 )
                 if not state_changed:
                     target = current[mutation.provider_id]
@@ -271,10 +280,8 @@ class SqlAlchemyProviderManagementRepository:
                 updated_version = await session.scalar(
                     update(ProviderCatalogStateRecord)
                     .where(
-                        ProviderCatalogStateRecord.catalog_id
-                        == ACTIVE_CATALOG_ID,
-                        ProviderCatalogStateRecord.version
-                        == current_state.catalog_version,
+                        ProviderCatalogStateRecord.catalog_id == ACTIVE_CATALOG_ID,
+                        ProviderCatalogStateRecord.version == current_state.catalog_version,
                     )
                     .values(
                         version=next_version,
@@ -288,8 +295,7 @@ class SqlAlchemyProviderManagementRepository:
                 if updated_version != next_version:
                     latest = await session.scalar(
                         select(ProviderCatalogStateRecord.version).where(
-                            ProviderCatalogStateRecord.catalog_id
-                            == ACTIVE_CATALOG_ID
+                            ProviderCatalogStateRecord.catalog_id == ACTIVE_CATALOG_ID
                         )
                     )
                     raise ProviderCatalogVersionConflictError(
@@ -357,9 +363,7 @@ class SqlAlchemyProviderManagementRepository:
             .limit(limit)
         )
         if provider_id is not None:
-            statement = statement.where(
-                ProviderConfigAuditEventRecord.provider_id == provider_id
-            )
+            statement = statement.where(ProviderConfigAuditEventRecord.provider_id == provider_id)
         async with self._database.session() as session:
             records = (await session.scalars(statement)).all()
         return tuple(self._audit_event(record) for record in records)
@@ -367,9 +371,7 @@ class SqlAlchemyProviderManagementRepository:
     async def _load_state(self, session: AsyncSession) -> ProviderManagementState:
         state = await session.get(ProviderCatalogStateRecord, ACTIVE_CATALOG_ID)
         if state is None:
-            raise ProviderCatalogNotInitializedError(
-                "Provider catalog has not been initialized"
-            )
+            raise ProviderCatalogNotInitializedError("Provider catalog has not been initialized")
         records = (
             await session.scalars(
                 select(ProviderRuntimeConfigRecord).order_by(
@@ -381,10 +383,7 @@ class SqlAlchemyProviderManagementRepository:
             raise ProviderCatalogNotInitializedError(
                 "Provider runtime configuration has not been initialized"
             )
-        snapshots = tuple(
-            self._snapshot(record, self._decode_record(record))
-            for record in records
-        )
+        snapshots = tuple(self._snapshot(record, self._decode_record(record)) for record in records)
         entries = (
             await session.scalars(
                 select(ProviderCatalogEntryRecord).where(
@@ -575,12 +574,8 @@ class SqlAlchemyProviderManagementRepository:
     ) -> ProviderRuntimeConfigSnapshot:
         return ProviderRuntimeConfigSnapshot(
             revision=record.revision,
-            created_at=SqlAlchemyProviderManagementRepository._as_utc(
-                record.created_at
-            ),
-            updated_at=SqlAlchemyProviderManagementRepository._as_utc(
-                record.updated_at
-            ),
+            created_at=SqlAlchemyProviderManagementRepository._as_utc(record.created_at),
+            updated_at=SqlAlchemyProviderManagementRepository._as_utc(record.updated_at),
             bundle=bundle,
         )
 
@@ -598,16 +593,12 @@ class SqlAlchemyProviderManagementRepository:
                 )
             ),
         )
-        normalized_bundles = tuple(
-            sorted(bundles, key=lambda item: item.provider_id)
-        )
+        normalized_bundles = tuple(sorted(bundles, key=lambda item: item.provider_id))
         runtime_enabled = {
-            bundle.provider_id: bundle.config.enabled
-            for bundle in normalized_bundles
+            bundle.provider_id: bundle.config.enabled for bundle in normalized_bundles
         }
         public_enabled = {
-            entry.descriptor.provider_id: entry.enabled
-            for entry in normalized.providers
+            entry.descriptor.provider_id: entry.enabled for entry in normalized.providers
         }
         if runtime_enabled != public_enabled:
             raise ProviderRuntimeConfigInvalidError(
@@ -677,11 +668,7 @@ class SqlAlchemyProviderManagementRepository:
         before = previous.config.model_dump(mode="json")
         after = current.config.model_dump(mode="json")
         return tuple(
-            sorted(
-                key
-                for key in before.keys() | after.keys()
-                if before.get(key) != after.get(key)
-            )
+            sorted(key for key in before.keys() | after.keys() if before.get(key) != after.get(key))
         )
 
     @classmethod
@@ -747,13 +734,9 @@ class SqlAlchemyProviderManagementRepository:
             actor_type=ProviderConfigActorType(record.actor_type),
             config_revision=record.config_revision,
             changed_fields=tuple(record.changed_fields),
-            credential_disposition=CredentialAuditDisposition(
-                record.credential_disposition
-            ),
+            credential_disposition=CredentialAuditDisposition(record.credential_disposition),
             correlation_id=record.correlation_id,
-            occurred_at=SqlAlchemyProviderManagementRepository._as_utc(
-                record.occurred_at
-            ),
+            occurred_at=SqlAlchemyProviderManagementRepository._as_utc(record.occurred_at),
         )
 
     @staticmethod

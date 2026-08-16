@@ -537,7 +537,8 @@ def test_task_processor_runs_end_to_end_with_injected_chat_provider(
         assert created.status_code == 201
         task_id = created.json()["task_id"]
         task = created.json()
-        for _ in range(100):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
             task = client.get(f"/api/v1/tasks/{task_id}").json()
             if task["status"] in {"succeeded", "failed"}:
                 break

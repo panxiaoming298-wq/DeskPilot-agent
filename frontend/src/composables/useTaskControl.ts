@@ -28,6 +28,7 @@ const statusLabels: Record<TaskStatus, string> = {
   classifying: '正在分类',
   running: '运行中',
   waiting_approval: '等待审批',
+  waiting_reconciliation: '等待对账恢复',
   succeeded: '已完成',
   failed: '已失败',
   cancelled: '已取消',

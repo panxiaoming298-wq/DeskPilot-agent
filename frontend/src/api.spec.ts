@@ -284,6 +284,7 @@ describe('task API', () => {
       .mockResolvedValueOnce(jsonResponse({ reconciliation_id: reconciliationId }))
       .mockResolvedValueOnce(jsonResponse({ replayed: false }))
       .mockResolvedValueOnce(jsonResponse({ replayed: false }))
+      .mockResolvedValueOnce(jsonResponse({ replayed: false, resumed: true, task }))
       .mockResolvedValueOnce(jsonResponse({ replayed: false, task }))
       .mockResolvedValueOnce(jsonResponse({ replayed: false, task }))
     vi.stubGlobal('fetch', fetchMock)
@@ -293,6 +294,7 @@ describe('task API', () => {
       listReconciliations,
       refreshReconciliationEvidence,
       resolveReconciliation,
+      recoverReconciliationGraph,
       createReconciliationAttempt,
       createReconciliationCompensation,
     } = await import('./api')
@@ -306,6 +308,7 @@ describe('task API', () => {
       '  已核对外部状态  ',
       'resolve-key-once',
     )
+    await recoverReconciliationGraph(reconciliationId, 'continue', 'recover-key-once')
     await createReconciliationAttempt(reconciliationId, 'attempt-key-once')
     await createReconciliationCompensation(reconciliationId, 'compensation-key-once')
 
@@ -350,7 +353,7 @@ describe('task API', () => {
 
     const attemptInit = expectAuthenticatedRequest(
       fetchMock,
-      5,
+      6,
       `/api/v1/reconciliations/${encodedId}:create-attempt`,
       'POST',
     )
@@ -362,7 +365,7 @@ describe('task API', () => {
 
     const compensationInit = expectAuthenticatedRequest(
       fetchMock,
-      6,
+      7,
       `/api/v1/reconciliations/${encodedId}:create-compensation`,
       'POST',
     )
@@ -371,5 +374,107 @@ describe('task API', () => {
       'compensation-key-once',
     )
     expect(new Headers(compensationInit.headers).has('Content-Type')).toBe(false)
+
+    const recoverInit = expectAuthenticatedRequest(
+      fetchMock,
+      5,
+      `/api/v1/reconciliations/${encodedId}:recover-graph`,
+      'POST',
+    )
+    expect(recoverInit.body).toBe(JSON.stringify({ action: 'continue' }))
+    expect(new Headers(recoverInit.headers).get('Idempotency-Key')).toBe(
+      'recover-key-once',
+    )
+  })
+})
+
+describe('effect-runtime operations API', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  it('使用受认证路径、显式查询参数和仅写请求幂等键', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(session))
+      .mockImplementation(() => Promise.resolve(jsonResponse({})))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const {
+      getEffectRuntimeAlertNotifications,
+      getEffectRuntimeAudit,
+      getEffectRuntimeAuditExport,
+      getEffectRuntimeOperations,
+      requeueOutboxDeadLetter,
+      runEffectRuntimeRetention,
+      sampleEffectRuntimeMetrics,
+    } = await import('./api')
+
+    await getEffectRuntimeOperations(25)
+    await getEffectRuntimeAudit(7, 40)
+    await getEffectRuntimeAlertNotifications(8, 41)
+    await getEffectRuntimeAuditExport('opaque-cursor', 42)
+    await sampleEffectRuntimeMetrics(15)
+    await runEffectRuntimeRetention(30, 'retention-key-0001')
+    await requeueOutboxDeadLetter('message/with spaces?#', 'requeue-key-000001')
+
+    const snapshotInit = expectAuthenticatedRequest(
+      fetchMock,
+      1,
+      '/api/v1/operations/effect-runtime?sample_limit=25',
+    )
+    expect(snapshotInit.cache).toBe('no-store')
+
+    const auditInit = expectAuthenticatedRequest(
+      fetchMock,
+      2,
+      '/api/v1/operations/effect-runtime/audit?after_sequence=7&limit=40',
+    )
+    expect(auditInit.cache).toBe('no-store')
+
+    const alertsInit = expectAuthenticatedRequest(
+      fetchMock,
+      3,
+      '/api/v1/operations/effect-runtime/alerts?after_sequence=8&limit=41',
+    )
+    expect(alertsInit.cache).toBe('no-store')
+
+    const exportInit = expectAuthenticatedRequest(
+      fetchMock,
+      4,
+      '/api/v1/operations/effect-runtime/audit/export?limit=42&cursor=opaque-cursor',
+    )
+    expect(exportInit.cache).toBe('no-store')
+
+    const sampleInit = expectAuthenticatedRequest(
+      fetchMock,
+      5,
+      '/api/v1/operations/effect-runtime:sample?sample_limit=15',
+      'POST',
+    )
+    expect(sampleInit.body).toBeUndefined()
+    expect(new Headers(sampleInit.headers).has('Idempotency-Key')).toBe(false)
+
+    const retentionInit = expectAuthenticatedRequest(
+      fetchMock,
+      6,
+      '/api/v1/operations/effect-runtime:run-retention',
+      'POST',
+    )
+    expect(retentionInit.body).toBe(JSON.stringify({ retention_days: 30 }))
+    expect(new Headers(retentionInit.headers).get('Idempotency-Key')).toBe(
+      'retention-key-0001',
+    )
+
+    const requeueInit = expectAuthenticatedRequest(
+      fetchMock,
+      7,
+      '/api/v1/operations/outbox/message%2Fwith%20spaces%3F%23:requeue',
+      'POST',
+    )
+    expect(requeueInit.body).toBeUndefined()
+    expect(new Headers(requeueInit.headers).get('Idempotency-Key')).toBe(
+      'requeue-key-000001',
+    )
   })
 })

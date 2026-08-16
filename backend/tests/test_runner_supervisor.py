@@ -82,6 +82,7 @@ class _FakeRunnerClient:
         self.start_count = 0
         self.stop_count = 0
         self.call_ids: list[str | None] = []
+        self.cancelled_call_ids: list[tuple[str, str]] = []
 
     @property
     def runner_id(self) -> str | None:
@@ -118,6 +119,9 @@ class _FakeRunnerClient:
             self._failure.set_result(error)
         if self._call_result is not None and not self._call_result.done():
             self._call_result.set_exception(error)
+
+    async def cancel_call(self, call_id: str, reason: str) -> None:
+        self.cancelled_call_ids.append((call_id, reason))
 
     async def call_tool(
         self,
@@ -203,6 +207,33 @@ def _supervisor(
         monotonic=clock.monotonic,
         sleep=clock.sleep,
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_is_bound_to_the_expected_runner_generation() -> None:
+    clock = _ControlledClock()
+    client = _FakeRunnerClient("runner-1")
+    supervisor = _supervisor(_ClientFactory([client]), clock)
+    try:
+        await supervisor.start()
+        await supervisor.cancel_call(
+            "call-current",
+            "graph cancellation",
+            expected_runner_id="runner-1",
+        )
+
+        with pytest.raises(RunnerGenerationChangedError):
+            await supervisor.cancel_call(
+                "call-stale",
+                "stale graph cancellation",
+                expected_runner_id="runner-0",
+            )
+
+        assert client.cancelled_call_ids == [
+            ("call-current", "graph cancellation")
+        ]
+    finally:
+        await supervisor.stop()
 
 
 @pytest.mark.asyncio

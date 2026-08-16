@@ -89,6 +89,7 @@ describe('deriveTaskStatus', () => {
     'classifying',
     'running',
     'waiting_approval',
+    'waiting_reconciliation',
     'succeeded',
     'failed',
     'cancelled',
@@ -102,6 +103,7 @@ describe('deriveTaskStatus', () => {
   it.each([
     ['task.completed', 'succeeded'],
     ['task.failed', 'failed'],
+    ['task.waiting_reconciliation', 'waiting_reconciliation'],
   ] as const)('maps %s to %s', (type, expected) => {
     expect(deriveTaskStatus(null, [makeEvent(1, type)])).toBe(expected)
   })

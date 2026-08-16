@@ -26,6 +26,7 @@ from deskpilot.domain.approvals import (
     ApprovalStatus,
     ResolveCommand,
 )
+from deskpilot.domain.schemas import TaskStatus
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
@@ -105,6 +106,7 @@ async def _resolve(
                 current.status is ApprovalStatus.PENDING
                 and processor.approval_continuation_state(current.task_id, approval_id)
                 is ApprovalContinuationState.UNAVAILABLE
+                and not processor.accepts_trusted_dag_approval(current.task_id)
             ):
                 raise _runtime_unavailable()
 
@@ -118,6 +120,8 @@ async def _resolve(
         if decision is ApprovalStatus.APPROVED:
             if result.approval.consumed_at is not None or result.task.status.is_terminal:
                 return result
+            if result.task.status is TaskStatus.WAITING_APPROVAL:
+                return result
             continuation = processor.approval_continuation_state(
                 result.task.task_id,
                 result.approval.approval_id,
@@ -125,6 +129,8 @@ async def _resolve(
             if continuation is ApprovalContinuationState.IN_PROGRESS:
                 return result
             if continuation is ApprovalContinuationState.UNAVAILABLE:
+                if processor.accepts_trusted_dag_approval(result.task.task_id):
+                    return result
                 raise _runtime_unavailable()
             try:
                 processor.continue_after_approval(

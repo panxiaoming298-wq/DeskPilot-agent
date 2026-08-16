@@ -7,6 +7,9 @@ from alembic import context
 from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from deskpilot.infrastructure.alembic_versioning import (
+    prepare_alembic_version_table,
+)
 from deskpilot.infrastructure.models import Base
 
 config = context.config
@@ -40,6 +43,7 @@ def do_run_migrations(connection: Connection) -> None:
     )
 
     with context.begin_transaction():
+        prepare_alembic_version_table(connection)
         context.run_migrations()
 
 

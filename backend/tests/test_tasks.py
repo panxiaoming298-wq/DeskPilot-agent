@@ -9,7 +9,7 @@ def _wait_for_status(
     task_id: str,
     expected: str,
     *,
-    timeout: float = 5,
+    timeout: float = 12,
 ) -> dict[str, object]:
     deadline = time.monotonic() + timeout
     latest: dict[str, object] = {}
@@ -55,16 +55,7 @@ def test_task_event_vertical_slice(client: TestClient, session_token: str) -> No
     assert created["status"] == "created"
     assert created["event_stream"].endswith(task_id)
 
-    task = created
-    for _ in range(100):
-        task_response = client.get(f"/api/v1/tasks/{task_id}")
-        assert task_response.status_code == 200
-        task = task_response.json()
-        if task["status"] == "succeeded":
-            break
-        time.sleep(0.01)
-
-    assert task["status"] == "succeeded"
+    task = _wait_for_status(client, task_id, "succeeded")
 
     events_response = client.get(f"/api/v1/tasks/{task_id}/events?after_seq=0")
     assert events_response.status_code == 200

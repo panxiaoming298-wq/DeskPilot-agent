@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -20,6 +21,7 @@ from deskpilot.api.routes import (
     approvals,
     health,
     model_providers,
+    operations,
     reconciliations,
     session,
     tasks,
@@ -27,12 +29,22 @@ from deskpilot.api.routes import (
 )
 from deskpilot.api.security_middleware import LocalApiSecurityMiddleware
 from deskpilot.application.credential_resolver import CredentialResolver
+from deskpilot.application.effect_dag_cluster_admission import (
+    EffectDagClusterAdmissionController,
+    EffectDagClusterAdmissionStore,
+)
+from deskpilot.application.effect_graph_control_router import (
+    EffectGraphControlRouter,
+    EffectGraphControlStore,
+)
+from deskpilot.application.effect_runtime_operations import EffectRuntimeOperationsService
 from deskpilot.application.event_broker import EventBroker
+from deskpilot.application.inbox_consumer import InboxConsumer
 from deskpilot.application.model_gateway import (
     ModelGateway,
     ModelProvider,
 )
-from deskpilot.application.outbox_publisher import OutboxPublisher
+from deskpilot.application.outbox_publisher import DeliveryPublisher, OutboxPublisher
 from deskpilot.application.policy_engine import BuiltinPolicyEngine, PolicyEngine
 from deskpilot.application.processor import TaskProcessor
 from deskpilot.application.provider_catalog import ProviderCatalogService
@@ -62,6 +74,10 @@ from deskpilot.infrastructure.provider_catalog_repository import (
 from deskpilot.infrastructure.provider_management_repository import (
     SqlAlchemyProviderManagementRepository,
 )
+from deskpilot.infrastructure.rabbitmq_transport import (
+    RabbitMqEventTransport,
+    verify_task_event_delivery,
+)
 from deskpilot.infrastructure.windows_dpapi import WindowsDpapiProtector
 from deskpilot.model_providers.factory import (
     effective_model_provider_configs,
@@ -83,6 +99,7 @@ def create_app(
     policy_engine: PolicyEngine | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings()
+    instance_id = f"api_{uuid4().hex}"
     session_security = LocalSessionSecurity.create(
         resolved_settings.session_token,
         resolved_settings.cors_origins,
@@ -112,40 +129,28 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         database = Database(resolved_settings.database_url)
-        resolved_runtime_config_protector = (
-            runtime_config_protector or WindowsDpapiProtector()
-        )
+        resolved_runtime_config_protector = runtime_config_protector or WindowsDpapiProtector()
         provider_health_service = ProviderHealthService(
             model_gateway,
             cache_ttl_seconds=resolved_settings.model_health_cache_ttl_seconds,
             max_concurrency=resolved_settings.model_health_max_concurrency,
-            probe_timeout_seconds=(
-                resolved_settings.model_health_probe_timeout_seconds
-            ),
+            probe_timeout_seconds=(resolved_settings.model_health_probe_timeout_seconds),
         )
         provider_management: ProviderManagementService | None = None
         try:
             await database.migrate()
-            provider_catalog_repository = SqlAlchemyProviderCatalogRepository(
-                database
-            )
+            provider_catalog_repository = SqlAlchemyProviderCatalogRepository(database)
             if model_provider is not None:
                 if provider_catalog_definition is None:
                     raise RuntimeError("Injected Provider catalog is missing")
-                await provider_catalog_repository.import_definition(
-                    provider_catalog_definition
-                )
+                await provider_catalog_repository.import_definition(provider_catalog_definition)
             else:
                 resolved_credential_resolver = (
                     credential_resolver or create_default_credential_resolver()
                 )
-                management_repository = (
-                    SqlAlchemyProviderManagementRepository(
-                        database,
-                        ProviderRuntimeConfigCodec(
-                            resolved_runtime_config_protector
-                        ),
-                    )
+                management_repository = SqlAlchemyProviderManagementRepository(
+                    database,
+                    ProviderRuntimeConfigCodec(resolved_runtime_config_protector),
                 )
                 provider_management = ProviderManagementService(
                     store=management_repository,
@@ -155,9 +160,7 @@ def create_app(
                 )
                 await provider_management.initialize(
                     provider_configs,
-                    default_provider_id=(
-                        resolved_settings.model_default_provider_id
-                    ),
+                    default_provider_id=(resolved_settings.model_default_provider_id),
                 )
         except BaseException:
             await provider_health_service.shutdown()
@@ -168,21 +171,55 @@ def create_app(
             health_service=provider_health_service,
         )
         broker = EventBroker()
+        rabbitmq_transport: RabbitMqEventTransport | None = None
+        delivery_publisher: DeliveryPublisher = broker
+        if resolved_settings.event_transport == "rabbitmq":
+            rabbitmq_secret = resolved_settings.rabbitmq_url
+            if rabbitmq_secret is None:
+                raise RuntimeError("Validated RabbitMQ URL is missing")
+
+            inbox_consumer = InboxConsumer(
+                database,
+                consumer_name="rabbitmq.task-event.websocket-v1",
+                handler=verify_task_event_delivery,
+            )
+            rabbitmq_transport = RabbitMqEventTransport(
+                rabbitmq_secret.get_secret_value(),
+                exchange_name=resolved_settings.rabbitmq_exchange,
+                queue_name=resolved_settings.rabbitmq_queue,
+                routing_key=resolved_settings.rabbitmq_routing_key,
+                inbox_consumer=inbox_consumer,
+                live_broker=broker,
+                prefetch_count=resolved_settings.rabbitmq_prefetch_count,
+                connection_timeout_seconds=(resolved_settings.rabbitmq_connection_timeout_seconds),
+                publish_timeout_seconds=resolved_settings.rabbitmq_publish_timeout_seconds,
+            )
+            delivery_publisher = rabbitmq_transport.publisher
         outbox_publisher = OutboxPublisher(
             database,
-            broker,
+            delivery_publisher,
             poll_interval_seconds=resolved_settings.outbox_poll_interval_seconds,
             batch_size=resolved_settings.outbox_batch_size,
             retry_base_seconds=resolved_settings.outbox_retry_base_seconds,
             retry_max_seconds=resolved_settings.outbox_retry_max_seconds,
+            instance_id=instance_id,
+            claim_ttl_seconds=resolved_settings.outbox_claim_ttl_seconds,
+            max_attempts=resolved_settings.outbox_max_attempts,
+        )
+        effect_runtime_operations = EffectRuntimeOperationsService(
+            database,
+            outbox_notify=outbox_publisher.notify,
+            retention_days=resolved_settings.operations_retention_days,
+            retention_interval_seconds=(resolved_settings.operations_retention_interval_seconds),
+            metrics_interval_seconds=resolved_settings.operations_metrics_interval_seconds,
+            retention_batch_size=resolved_settings.operations_retention_batch_size,
+            stalled_after_seconds=resolved_settings.operations_stalled_after_seconds,
         )
         task_service = TaskService(
             database,
             resolved_settings.api_prefix,
             outbox_notify=outbox_publisher.notify,
-            checkpoint_codec=TaskCheckpointCodec(
-                resolved_runtime_config_protector
-            ),
+            checkpoint_codec=TaskCheckpointCodec(resolved_runtime_config_protector),
         )
         registry = create_builtin_registry()
         resolved_policy_engine = policy_engine or BuiltinPolicyEngine(
@@ -191,65 +228,47 @@ def create_app(
                 FILE_MOVE_DESTINATION_CAPABILITY,
                 FILE_MOVE_SOURCE_CAPABILITY,
             ),
-            allowed_resource_scopes=(
-                ("filesystem_path", canonical_disk_usage_path),
-            ),
+            allowed_resource_scopes=(("filesystem_path", canonical_disk_usage_path),),
             allow_user_selected_file_move=True,
-            require_approval_for_r0=(
-                resolved_settings.policy_require_approval_for_r0
-            ),
+            allow_user_selected_disk_usage=True,
+            require_approval_for_r0=(resolved_settings.policy_require_approval_for_r0),
             approval_ttl_seconds=resolved_settings.policy_approval_ttl_seconds,
         )
         resolved_runner_supervisor = runner_supervisor or RunnerSupervisor(
             client_factory=lambda: RunnerClient(
                 registry=registry,
-                heartbeat_interval_seconds=(
-                    resolved_settings.runner_heartbeat_interval_seconds
-                ),
-                heartbeat_timeout_seconds=(
-                    resolved_settings.runner_heartbeat_timeout_seconds
-                ),
-                startup_timeout_seconds=(
-                    resolved_settings.runner_startup_timeout_seconds
-                ),
-                shutdown_timeout_seconds=(
-                    resolved_settings.runner_shutdown_timeout_seconds
-                ),
-                require_windows_sandbox=(
-                    resolved_settings.runner_require_windows_sandbox
-                ),
-                require_network_isolation=(
-                    resolved_settings.runner_require_network_isolation
-                ),
-                worker_runtime_root=(
-                    resolved_settings.runner_worker_runtime_root
-                ),
+                heartbeat_interval_seconds=(resolved_settings.runner_heartbeat_interval_seconds),
+                heartbeat_timeout_seconds=(resolved_settings.runner_heartbeat_timeout_seconds),
+                startup_timeout_seconds=(resolved_settings.runner_startup_timeout_seconds),
+                shutdown_timeout_seconds=(resolved_settings.runner_shutdown_timeout_seconds),
+                require_windows_sandbox=(resolved_settings.runner_require_windows_sandbox),
+                require_network_isolation=(resolved_settings.runner_require_network_isolation),
+                worker_runtime_root=(resolved_settings.runner_worker_runtime_root),
                 appcontainer_profile_journal_path=(
                     resolved_settings.runner_appcontainer_profile_journal_path
                 ),
                 commit_receipt_database_path=(
                     resolved_settings.runner_commit_receipt_database_path
                 ),
-                worker_memory_limit_bytes=(
-                    resolved_settings.runner_worker_memory_limit_bytes
-                ),
-                worker_active_process_limit=(
-                    resolved_settings.runner_worker_active_process_limit
-                ),
+                worker_memory_limit_bytes=(resolved_settings.runner_worker_memory_limit_bytes),
+                worker_active_process_limit=(resolved_settings.runner_worker_active_process_limit),
             ),
-            restart_base_delay_seconds=(
-                resolved_settings.runner_restart_base_delay_seconds
-            ),
-            restart_max_delay_seconds=(
-                resolved_settings.runner_restart_max_delay_seconds
-            ),
-            circuit_failure_threshold=(
-                resolved_settings.runner_circuit_failure_threshold
-            ),
+            restart_base_delay_seconds=(resolved_settings.runner_restart_base_delay_seconds),
+            restart_max_delay_seconds=(resolved_settings.runner_restart_max_delay_seconds),
+            circuit_failure_threshold=(resolved_settings.runner_circuit_failure_threshold),
             circuit_recovery_timeout_seconds=(
                 resolved_settings.runner_circuit_recovery_timeout_seconds
             ),
             stable_window_seconds=resolved_settings.runner_stable_window_seconds,
+        )
+        effect_dag_admission = EffectDagClusterAdmissionController(
+            EffectDagClusterAdmissionStore(database),
+            owner_id=f"{instance_id[:58]}:dag",
+            global_limit=resolved_settings.effect_dag_global_concurrency,
+            per_graph_limit=resolved_settings.effect_dag_graph_concurrency,
+            default_tool_limit=resolved_settings.effect_dag_tool_concurrency,
+            lease_ttl_seconds=(resolved_settings.effect_dag_admission_lease_ttl_seconds),
+            poll_interval_seconds=(resolved_settings.effect_dag_admission_poll_interval_seconds),
         )
         processor = TaskProcessor(
             task_service,
@@ -259,13 +278,36 @@ def create_app(
             step_delay_seconds=resolved_settings.fake_step_delay_seconds,
             disk_usage_path=canonical_disk_usage_path,
             model_timeout_seconds=resolved_settings.model_request_timeout_seconds,
+            instance_id=instance_id,
+            graph_lease_ttl_seconds=resolved_settings.graph_lease_ttl_seconds,
+            effect_dag_admission=effect_dag_admission,
+            effect_dag_max_concurrency=(resolved_settings.effect_dag_graph_concurrency),
+            effect_dag_ready_page_size=(resolved_settings.effect_dag_ready_page_size),
         )
+        effect_graph_control_router = EffectGraphControlRouter(
+            EffectGraphControlStore(database),
+            task_service,
+            owner_id=processor.dag_owner_id,
+            handler=processor.apply_effect_graph_control,
+            applied_callback=processor.forget,
+            poll_interval_seconds=(resolved_settings.effect_graph_control_poll_interval_seconds),
+            claim_ttl_seconds=(resolved_settings.effect_graph_control_claim_ttl_seconds),
+            request_timeout_seconds=(
+                resolved_settings.effect_graph_control_request_timeout_seconds
+            ),
+            graph_lease_ttl_seconds=resolved_settings.graph_lease_ttl_seconds,
+        )
+        processor.bind_effect_graph_control_router(effect_graph_control_router)
 
         app.state.database = database
         app.state.event_broker = broker
         app.state.outbox_publisher = outbox_publisher
+        app.state.rabbitmq_transport = rabbitmq_transport
+        app.state.effect_runtime_operations = effect_runtime_operations
         app.state.task_service = task_service
         app.state.processor = processor
+        app.state.effect_dag_admission = effect_dag_admission
+        app.state.effect_graph_control_router = effect_graph_control_router
         app.state.model_gateway = model_gateway
         app.state.policy_engine = resolved_policy_engine
         app.state.provider_catalog = provider_catalog
@@ -275,33 +317,39 @@ def create_app(
         app.state.session_security = session_security
 
         try:
-            app.state.task_runtime_recovery = (
-                await processor.prepare_durable_recovery()
+            app.state.task_runtime_recovery = await processor.prepare_durable_recovery()
+            app.state.approval_recovery = await task_service.recover_pending_approvals(
+                recoverable_task_ids=(app.state.task_runtime_recovery.restored_task_ids),
+                excluded_task_ids=(app.state.task_runtime_recovery.contended_task_ids),
+                lease_owner_id=instance_id,
+                lease_ttl_seconds=resolved_settings.graph_lease_ttl_seconds,
             )
-            app.state.approval_recovery = (
-                await task_service.recover_pending_approvals(
-                    recoverable_task_ids=(
-                        app.state.task_runtime_recovery.restored_task_ids
-                    )
-                )
-            )
-            app.state.tool_call_recovery = (
-                await task_service.recover_incomplete_tool_calls(
-                    recoverable_requested_call_ids=(
-                        app.state.task_runtime_recovery
-                        .recoverable_requested_call_ids
-                    )
-                )
+            app.state.tool_call_recovery = await task_service.recover_incomplete_tool_calls(
+                recoverable_requested_call_ids=(
+                    app.state.task_runtime_recovery.recoverable_requested_call_ids
+                ),
+                excluded_task_ids=(app.state.task_runtime_recovery.contended_task_ids),
+                lease_owner_id=instance_id,
+                lease_ttl_seconds=resolved_settings.graph_lease_ttl_seconds,
             )
             await resolved_runner_supervisor.start()
+            if rabbitmq_transport is not None:
+                await rabbitmq_transport.start()
             outbox_publisher.start()
+            effect_runtime_operations.start()
+            effect_graph_control_router.start()
             processor.activate_durable_recovery()
             yield
         finally:
             await provider_catalog.shutdown()
+            await effect_runtime_operations.shutdown()
+            await effect_graph_control_router.shutdown()
             await processor.shutdown()
+            await effect_dag_admission.shutdown()
             await resolved_runner_supervisor.stop()
             await outbox_publisher.shutdown()
+            if rabbitmq_transport is not None:
+                await rabbitmq_transport.shutdown()
             await database.dispose()
 
     app = FastAPI(
@@ -338,6 +386,7 @@ def create_app(
     app.include_router(tasks.router, prefix=resolved_settings.api_prefix)
     app.include_router(approvals.router, prefix=resolved_settings.api_prefix)
     app.include_router(reconciliations.router, prefix=resolved_settings.api_prefix)
+    app.include_router(operations.router, prefix=resolved_settings.api_prefix)
     app.include_router(websocket.router, prefix=resolved_settings.api_prefix)
     return app
 

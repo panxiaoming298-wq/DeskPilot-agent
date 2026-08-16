@@ -4,7 +4,7 @@
 
 DeskPilot 是一个面向 Windows 的本地优先多 Agent 系统。用户通过自然语言提出目标，系统负责理解意图、生成可检查的计划、调用文件/系统/应用/浏览器/搜索工具，并在高风险操作前请求明确确认。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 1 已完成，阶段 2 MVP 进行中；Model Gateway、Provider 安全配置与角色级韧性路由、前端控制面、Policy/Approval、持久化调用账本、`unknown` 人工对账/显式新 attempt、Windows 每调用进程隔离、AppContainer 专用 worker runtime/强制禁网，以及 `file.move` prepare/commit/receipt、显式单文件任务/审批、unknown Runner 回执证据、receipt-driven 显式补偿、任务历史/集中 Reconciliation 中心和受保护跨重启 checkpoint 已接通。** 详细进度、验证结果和续接入口见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 1 已完成，阶段 2 MVP 进行中；Model Gateway、Provider 安全配置与角色级韧性路由、任务/对账/Provider/运行时运维前端控制面、Policy/Approval、持久化调用账本、`unknown` 人工对账/显式新 attempt、Windows 每调用进程隔离、AppContainer 专用 worker runtime/强制禁网，以及 `file.move` prepare/commit/receipt、受信 v2 DAG、集群级 admission/容量 fence、事务维护的 ready membership/count 与 v6 keyset、跨 API graph cancel、四域受保护运维/审计、PostgreSQL 真库故障门禁和 RabbitMQ confirm/manual-ack/Inbox/DLQ 真实重投链已接通。** 详细进度、验证结果和续接入口见[项目进度](项目进度.md)。
 
 ## 一句话架构
 
@@ -94,6 +94,29 @@ flowchart LR
 37. [`file.move` 回执驱动显式补偿闭环](doc/36-file.move回执驱动显式补偿闭环.md)
 38. [任务历史与集中 Reconciliation 中心](doc/37-任务历史与集中Reconciliation中心.md)
 39. [结构化 Tool 请求与可证明跨重启检查点](doc/38-结构化Tool请求与可证明跨重启检查点.md)
+40. [版本化 Tool effect graph 与 Saga 补偿](doc/39-版本化Tool-effect-graph与Saga补偿.md)
+41. [跨实例 Graph 所有权与图级 Reconciliation 恢复](doc/40-跨实例Graph所有权与图级Reconciliation恢复.md)
+42. [数据库原子 Claim 与 DAG 并行恢复证明](doc/41-数据库原子Claim与DAG并行恢复证明.md)
+43. [DAG 并行 Dispatcher 与可靠消息投递](doc/42-DAG并行Dispatcher与可靠消息投递.md)
+44. [v2 可信 Tool 账本与并行补偿执行](doc/43-v2可信Tool账本与并行补偿执行.md)
+45. [条件边与内容寻址分支决策证明](doc/44-条件边与内容寻址分支决策证明.md)
+46. [在途 Runner 取消与 Fence 语义](doc/45-在途Runner取消与Fence语义.md)
+47. [DAG 公平调度、分页与 Backpressure](doc/46-DAG公平调度分页与Backpressure.md)
+48. [跨实例 Graph 取消控制邮箱](doc/47-跨实例Graph取消控制邮箱.md)
+49. [集群级 DAG Admission 与容量 Fence](doc/48-集群级DAG-Admission与容量Fence.md)
+50. [增量 Ready 投影与 v4 分页证明](doc/49-增量Ready投影与v4分页证明.md)
+51. [受保护运行时运维面与 Retention 审计](doc/50-受保护运行时运维面与Retention审计.md)
+52. [Ready v5 Keyset 与 PostgreSQL 验收门禁](doc/51-Ready-v5-Keyset与PostgreSQL验收门禁.md)
+53. [PostgreSQL 连接终止与多主幂等门禁](doc/52-PostgreSQL连接终止与多主幂等门禁.md)
+54. [前端受保护运行时运维台](doc/53-前端受保护运行时运维台.md)
+55. [Docker PostgreSQL 真库验收与兼容修复](doc/54-Docker-PostgreSQL真库验收与兼容修复.md)
+56. [PostgreSQL JSON Plan 版本化基线与进程故障注入](doc/55-PostgreSQL-JSON-Plan版本化基线.md)
+57. [PostgreSQL 事务超时、死锁与连接中断门禁](doc/56-PostgreSQL事务超时死锁与连接中断门禁.md)
+58. [RabbitMQ 真实 Broker 重投与 Inbox 门禁](doc/57-RabbitMQ真实Broker重投与Inbox门禁.md)
+59. [Ready membership count 投影与漂移门禁](doc/58-Ready-membership-count投影与漂移门禁.md)
+60. [Admission 分片与 PostgreSQL 原生调度](doc/59-Admission分片与PostgreSQL原生调度.md)
+61. [Graph-control PostgreSQL 原生批量 Claim](doc/60-Graph-control-PostgreSQL原生批量Claim.md)
+62. [运行时告警通知与 Audit 冻结导出](doc/61-运行时告警通知与Audit冻结导出.md)
 
 ## MVP 边界
 
@@ -136,15 +159,15 @@ flowchart LR
 
 ## 当前代码
 
-- `backend/`：Python 3.12、FastAPI、SQLite、Alembic、事务 Outbox、本地会话安全、任务控制与有界历史查询、角色级 Model Gateway、费用/重试预算、Retry-After、EWMA/熔断、版本化 Provider catalog、安全凭据与密文运行配置、ETag/幂等写 API、动态 adapter registry、Fake/OpenAI-compatible Provider、Policy/Approval、一次性审批、Runner 授权证明、签名 IPC、Runner 自动换代/退避/熔断、持久化工具调用账本、`unknown` 人工对账、内容寻址 Runner 回执证据、持久化幂等回执与受限显式新 attempt、回执绑定单补偿血缘、Windows 每调用低完整性受限 worker + Job Object、句柄核验 resource broker、内容寻址 AppContainer worker bundle、专用 capability ACL 与孤儿 profile reaper，以及 `file.move` 无副作用 prepare、父 Runner 单次提交、durable receipt、崩溃恢复、跨代查询和重新审批的显式反向补偿。
-- 后端另已将结构化写请求、受信计划、Policy/审批绑定和 Tool 幂等键保存到 current-user DPAPI 受保护 checkpoint；可证明的 created/paused/waiting-approval 可跨 API 重启续跑，running Tool 仍只转 unknown/Reconciliation 而不重放。
-- `frontend/`：Vue 3、TypeScript、Vite 7，支持安全会话引导、任务提交、暂停/恢复/取消、`waiting_approval` 审批卡、审批失败对账、任务历史/集中 Reconciliation 列表、Runner 证据筛选与刷新、不可改写裁决、attempt/compensation 二次确认和血缘导航、断线续传提示、任务快照、计划、实时事件时间线，以及 Provider CRUD、健康检查、ETag 冲突恢复、脱敏审计和角色路由/韧性运行态展示；Vitest 组件测试已接入。
+- `backend/`：Python 3.12、FastAPI、SQLite/PostgreSQL、Alembic、带 delivery/inbox/DLQ 和数据库 claim/fencing 的事务 Outbox、默认进程内实时 broker 与可选 RabbitMQ publisher-confirm/manual-ack transport、本地会话安全、任务控制与有界历史查询、角色级 Model Gateway、费用/重试预算、Retry-After、EWMA/熔断、版本化 Provider catalog、安全凭据与密文运行配置、ETag/幂等写 API、Fake/OpenAI-compatible Provider、Policy/Approval、一次性审批、Runner 授权证明、签名 IPC、Runner 自动换代/退避/熔断、持久化工具调用账本、`unknown` 人工对账、内容寻址 Runner 回执证据、跨实例并发幂等冲突归一化、版本化 Tool effect graph、数据库时间 lease/CAS/fencing、v2 DAG 并行 dispatcher/node 心跳/join 恢复、条件边与内容寻址 branch-decision、进程级/集群级公平 admission、事务维护的 ready membership/count 与 v6 keyset 页证明、owner/fence 定向 graph control mailbox、四域受保护运维快照/retention/DLQ requeue/hash-chain 审计、图级终态/skip/cancel reducer、内容寻址并行补偿计划、PostgreSQL `SKIP LOCKED/RETURNING` claim，以及真实 PostgreSQL/RabbitMQ 故障门禁和现有 v1 receipt-bound saga、Windows 每调用 AppContainer/Job Object 安全边界。
+- 后端另已将结构化写请求、受信计划、Policy/审批绑定、Tool 幂等键以及 effect graph/node/mode/fence 游标保存到 current-user DPAPI 受保护 checkpoint；可证明的 created/paused/waiting-approval 可跨 API 重启精确续跑，running Tool 只转 unknown/`waiting_reconciliation`，由显式 continue/terminate 恢复且绝不重放原 call。
+- `frontend/`：Vue 3、TypeScript、Vite 7，支持安全会话引导、任务提交、暂停/恢复/取消、`waiting_approval` 审批卡、审批失败对账、任务历史/集中 Reconciliation 列表、`waiting_reconciliation` 筛选、Runner 证据刷新、不可改写裁决、graph continue/terminate、attempt/compensation 二次确认和血缘导航、断线续传提示、任务快照、计划、实时事件时间线，Provider CRUD/健康/ETag/路由韧性控制面，以及 graph-control/admission/ready/Outbox 四域脱敏运维、告警/hash-chain 审计、retention/DLQ 二次确认与幂等重试；Vitest 组件测试已接入。
 - 当前 TaskProcessor 的磁盘容量任务通过离线 Fake Provider 获得结构化分类和计划，不调用网络模型；显式 `file.move` 请求使用受信任应用计划模板，路径只来自本地用户表单并强制进入 R1 一次性审批，不从自然语言或模型输出提取。
 
-受保护 checkpoint 只恢复能与任务事件、Tool 账本、Policy 和审批记录同时对上的固定单 Tool 阶段；密文损坏或任一绑定错配都会 fail closed。
+受保护 checkpoint 只恢复能与任务事件、Tool 账本、Policy、审批记录和 effect graph 当前节点同时对上的阶段；密文损坏或任一绑定错配都会 fail closed。
 
 运行环境要求：Python 3.12+、Node 20.19+（推荐 Node 22+）和 pnpm 11。后端与前端的具体命令分别见各自 README。
 
 ## 下一步
 
-下一项建议是将当前单 Tool 固定图扩展为版本化、可查询的多步 Tool effect graph，并使用原子节点 transition 缩小崩溃 fail-closed 窗口。每次开发结束同步更新[项目进度](项目进度.md)。
+阶段 61 已把运行时稳定告警升级为数据库持久化的 opened/updated/resolved lifecycle 通知链，并将普通 audit 分页与完整导出绑定到冻结数据库 head、opaque 内容寻址 cursor 和逐页摘要。PostgreSQL 17.10 双 engine 同故障只生成一条 opened 通知，并证明并发新增 audit 不进入旧 export。RabbitMQ 仍只是未来可选唤醒层，不参与告警或导出正确性。下一项进入首个真实可触发的受信条件业务图。每次开发结束同步更新[项目进度](项目进度.md)。

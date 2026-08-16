@@ -1,5 +1,6 @@
 """Test-only builders for exact Tool Runner policy authorization proofs."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -54,7 +55,9 @@ def authorization_resources(
     )
 
 
-def make_test_resource_projector(contract: ToolContract):
+def make_test_resource_projector(
+    contract: ToolContract,
+) -> Callable[[BaseModel], tuple[PolicyResource, ...]]:
     def project(arguments: BaseModel) -> tuple[PolicyResource, ...]:
         return authorization_resources(
             contract,

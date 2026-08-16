@@ -53,6 +53,10 @@ function makeReconciliation(): Reconciliation {
     resolved_by: null,
     unknown_at: '2026-08-10T00:00:01Z',
     resolved_at: null,
+    graph_recovery_status: 'not_applicable',
+    graph_recovery_action: null,
+    graph_recovery_event_id: null,
+    graph_recovered_at: null,
     can_create_attempt: false,
     new_attempt_task_id: null,
     new_attempt_created_at: null,
@@ -97,6 +101,7 @@ function makeCenter() {
     resolveSelected: vi.fn().mockResolvedValue(true),
     createAttempt: vi.fn().mockResolvedValue(null),
     createCompensation: vi.fn().mockResolvedValue(makeTask('task-compensation', 'created')),
+    recoverGraph: vi.fn().mockResolvedValue(makeTask('task-1', 'running')),
     taskForNavigation: vi.fn(async (taskId: string) => (
       tasks.find((task) => task.task_id === taskId) ?? null
     )),
@@ -161,5 +166,23 @@ describe('ReconciliationCenter', () => {
 
     expect(center.taskForNavigation).toHaveBeenCalledWith('task-1')
     expect(wrapper.emitted('openTask')).toEqual([[makeTask('task-1')]])
+  })
+
+  it('图恢复要求二次确认并提交显式 continue 动作', async () => {
+    center.selected.value = {
+      ...center.selected.value,
+      status: 'resolved',
+      outcome: 'confirmed_succeeded',
+      graph_recovery_status: 'pending',
+    }
+    const wrapper = mount(ReconciliationCenter)
+
+    await wrapper.get('[data-testid="recover-graph-continue"]').trigger('click')
+    expect(center.recoverGraph).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('不会把原 unknown call 改写')
+
+    await wrapper.get('[data-testid="recover-graph-continue"]').trigger('click')
+    await flushPromises()
+    expect(center.recoverGraph).toHaveBeenCalledWith('continue')
   })
 })

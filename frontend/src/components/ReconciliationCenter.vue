@@ -2,7 +2,7 @@
 import { ref, watch } from 'vue'
 
 import { useReconciliationCenter } from '../composables/useReconciliationCenter'
-import type { ReconciliationOutcome, Task } from '../types'
+import type { GraphRecoveryAction, ReconciliationOutcome, Task } from '../types'
 
 const props = withDefaults(defineProps<{
   activeTaskId?: string | null
@@ -37,6 +37,7 @@ const {
   resolveSelected,
   createAttempt,
   createCompensation,
+  recoverGraph,
   taskForNavigation,
   previousTasks,
   nextTasks,
@@ -44,7 +45,9 @@ const {
 
 const outcome = ref<ReconciliationOutcome>('accepted_unknown')
 const evidenceSummary = ref('')
-const confirmation = ref<'resolve' | 'attempt' | 'compensation' | null>(null)
+const confirmation = ref<
+  'resolve' | 'attempt' | 'compensation' | 'recover_continue' | 'recover_terminate' | null
+>(null)
 
 const outcomeLabels: Record<ReconciliationOutcome, string> = {
   confirmed_succeeded: '已确认成功',
@@ -58,6 +61,7 @@ const taskStatusLabels: Record<Task['status'], string> = {
   classifying: '正在分类',
   running: '执行中',
   waiting_approval: '等待审批',
+  waiting_reconciliation: '等待对账恢复',
   succeeded: '已完成',
   failed: '已失败',
   cancelled: '已取消',
@@ -115,6 +119,18 @@ async function submitCompensation(): Promise<void> {
   if (task) emit('openTask', task)
 }
 
+async function submitGraphRecovery(action: GraphRecoveryAction): Promise<void> {
+  const confirmationAction = action === 'continue'
+    ? 'recover_continue'
+    : 'recover_terminate'
+  if (confirmation.value !== confirmationAction) {
+    confirmation.value = confirmationAction
+    return
+  }
+  const task = await recoverGraph(action)
+  if (task) emit('openTask', task)
+}
+
 watch(
   () => selected.value?.reconciliation_id ?? null,
   () => {
@@ -161,6 +177,7 @@ watch(
             <select v-model="taskFilter" data-testid="task-history-filter" :disabled="loading">
               <option value="all">全部</option>
               <option value="waiting_approval">等待审批</option>
+              <option value="waiting_reconciliation">等待对账恢复</option>
               <option value="succeeded">已完成</option>
               <option value="failed">已失败</option>
               <option value="cancelled">已取消</option>
@@ -325,6 +342,38 @@ watch(
             <p>{{ selected.evidence_summary }}</p>
             <small>{{ selected.resolved_by }} · {{ selected.resolved_at ? formattedTime(selected.resolved_at) : '未记录时间' }}</small>
           </section>
+
+          <section v-if="selected.graph_recovery_status !== 'not_applicable'" class="detail-section successor-section">
+            <h3>原 effect graph 恢复</h3>
+            <p v-if="selected.graph_recovery_status === 'pending'">
+              Tool ledger 仍为 unknown。请明确选择按已持久化裁决推进原图，或终止原图。
+            </p>
+            <p v-else>
+              已提交 {{ selected.graph_recovery_action === 'continue' ? '继续原图' : '终止原图' }} 命令。
+            </p>
+            <p v-if="confirmation === 'recover_continue'" class="action-confirm" role="alert">
+              继续操作只消费 reconciliation 事实，不会把原 unknown call 改写为成功或失败。
+            </p>
+            <p v-if="confirmation === 'recover_terminate'" class="action-confirm" role="alert">
+              终止后原图保持可审计，不再调度后继节点。
+            </p>
+            <div v-if="selected.graph_recovery_status === 'pending'" class="action-row">
+              <button
+                data-testid="recover-graph-continue"
+                type="button"
+                :disabled="activeAction !== null || !['confirmed_succeeded', 'confirmed_no_effect'].includes(selected.outcome ?? '')"
+                @click="submitGraphRecovery('continue')"
+              >{{ activeAction === 'recover_continue' ? '恢复中…' : confirmation === 'recover_continue' ? '确认按裁决恢复' : '按裁决恢复原图' }}</button>
+              <button
+                class="danger-button"
+                data-testid="recover-graph-terminate"
+                type="button"
+                :disabled="activeAction !== null"
+                @click="submitGraphRecovery('terminate')"
+              >{{ activeAction === 'recover_terminate' ? '终止中…' : confirmation === 'recover_terminate' ? '确认终止原图' : '终止原图' }}</button>
+              <button v-if="confirmation === 'recover_continue' || confirmation === 'recover_terminate'" type="button" @click="confirmation = null">取消</button>
+            </div>
+          </section>
         </template>
         <div v-else class="detail-empty">选择一条 Reconciliation 查看证据、裁决与血缘。</div>
       </article>
@@ -357,6 +406,7 @@ watch(
 .history-meta { display: flex; justify-content: space-between; gap: 0.5rem; color: #65728a; font-size: 0.58rem; }
 .history-meta b { color: #8da1c9; font-weight: 650; }
 .history-meta b[data-status="waiting_approval"] { color: #e5bd73; }
+.history-meta b[data-status="waiting_reconciliation"] { color: #c4b5fd; }
 .history-meta b[data-status="succeeded"] { color: #80d9b9; }
 .history-meta b[data-status="failed"], .history-meta b[data-status="cancelled"] { color: #df9295; }
 .history-item code { overflow: hidden; color: #56637b; font-size: 0.55rem; text-overflow: ellipsis; }
