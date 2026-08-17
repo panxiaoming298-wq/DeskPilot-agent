@@ -333,6 +333,83 @@ class ContextManifestRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class CompactionSnapshotRecord(Base):
+    __tablename__ = "compaction_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'conflict', 'stale')",
+            name="ck_compaction_snapshot_status",
+        ),
+        CheckConstraint(
+            "classification IN ('public', 'internal', 'sensitive')",
+            name="ck_compaction_snapshot_classification",
+        ),
+        Index("ix_compaction_snapshots_task", "task_id", "status", "created_at"),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    parent_snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("compaction_snapshots.snapshot_id", ondelete="RESTRICT"), nullable=True
+    )
+    source_set_digest: Mapped[str] = mapped_column(String(64))
+    structured_fields: Mapped[dict[str, Any]] = mapped_column(JSON)
+    narrative_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    coverage_manifest: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    compressor_version: Mapped[str] = mapped_column(String(64))
+    classification: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))
+    snapshot_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CompactionSourceRefRecord(Base):
+    __tablename__ = "compaction_source_refs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'stale', 'deleted', 'out_of_scope')",
+            name="ck_compaction_source_status",
+        ),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("compaction_snapshots.snapshot_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_type: Mapped[str] = mapped_column(String(100))
+    source_ref: Mapped[str] = mapped_column(String(500))
+    source_version: Mapped[str] = mapped_column(String(100))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    authority_class: Mapped[str] = mapped_column(String(32))
+    classification: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))
+
+
+class CompactionCoverageItemRecord(Base):
+    __tablename__ = "compaction_coverage_items"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('covered', 'conflict', 'stale')",
+            name="ck_compaction_coverage_status",
+        ),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("compaction_snapshots.snapshot_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    field_kind: Mapped[str] = mapped_column(String(32))
+    value_digest: Mapped[str] = mapped_column(String(64))
+    source_refs: Mapped[list[str]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16))
+
+
 class LongTermMemoryProposalRecord(Base):
     __tablename__ = "long_term_memory_proposals"
     __table_args__ = (

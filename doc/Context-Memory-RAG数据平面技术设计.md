@@ -523,7 +523,7 @@ TTL 过期与显式删除分开记录。过期项可以保留受保护审计但�
 
 ## 19. CompactionSnapshot
 
-阶段 71～72 先建立来源、选择、权限和 Manifest，阶段 73 再做压缩。
+阶段 72～73 先建立来源、选择、权限、Manifest 与长期记忆，阶段 74 再做压缩。
 
 建议模型：
 
@@ -588,7 +588,7 @@ memory_tombstones
 memory_index_entries
 ```
 
-阶段 73：
+阶段 74：
 
 ```text
 compaction_snapshots
@@ -703,19 +703,19 @@ COMPACTION_SNAPSHOT_STALE
 - collection/ACL/classification/retrieval proof；
 - Memory 与 RAG 保持独立索引和语义。
 
-### 73A：确定性结构化压缩
+### 74A：确定性结构化压缩
 
 - goal/constraint/decision/question/ref 提取；
 - source set/coverage manifest；
 - required fields 100% 保留。
 
-### 73B：模型叙述压缩与验证
+### 74B：模型叙述压缩与验证
 
 - 非权威 narrative summary；
 - compressor/prompt/model digest；
 - coverage/contradiction/stale 检查。
 
-### 73C：重建、链与删除传播
+### 74C：重建、链与删除传播
 
 - parent/source chain；
 - reconstruction；

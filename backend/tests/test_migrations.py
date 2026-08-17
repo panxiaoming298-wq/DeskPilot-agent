@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0034_long_term_memory"
+CURRENT_REVISION = "0035_context_compaction"
 
 
 def _sync_url(path: Path) -> str:
@@ -1315,6 +1315,36 @@ def test_stage_72_context_working_memory_migration_round_trips(tmp_path: Path) -
 def test_stage_73_long_term_memory_migration_round_trips(tmp_path: Path) -> None:
     database_path = tmp_path / "stage-73-round-trip.db"
     config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_74_context_compaction_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-74-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    expected = {
+        "compaction_snapshots",
+        "compaction_source_refs",
+        "compaction_coverage_items",
+    }
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert expected.issubset(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0034_long_term_memory")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert not expected & set(inspect(connection).get_table_names())
+    engine.dispose()
 
     command.upgrade(config, "head")
     command.check(config)

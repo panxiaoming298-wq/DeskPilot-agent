@@ -66,4 +66,4 @@ pnpm type-check
 pnpm build
 ```
 
-组件测试使用 Vitest、Vue Test Utils 和 jsdom；当前 21 个文件、141 个用例额外覆盖长期记忆来源/Provider 使用展示、待确认提案、类型化新建和两次显式删除确认。执行 Vite/Vitest 需要 Node 20.19+。
+组件测试使用 Vitest、Vue Test Utils 和 jsdom；当前 21 个文件、141 个用例额外覆盖长期记忆来源/Provider 使用展示、待确认提案、类型化新建和两次显式删除确认。阶段 74 未修改前端；CompactionSnapshot API 已为后续统一工作台提供 source/coverage/conflict/stale/parent 数据。执行 Vite/Vitest 需要 Node 20.19+。

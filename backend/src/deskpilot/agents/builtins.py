@@ -131,6 +131,7 @@ def create_builtin_agent_registry(
                     "conversation_message",
                     "working_memory",
                     "long_term_memory",
+                    "compaction_snapshot",
                     "external_untrusted_page_snapshot",
                 ),
                 memory_read_scopes=("user",),

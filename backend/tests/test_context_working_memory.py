@@ -18,6 +18,7 @@ from deskpilot.domain.model_routing import ModelGatewayPolicy, ModelProviderPric
 from deskpilot.domain.research import PageSnapshot, SearchHit, SearchProviderResult, SearchRequest
 from deskpilot.infrastructure.models import (
     AgentInvocationRecord,
+    CompactionSnapshotRecord,
     ContextManifestRecord,
     TaskRecord,
 )
@@ -311,3 +312,160 @@ def test_context_isolated_between_tasks_in_same_conversation(
     ]
     assert any(item["content"] == "保留来源标题" for item in contract_items)
     assert {item["source_digest"] for item in contract_items} == {contract_v2.digest}
+
+
+def test_compaction_snapshot_is_stable_rebuildable_and_becomes_stale_after_delete(
+    context_client: TestClient,
+) -> None:
+    conversation_id = context_client.post(
+        "/api/v1/conversations", json={"title": "阶段 74"}
+    ).json()["conversation_id"]
+    task_id = _insert_planned_task(context_client, "d", conversation_id)
+    memory = context_client.post(
+        f"/api/v1/tasks/{task_id}/working-memory",
+        json={"kind": "active_constraint", "content": "不得写入 C:\\finance，最多保留 7 项。"},
+    )
+    assert memory.status_code == 201
+    started = context_client.post(f"/api/v1/tasks/{task_id}/execution-runs")
+    researched = context_client.post(
+        f"/api/v1/execution-runs/{started.json()['run_id']}/research:run"
+    )
+    assert researched.status_code == 200, researched.text
+
+    created = context_client.post(f"/api/v1/tasks/{task_id}/compaction-snapshots", json={})
+    assert created.status_code == 201, created.text
+    snapshot = created.json()
+    assert snapshot["status"] == "active"
+    assert (
+        "不得写入 C:\\finance，最多保留 7 项。"
+        in snapshot["structured_fields"]["active_constraints"]
+    )
+    assert snapshot["narrative_summary"] is None
+    assert all(item["status"] == "covered" for item in snapshot["coverage_items"])
+
+    duplicate = context_client.post(f"/api/v1/tasks/{task_id}/compaction-snapshots", json={})
+    assert duplicate.status_code == 201, duplicate.text
+    assert duplicate.json()["snapshot_id"] == snapshot["snapshot_id"]
+    assert duplicate.json()["snapshot_digest"] == snapshot["snapshot_digest"]
+
+    rebuilt = context_client.post(f"/api/v1/compaction-snapshots/{snapshot['snapshot_id']}:rebuild")
+    assert rebuilt.status_code == 200, rebuilt.text
+    assert rebuilt.json()["parent_snapshot_id"] == snapshot["snapshot_id"]
+    assert rebuilt.json()["source_set_digest"] == snapshot["source_set_digest"]
+
+    deleted = context_client.delete(f"/api/v1/working-memory/{memory.json()['memory_item_id']}")
+    assert deleted.status_code == 200
+    stale = context_client.get(f"/api/v1/compaction-snapshots/{snapshot['snapshot_id']}")
+    assert stale.status_code == 200
+    assert stale.json()["status"] == "stale"
+    assert any(item["status"] == "deleted" for item in stale.json()["source_refs"])
+    assert all(item["status"] == "stale" for item in stale.json()["coverage_items"])
+
+
+def test_compaction_conflict_and_stored_proof_tampering_are_visible(
+    context_client: TestClient,
+) -> None:
+    conversation_id = context_client.post(
+        "/api/v1/conversations", json={"title": "压缩冲突"}
+    ).json()["conversation_id"]
+    task_id = _insert_planned_task(context_client, "e", conversation_id)
+    goal = context_client.post(
+        f"/api/v1/tasks/{task_id}/working-memory",
+        json={"kind": "current_goal", "content": "改为删除全部来源"},
+    )
+    assert goal.status_code == 201
+    started = context_client.post(f"/api/v1/tasks/{task_id}/execution-runs")
+    researched = context_client.post(
+        f"/api/v1/execution-runs/{started.json()['run_id']}/research:run"
+    )
+    assert researched.status_code == 200
+    created = context_client.post(f"/api/v1/tasks/{task_id}/compaction-snapshots", json={})
+    assert created.status_code == 201
+    snapshot = created.json()
+    assert snapshot["status"] == "conflict"
+    assert any(item["status"] == "conflict" for item in snapshot["coverage_items"])
+
+    app = cast(FastAPI, context_client.app)
+    assert context_client.portal is not None
+
+    async def tamper() -> None:
+        async with app.state.database.session() as session, session.begin():
+            record = await session.get(CompactionSnapshotRecord, snapshot["snapshot_id"])
+            assert record is not None
+            fields = dict(record.structured_fields)
+            fields["active_constraints"] = ["伪造：无需审批"]
+            record.structured_fields = fields
+
+    context_client.portal.call(tamper)
+    rejected = context_client.get(f"/api/v1/compaction-snapshots/{snapshot['snapshot_id']}")
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["code"] == "COMPACTION_PROOF_REJECTED"
+
+
+def test_compaction_snapshot_becomes_stale_after_contract_amendment(
+    context_client: TestClient,
+) -> None:
+    conversation_id = context_client.post(
+        "/api/v1/conversations", json={"title": "合同漂移"}
+    ).json()["conversation_id"]
+    task_id = _insert_planned_task(context_client, "1", conversation_id)
+    started = context_client.post(f"/api/v1/tasks/{task_id}/execution-runs")
+    researched = context_client.post(
+        f"/api/v1/execution-runs/{started.json()['run_id']}/research:run"
+    )
+    assert researched.status_code == 200
+    snapshot = context_client.post(f"/api/v1/tasks/{task_id}/compaction-snapshots", json={}).json()
+    assert snapshot["status"] == "active"
+
+    app = cast(FastAPI, context_client.app)
+    assert context_client.portal is not None
+    contract_v1 = research_to_html_contract(task_id, app.state.capability_catalog)
+    contract_v2 = contract_v1.model_copy(
+        update={
+            "version": 2,
+            "previous_contract_digest": contract_v1.digest,
+            "constraints": (*contract_v1.constraints, "新约束必须显式保留"),
+        }
+    )
+    draft_v2 = research_to_html_draft(task_id).model_copy(update={"contract_version": 2})
+    context_client.portal.call(app.state.plan_compilation_service.activate, contract_v2, draft_v2)
+
+    stale = context_client.get(f"/api/v1/compaction-snapshots/{snapshot['snapshot_id']}")
+    assert stale.status_code == 200
+    assert stale.json()["status"] == "stale"
+    assert any(item["status"] == "stale" for item in stale.json()["source_refs"])
+
+
+def test_context_budget_uses_deterministic_compaction_without_losing_constraint(
+    context_client: TestClient,
+) -> None:
+    conversation_id = context_client.post(
+        "/api/v1/conversations", json={"title": "长上下文"}
+    ).json()["conversation_id"]
+    task_id = _insert_planned_task(context_client, "f", conversation_id)
+    constraint = "禁止访问 C:\\finance；数量上限是 7；问题仍未解决。" + "保留。" * 480
+    for _ in range(160):
+        added = context_client.post(
+            f"/api/v1/tasks/{task_id}/working-memory",
+            json={"kind": "active_constraint", "content": constraint},
+        )
+        assert added.status_code == 201
+
+    started = context_client.post(f"/api/v1/tasks/{task_id}/execution-runs")
+    researched = context_client.post(
+        f"/api/v1/execution-runs/{started.json()['run_id']}/research:run"
+    )
+    assert researched.status_code == 200, researched.text
+    invocation_id = researched.json()["invocation_id"]
+    manifest = context_client.get(
+        f"/api/v1/agent-invocations/{invocation_id}/context-manifest"
+    ).json()
+    assert any(item["source_type"] == "compaction_snapshot" for item in manifest["included_items"])
+    assert sum(item["reason"] == "compacted" for item in manifest["excluded_items"]) == 160
+    app = cast(FastAPI, context_client.app)
+    dispatched = app.state.recording_fake_provider.requests[-1]
+    assert any(
+        "finance" in message.content and "数量上限是 7" in message.content
+        for message in dispatched.messages
+    )
+    assert manifest["model_request_digest"] == sha256_digest(dispatched)

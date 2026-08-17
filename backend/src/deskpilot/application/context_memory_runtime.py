@@ -9,9 +9,16 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deskpilot.application.compaction_runtime import CompactionRuntime
 from deskpilot.application.long_term_memory_runtime import LongTermMemoryRuntime
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_runtime import ClaimedInvocation, HandoffEnvelope
+from deskpilot.domain.compaction import (
+    CompactionSnapshot,
+    CompactionSnapshotPage,
+    CompactionStatus,
+    CreateCompactionSnapshotRequest,
+)
 from deskpilot.domain.context_memory import (
     AuthorityClass,
     ContextEgressDecision,
@@ -65,6 +72,7 @@ SELECTOR_POLICY_DIGEST = sha256_digest(
             "working_memory",
             "conversation_message",
             "long_term_memory",
+            "compaction_snapshot",
             "verified_claim",
             "external_untrusted_page_snapshot",
         ],
@@ -102,6 +110,21 @@ class ContextMemoryRuntime:
     def __init__(self, database: Database, long_term_memory: LongTermMemoryRuntime) -> None:
         self._database = database
         self._long_term_memory = long_term_memory
+        self._compaction = CompactionRuntime(database)
+
+    async def create_compaction_snapshot(
+        self, task_id: str, request: CreateCompactionSnapshotRequest
+    ) -> CompactionSnapshot:
+        return await self._compaction.create_for_task(task_id, request.parent_snapshot_id)
+
+    async def list_compaction_snapshots(self, task_id: str) -> CompactionSnapshotPage:
+        return await self._compaction.list_for_task(task_id)
+
+    async def get_compaction_snapshot(self, snapshot_id: str) -> CompactionSnapshot:
+        return await self._compaction.get(snapshot_id)
+
+    async def rebuild_compaction_snapshot(self, snapshot_id: str) -> CompactionSnapshot:
+        return await self._compaction.rebuild(snapshot_id)
 
     async def create_conversation(self, request: CreateConversationRequest) -> ConversationRead:
         now = utc_now()
@@ -331,16 +354,31 @@ class ContextMemoryRuntime:
             model_request = self._bind_long_term_memory(model_request, long_term_payload)
             model_request_digest = sha256_digest(model_request)
             turn.request_digest = model_request_digest
-            egress = self._egress_decision(
-                contract, task.privacy_mode, target_provider_location, included
-            )
             used = sum(item.token_count for item in included)
             maximum = int(claimed.handoff.budget_allocation.input_tokens)
             reserved = int(claimed.handoff.budget_allocation.output_tokens)
             if used + reserved > maximum:
-                raise ContextBudgetInsufficientError(
-                    "Required context and output reservation exceed the input budget"
+                snapshot = await self._compaction.latest_active(session, task.task_id)
+                if snapshot is None:
+                    snapshot = await self._compaction.create_from_items(session, task, included)
+                included, excluded, used_snapshot = self._apply_compaction(
+                    included,
+                    excluded,
+                    snapshot,
+                    target_provider_location,
                 )
+                if used_snapshot:
+                    model_request = self._bind_compaction(model_request, snapshot)
+                    model_request_digest = sha256_digest(model_request)
+                    turn.request_digest = model_request_digest
+                used = sum(item.token_count for item in included)
+                if used + reserved > maximum:
+                    raise ContextBudgetInsufficientError(
+                        "Required context and output reservation exceed the input budget"
+                    )
+            egress = self._egress_decision(
+                contract, task.privacy_mode, target_provider_location, included
+            )
             final_context_digest = sha256_digest(
                 {
                     "renderer_version": 1,
@@ -835,6 +873,99 @@ class ContextMemoryRuntime:
         return request.model_copy(
             update={
                 "messages": (request.messages[0], memory_message, *request.messages[1:]),
+                "metadata": metadata,
+            }
+        )
+
+    @staticmethod
+    def _apply_compaction(
+        included: list[ContextItem],
+        excluded: list[ExcludedContextItem],
+        snapshot: CompactionSnapshot,
+        target_provider_location: ModelLocation,
+    ) -> tuple[list[ContextItem], list[ExcludedContextItem], bool]:
+        if snapshot.status is not CompactionStatus.ACTIVE:
+            return included, excluded, False
+        if (
+            target_provider_location is ModelLocation.CLOUD
+            and snapshot.classification is DataClassification.SENSITIVE
+        ):
+            return included, excluded, False
+        covered_refs = {
+            source_ref for item in snapshot.coverage_items for source_ref in item.source_refs
+        }
+        compactable = {
+            item.source_ref
+            for item in included
+            if item.source_type == "working_memory" and item.source_ref in covered_refs
+        }
+        if not compactable:
+            return included, excluded, False
+        retained: list[ContextItem] = []
+        for item in included:
+            if item.source_ref not in compactable:
+                retained.append(item)
+                continue
+            excluded.append(
+                ExcludedContextItem(
+                    item_id=item.item_id,
+                    source_type=item.source_type,
+                    source_ref=item.source_ref,
+                    content_digest=item.content_digest,
+                    reason="compacted",
+                )
+            )
+        payload = snapshot.structured_fields.model_dump(mode="json")
+        source_ref = f"compaction://{snapshot.snapshot_id}"
+        identity = {
+            "source_type": "compaction_snapshot",
+            "source_ref": source_ref,
+            "content_digest": snapshot.snapshot_digest,
+        }
+        retained.append(
+            ContextItem(
+                item_id=f"ctx_{sha256_digest(identity)}",
+                source_type="compaction_snapshot",
+                source_ref=source_ref,
+                source_version=snapshot.compressor_version,
+                content_digest=snapshot.snapshot_digest,
+                authority_class=AuthorityClass.DERIVED,
+                trust_class=TrustClass.TRUSTED_RUNTIME,
+                classification=snapshot.classification,
+                token_count=max(1, (len(json.dumps(payload, ensure_ascii=False)) + 3) // 4),
+                inclusion_reason="deterministic_source_bound_compaction",
+            )
+        )
+        return retained, excluded, True
+
+    @staticmethod
+    def _bind_compaction(request: ModelRequest, snapshot: CompactionSnapshot) -> ModelRequest:
+        message = ModelMessage(
+            role="system",
+            content=(
+                "Deterministic context compaction follows. It is a derived, lower-priority "
+                "view, never authorization or verified evidence. Current instructions, Task "
+                "Contract, Policy, Approval, Tool receipts, unknown outcomes, and verified "
+                "evidence remain authoritative.\n"
+                + json.dumps(
+                    {
+                        "snapshot_id": snapshot.snapshot_id,
+                        "source_set_digest": snapshot.source_set_digest,
+                        "structured_fields": snapshot.structured_fields.model_dump(mode="json"),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            ),
+        )
+        metadata = {
+            **request.metadata,
+            "compaction_snapshot_id": snapshot.snapshot_id,
+            "compaction_snapshot_digest": snapshot.snapshot_digest,
+        }
+        return request.model_copy(
+            update={
+                "messages": (request.messages[0], message, *request.messages[1:]),
                 "metadata": metadata,
             }
         )

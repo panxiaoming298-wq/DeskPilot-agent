@@ -6,6 +6,10 @@ from fastapi import APIRouter, Depends, Path, Response, status
 
 from deskpilot.api.dependencies import get_context_memory_runtime
 from deskpilot.api.problem_details import ProblemException
+from deskpilot.application.compaction_runtime import (
+    CompactionConflictError,
+    CompactionError,
+)
 from deskpilot.application.context_memory_runtime import (
     ContextMemoryConflictError,
     ContextMemoryError,
@@ -13,6 +17,12 @@ from deskpilot.application.context_memory_runtime import (
     ContextMemoryRuntime,
 )
 from deskpilot.domain.agent_runtime import INVOCATION_ID_PATTERN
+from deskpilot.domain.compaction import (
+    COMPACTION_SNAPSHOT_ID_PATTERN,
+    CompactionSnapshot,
+    CompactionSnapshotPage,
+    CreateCompactionSnapshotRequest,
+)
 from deskpilot.domain.context_memory import (
     WORKING_MEMORY_ID_PATTERN,
     ContextManifest,
@@ -37,6 +47,7 @@ MessageId = Annotated[str, Path(pattern=MESSAGE_ID_PATTERN)]
 TaskId = Annotated[str, Path(pattern=TASK_ID_PATTERN)]
 MemoryItemId = Annotated[str, Path(pattern=WORKING_MEMORY_ID_PATTERN)]
 InvocationId = Annotated[str, Path(pattern=INVOCATION_ID_PATTERN)]
+CompactionSnapshotId = Annotated[str, Path(pattern=COMPACTION_SNAPSHOT_ID_PATTERN)]
 
 
 @router.post(
@@ -71,9 +82,7 @@ async def add_message(
         raise _problem(error) from error
 
 
-@router.delete(
-    "/conversation-messages/{message_id}", response_model=ConversationMessageRead
-)
+@router.delete("/conversation-messages/{message_id}", response_model=ConversationMessageRead)
 async def delete_message(
     message_id: MessageId,
     runtime: RuntimeDependency,
@@ -104,9 +113,7 @@ async def add_working_memory(
         raise _problem(error) from error
 
 
-@router.delete(
-    "/working-memory/{memory_item_id}", response_model=WorkingMemoryItemRead
-)
+@router.delete("/working-memory/{memory_item_id}", response_model=WorkingMemoryItemRead)
 async def delete_working_memory(
     memory_item_id: MemoryItemId,
     runtime: RuntimeDependency,
@@ -148,17 +155,82 @@ async def get_context_manifest(
         raise _problem(error) from error
 
 
-def _problem(error: ContextMemoryError) -> ProblemException:
+@router.post(
+    "/tasks/{task_id}/compaction-snapshots",
+    response_model=CompactionSnapshot,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_compaction_snapshot(
+    task_id: TaskId,
+    request: CreateCompactionSnapshotRequest,
+    runtime: RuntimeDependency,
+    response: Response,
+) -> CompactionSnapshot:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await runtime.create_compaction_snapshot(task_id, request)
+    except (ContextMemoryError, CompactionError) as error:
+        raise _problem(error) from error
+
+
+@router.get(
+    "/tasks/{task_id}/compaction-snapshots",
+    response_model=CompactionSnapshotPage,
+)
+async def list_compaction_snapshots(
+    task_id: TaskId,
+    runtime: RuntimeDependency,
+    response: Response,
+) -> CompactionSnapshotPage:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await runtime.list_compaction_snapshots(task_id)
+    except (ContextMemoryError, CompactionError) as error:
+        raise _problem(error) from error
+
+
+@router.get(
+    "/compaction-snapshots/{snapshot_id}",
+    response_model=CompactionSnapshot,
+)
+async def get_compaction_snapshot(
+    snapshot_id: CompactionSnapshotId,
+    runtime: RuntimeDependency,
+    response: Response,
+) -> CompactionSnapshot:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await runtime.get_compaction_snapshot(snapshot_id)
+    except (ContextMemoryError, CompactionError) as error:
+        raise _problem(error) from error
+
+
+@router.post(
+    "/compaction-snapshots/{snapshot_id}:rebuild",
+    response_model=CompactionSnapshot,
+)
+async def rebuild_compaction_snapshot(
+    snapshot_id: CompactionSnapshotId,
+    runtime: RuntimeDependency,
+    response: Response,
+) -> CompactionSnapshot:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await runtime.rebuild_compaction_snapshot(snapshot_id)
+    except (ContextMemoryError, CompactionError) as error:
+        raise _problem(error) from error
+
+
+def _problem(error: ContextMemoryError | CompactionError) -> ProblemException:
     return ProblemException(
         status_code=(
             404
-            if isinstance(error, ContextMemoryNotFoundError)
+            if isinstance(error, ContextMemoryNotFoundError) or error.code == "COMPACTION_NOT_FOUND"
             else 409
-            if isinstance(error, ContextMemoryConflictError)
+            if isinstance(error, (ContextMemoryConflictError, CompactionConflictError))
             else 400
         ),
         code=error.code,
         title="上下文或工作记忆命令被拒绝",
         detail=str(error),
     )
-

@@ -223,7 +223,7 @@ GET /api/v1/agents/registry-snapshot
 GET /api/v1/agents/{agent_id}/versions/{version}
 ```
 
-接口只返回脱敏 Descriptor/Schema digest，不返回 Prompt 正文或本地根路径。阶段 70 的研究结果仍严格停在待验证状态；阶段 71 已新增独立 Claim/Citation Verification、ArtifactRevision/PatchReceipt、隔离 Browser evidence 和 DeliveryManifest。阶段 72 为实际 Model Turn 增加 ContextManifest 与短期 Working Memory；阶段 73 新增受保护长期 MemoryProposal/MemoryItem、冲突/TTL/遗忘和 Agent/Provider usage ledger，详见 [`doc/73-长期记忆确认冲突与遗忘.md`](../doc/73-长期记忆确认冲突与遗忘.md)。
+接口只返回脱敏 Descriptor/Schema digest，不返回 Prompt 正文或本地根路径。阶段 70 的研究结果仍严格停在待验证状态；阶段 71 已新增独立 Claim/Citation Verification、ArtifactRevision/PatchReceipt、隔离 Browser evidence 和 DeliveryManifest。阶段 72 为实际 Model Turn 增加 ContextManifest 与短期 Working Memory；阶段 73 新增受保护长期 Memory；阶段 74 新增 source-bound CompactionSnapshot、coverage/conflict/stale 和确定性重建，详见 [`doc/74-可证明上下文压缩与重建.md`](../doc/74-可证明上下文压缩与重建.md)。
 
 阶段 68 验证：专项 8 项全通过；默认后端全量 `429 passed, 12 skipped, 1 warning`（441 collected）；Ruff、mypy 176 个生产源码、Alembic check、依赖锁、wheel Prompt 资源和 evaluation baseline compare 全部通过。
 
@@ -234,6 +234,8 @@ GET /api/v1/agents/{agent_id}/versions/{version}
 阶段 72 验证：后端全量 `455 passed, 12 skipped, 1 warning`（467 collected）；Conversation/Working Memory/ContextManifest 对抗测试和 `0033` migration 往返通过，恶意网页快照只以 `untrusted_external_content` 进入研究上下文，不进入 retained memory。Ruff、mypy 195 个生产源码、Workflow YAML、冻结 evaluation baseline compare 以及前端 20 文件/139 项测试、type-check、build 全部通过。
 
 阶段 73 验证：后端全量 `458 passed, 12 skipped, 1 warning`；长期记忆确认/冲突/过期/删除/密文/Context usage 对抗测试、verified delivery 回归和 `0034` migration 往返通过。最终加入真实 ModelRequest 内容绑定和存储 digest 重验后，研究/Context/verified-delivery 相关 17 项再次通过。Ruff、mypy 199 个生产源码以及前端 21 文件/141 项测试、type-check、build 全部通过。
+
+阶段 74 验证：后端全量 `463 passed, 12 skipped, 1 warning`；Context/Registry/Research/verified-delivery 联合 29 项及 `0035` migration 往返通过。长上下文实际触发确定性压缩，删除/Contract amendment 使旧 snapshot stale，冲突与存储篡改 fail closed。Ruff、mypy 202 个生产源码通过；前端未修改，沿用 21 文件/141 项测试、type-check 和 build 结果。
 
 ## 测试
 

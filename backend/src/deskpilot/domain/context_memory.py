@@ -46,6 +46,7 @@ class AuthorityClass(StrEnum):
     VERIFIED = "verified"
     WORKING_MEMORY = "working_memory"
     CONFIRMED_MEMORY = "confirmed_memory"
+    DERIVED = "derived"
     DATA = "data"
 
 
@@ -149,6 +150,7 @@ class ContextItem(BaseModel):
         "working_memory",
         "verified_claim",
         "long_term_memory",
+        "compaction_snapshot",
         "external_untrusted_page_snapshot",
     ]
     source_ref: str = Field(min_length=1, max_length=500)
@@ -176,6 +178,7 @@ class ExcludedContextItem(BaseModel):
         "egress_denied",
         "token_budget",
         "conflict",
+        "compacted",
     ]
 
 

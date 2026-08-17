@@ -4,7 +4,7 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 73 已完成受保护、版本化的跨会话长期记忆：用户可创建/确认/拒绝/修订/删除/导出，异值冲突不自动覆盖，TTL/删除/冲突项不被 Context Builder 召回，并可查看实际 Agent/Provider 使用去向。Agent 与 verified episode 只能提案，Memory 不能放宽 Policy 或绕过阶段 71 verified edge。下一阶段为 74 可证明上下文压缩与重建。** 详细进度、验证结果和续接入口见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 74 已完成 source-bound `CompactionSnapshot`、逐字段 coverage、conflict/stale、parent chain 与确定性重建；长 Context 超预算时只能使用来源和摘要均可复核的 active 快照。Summary/Memory 仍不能放宽 Policy、覆盖 Task/Event 真值或绕过阶段 71 verified edge。下一阶段为 75 通用任务与多 Agent 对抗发布门禁。** 详细进度、验证结果和续接入口见[项目进度](项目进度.md)。
 
 ## 一句话架构
 
@@ -217,4 +217,4 @@ flowchart LR
 
 ## 下一步
 
-阶段 73 已完成长期记忆、确认、冲突、TTL 和遗忘闭环。下一开发项是阶段 74 可证明上下文压缩与重建；每次开发结束同步更新[项目进度](项目进度.md)。
+阶段 74 已完成确定性上下文压缩、coverage/conflict/stale 和重建闭环。下一开发项是阶段 75 通用任务与多 Agent 对抗发布门禁；每次开发结束同步更新[项目进度](项目进度.md)。
