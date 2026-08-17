@@ -6,7 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
-from deskpilot.api.dependencies import get_processor, get_task_service
+from deskpilot.api.dependencies import get_processor, get_task_service, get_telemetry
 from deskpilot.api.problem_details import ProblemException
 from deskpilot.application.effect_graph_control_router import (
     EffectGraphControlDeliveryTimeoutError,
@@ -33,6 +33,7 @@ from deskpilot.domain.schemas import (
     TaskRead,
     TaskStatus,
 )
+from deskpilot.observability import TelemetryFacade
 from deskpilot.runner.executor import ToolExecutorError
 from deskpilot.tools.files import FileMoveInput, normalize_file_move_input
 
@@ -40,6 +41,7 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 TaskServiceDependency = Annotated[TaskService, Depends(get_task_service)]
 ProcessorDependency = Annotated[TaskProcessor, Depends(get_processor)]
+TelemetryDependency = Annotated[TelemetryFacade, Depends(get_telemetry)]
 AfterSequence = Annotated[int, Query(ge=0)]
 TaskStatusFilter = Annotated[TaskStatus | None, Query(alias="status")]
 HistoryLimit = Annotated[int, Query(ge=1, le=100)]
@@ -74,17 +76,27 @@ async def create_task(
     command: TaskCreate,
     service: TaskServiceDependency,
     processor: ProcessorDependency,
+    telemetry: TelemetryDependency,
 ) -> TaskRead:
-    normalized_command = await _normalize_task_command(command)
-    task = await service.create_task(normalized_command)
-    processor.start(
-        task.task_id,
-        task.goal,
-        privacy_mode=task.privacy_mode,
-        constraints=tuple(task.constraints),
-        tool_request=normalized_command.tool_request,
-    )
-    return task
+    with telemetry.operation("deskpilot.task.accept", "task") as operation:
+        normalized_command = await _normalize_task_command(command)
+        task = await service.create_task(normalized_command)
+        operation.set_attribute("deskpilot.subject.type", "task")
+        operation.set_attribute("deskpilot.subject.id", task.task_id)
+        events = await service.list_events(task.task_id)
+        if events:
+            operation.set_attribute(
+                "deskpilot.task.correlation_id", events[0].trace_id
+            )
+        operation.set_outcome("accepted")
+        processor.start(
+            task.task_id,
+            task.goal,
+            privacy_mode=task.privacy_mode,
+            constraints=tuple(task.constraints),
+            tool_request=normalized_command.tool_request,
+        )
+        return task
 
 
 @router.get("", response_model=TaskHistoryRead)

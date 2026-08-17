@@ -1,5 +1,7 @@
 # 03. Agent 编排与任务生命周期
 
+> 方向更新：通用对话、联网研究、Task Artifact Workspace 与 Browser Verifier 的权威边界见[《通用对话、联网研究与 Artifact 工作区总体架构》](通用对话联网研究与Artifact工作区总体架构.md)。首个纵向切片 `research_to_html` 已由 [ADR-015](ADR-015-通用任务Agent产品边界与首个纵向切片.md)接受，但尚未实现。
+
 ## 1. Agent 的工程定义
 
 本项目中的 Agent 不是必须独占一个进程或一个模型。它是四类配置与能力的组合：
@@ -20,9 +22,11 @@ Agent = Role Prompt + Allowed Tools + Input/Output Schema + Runtime Policy
 | App Agent | 应用发现、启动、受控关闭、后期安装 | `app.*`、受限 UI Automation | 执行未知 exe、处理支付 |
 | Browser Agent | 打开页面、导航、抽取、表单预填 | `browser.*` | 未审批提交/发布/下载执行 |
 | Search Agent | 多查询生成、结果去重、来源排序 | `search.*`、只读网页抓取 | 将网页指令当系统指令 |
+| Research Agent | Search/PageSnapshot、Claim/Citation、来源冲突与限制 | `research.read.v1` | 写 Artifact、扩大 Capability、把网页写入 active Memory |
+| Artifact Builder | 根据 Task Contract 和已验证证据生成工作区产物 | `artifact.html.v1` | 联网、Shell、包安装、写用户目录 |
 | Knowledge Agent | 混合检索、引用拼装、文档对比 | `knowledge.*` | 绕过文件 ACL 获取原文 |
 
-Guard/Policy 和 Verifier 不建模为普通 Agent：关键权限决策必须确定性执行，验证优先使用工具和规则。仅在语义评价确实必要时，Verifier 才调用模型，并且无副作用权限。
+Guard/Policy、Browser Verifier 和 Final Verifier 不建模为普通 Agent：关键权限和验收必须确定性执行，验证优先使用工具和规则。仅在语义评价确实必要时，Verifier 才调用模型，并且无副作用权限。
 
 ## 3. 任务分类与路由
 

@@ -1,0 +1,39 @@
+name: Phase 70 Agent research runtime gate
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  agent-research-runtime-gate:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --frozen --all-extras
+      - name: Agent invocation and research acceptance tests
+        run: |
+          uv run pytest tests/test_agent_research_runtime.py tests/test_agent_registry.py tests/test_task_plans.py tests/test_migrations.py::test_stage_70_agent_research_runtime_migration_round_trips
+      - name: Static checks
+        run: |
+          uv run ruff check src tests/test_agent_research_runtime.py tests/test_migrations.py
+          uv run mypy
+      - name: Frozen evaluation baseline
+        run: uv run python -m deskpilot.evaluation_gate compare
+      - name: Verify migration head and locked environment
+        run: |
+          uv lock --check
+          uv run alembic upgrade head
+          uv run alembic check

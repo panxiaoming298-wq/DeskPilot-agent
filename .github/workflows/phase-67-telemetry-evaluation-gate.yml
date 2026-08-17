@@ -1,0 +1,37 @@
+name: Phase 67 telemetry and evaluation gate
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  telemetry-evaluation-gate:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --frozen --all-extras
+      - name: Telemetry contract and baseline tests
+        run: uv run pytest tests/test_telemetry.py tests/test_evaluation_baseline.py tests/test_evaluations.py
+      - name: Static checks
+        run: |
+          uv run ruff check src tests/test_telemetry.py tests/test_evaluation_baseline.py
+          uv run mypy
+      - name: Golden regression compare (read-only)
+        env:
+          CI: "true"
+        run: uv run python -m deskpilot.evaluation_gate compare
+      - name: Ensure CI did not rewrite the baseline
+        run: git diff --exit-code -- tests/baselines/evaluations/

@@ -46,7 +46,20 @@ POST /api/v1/tasks/{task_id}:cancel
 .\.venv\Scripts\alembic.exe check
 ```
 
-第一版 migration 可初始化空库，也能接管早期数据库而不重建原有任务。当前 head 为 `0026_alert_notifications`；现已包括人工对账、Runner 回执证据、并发幂等归一化、版本化 effect graph、数据库时间 lease/fencing、v2 DAG 逐节点 Tool 账本/批量审批/并行 Runner/补偿 wave barrier、条件边与内容寻址分支决策、owner/fence 定向 graph control mailbox、数据库协调的集群级 admission/容量 fence、PostgreSQL 16-shard admission 调度与 graph-control 原生批量 claim、增量 ready membership/count 投影与 v6 keyset 分页证明、四域受保护运维/retention/hash-chain 审计、告警 lifecycle 通知链与冻结 audit 导出、Outbox delivery/DLQ、Inbox 去重、PostgreSQL 原生批量 claim 与显式选入的性能/backend terminate/lock timeout/多主幂等实库门禁，以及 current-user DPAPI 受保护任务 checkpoint。
+第一版 migration 可初始化空库，也能接管早期数据库而不重建原有任务。当前 head 为 `0030_task_contract_plans`；在既有运行时、知识库、MCP 与 Evaluation Run/Trace 之外，新增不可变 Task Contract 版本、Executable Plan generation 和活动规划指针。
+
+## Task Contract 与 Executable Plan 只读 API
+
+```text
+GET /api/v1/capabilities
+GET /api/v1/tasks/{task_id}/planning
+GET /api/v1/tasks/{task_id}/contract
+GET /api/v1/tasks/{task_id}/contracts
+GET /api/v1/tasks/{task_id}/plans
+GET /api/v1/tasks/{task_id}/plans/{generation}
+```
+
+Plan Compiler 只绑定冻结 Registry/Catalog 中的精确版本和摘要；持久化读取会复核 manifest、摘要和绑定漂移。阶段 69 的 `1.0.0` 声明保持不变；阶段 70 以 `research.read.v1@1.1.0` 显式开关启用研究，阶段 71 以 `artifact.html.v1@1.1.0` 和 `browser.verify.v1@1.1.0` 启用受控本地交付能力。
 
 ## 事件可靠投递
 
@@ -200,11 +213,41 @@ DELETE /api/v1/model-providers/{provider_id}
 
 GET Catalog 返回形如 `"provider-catalog-v3"` 的 ETag。所有写请求必须携带该值作为 `If-Match`，并提供 16～128 位高熵 `Idempotency-Key`。成功响应返回新 ETag；过期版本返回 412，相同 key 的成功重试返回原结果且 `replayed=true`。
 
+## Agent Contract 与只读 Registry
+
+应用启动会严格加载四个固定 Prompt Package，并额外注册只读 `builtin.web_researcher`；所有 Agent 都会交叉校验 I/O Schema、Prompt/Tool digest、Model capability 与无环 Handoff 声明后冻结 Registry。Supervisor 不属于 Agent，Contract 也不代替 Policy/Approval/Runner 授权。
+
+```text
+GET /api/v1/agents
+GET /api/v1/agents/registry-snapshot
+GET /api/v1/agents/{agent_id}/versions/{version}
+```
+
+接口只返回脱敏 Descriptor/Schema digest，不返回 Prompt 正文或本地根路径。阶段 70 的研究结果仍严格停在待验证状态；阶段 71 已新增独立 Claim/Citation Verification、ArtifactRevision/PatchReceipt、隔离 Browser evidence 和 DeliveryManifest。阶段 72 为实际 Model Turn 增加 ContextManifest 与短期 Working Memory；阶段 73 新增受保护长期 MemoryProposal/MemoryItem、冲突/TTL/遗忘和 Agent/Provider usage ledger，详见 [`doc/73-长期记忆确认冲突与遗忘.md`](../doc/73-长期记忆确认冲突与遗忘.md)。
+
+阶段 68 验证：专项 8 项全通过；默认后端全量 `429 passed, 12 skipped, 1 warning`（441 collected）；Ruff、mypy 176 个生产源码、Alembic check、依赖锁、wheel Prompt 资源和 evaluation baseline compare 全部通过。
+
+阶段 70 验证：Agent Research Runtime、SSRF/fencing/redirect-DNS、Registry、Plan Compiler 与 `0031` migration 专项 25 项通过；默认后端全量 `445 passed, 12 skipped, 1 warning`，随后新增的两项安全用例随阶段专项复跑通过。Ruff、mypy 189 个源码、Alembic check、依赖锁、Workflow YAML 和冻结 evaluation baseline compare 全部通过。
+
+阶段 71 验证：后端全量 `451 passed, 12 skipped, 1 warning`（真实 Browser 烟测加入前），新增阶段 71 专项 4 项全通过，其中包含真实本机 Edge 隔离 profile 渲染/截图烟测。Ruff、mypy 193 个源码、`0032` migration 往返/metadata check、Workflow YAML 和冻结 evaluation baseline compare 通过；前端 20 文件/139 项测试、type-check 和 build 通过。
+
+阶段 72 验证：后端全量 `455 passed, 12 skipped, 1 warning`（467 collected）；Conversation/Working Memory/ContextManifest 对抗测试和 `0033` migration 往返通过，恶意网页快照只以 `untrusted_external_content` 进入研究上下文，不进入 retained memory。Ruff、mypy 195 个生产源码、Workflow YAML、冻结 evaluation baseline compare 以及前端 20 文件/139 项测试、type-check、build 全部通过。
+
+阶段 73 验证：后端全量 `458 passed, 12 skipped, 1 warning`；长期记忆确认/冲突/过期/删除/密文/Context usage 对抗测试、verified delivery 回归和 `0034` migration 往返通过。最终加入真实 ModelRequest 内容绑定和存储 digest 重验后，研究/Context/verified-delivery 相关 17 项再次通过。Ruff、mypy 199 个生产源码以及前端 21 文件/141 项测试、type-check、build 全部通过。
+
 ## 测试
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
 ```
+
+阶段 67 的脱敏 telemetry 查询为 `GET /api/v1/telemetry/traces`（真实 OTel `trace_id` 或现有 `task_correlation_id` 二选一）和 `GET /api/v1/telemetry/metrics`。本地 store 有界、进程级、`no-store`，不参与领域恢复或 Evaluation 证明。黄金回归只读门禁运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m deskpilot.evaluation_gate compare
+```
+
+基线位于 `tests/baselines/evaluations/`；CI 禁止 `record` 且检查 baseline diff。完整脱敏、阈值和显式新版本 record 流程见 [`doc/67-脱敏OpenTelemetry与回归基线CI门禁.md`](../doc/67-脱敏OpenTelemetry与回归基线CI门禁.md)。
 
 阶段 61 将 operations 稳定告警持久化为 opened/updated/resolved hash-chain 通知，并以冻结数据库 head、opaque cursor、after/through digest 和 page digest 提供完整脱敏 audit 导出；PostgreSQL 双 engine 唯一 opened 与并发 append 冻结门禁已实际通过。RabbitMQ 仍为可选 transport，默认 local 模式不联网，也不参与告警或导出正确性。默认后端全量为 `396 passed, 12 skipped, 1 warning`（408 collected）；Ruff、mypy 140 个生产源码、依赖锁和 Alembic check 通过，Alembic head 为 `0026_alert_notifications`。前端为 17 文件/134 项测试，type-check 与 build 通过。
 

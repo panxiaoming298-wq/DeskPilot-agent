@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     app_name: str = "DeskPilot API"
     api_prefix: str = "/api/v1"
     database_url: str = "sqlite+aiosqlite:///./data/deskpilot.db"
+    artifact_workspace_root: str = Field(
+        default="./data/task-workspaces", min_length=1, max_length=32_767
+    )
+    browser_executable_path: str | None = Field(default=None, max_length=32_767)
     fake_step_delay_seconds: float = 0.15
     graph_lease_ttl_seconds: float = Field(default=15, ge=1, le=3_600)
     effect_dag_global_concurrency: int = Field(default=8, ge=1, le=1_024)
@@ -86,6 +90,10 @@ class Settings(BaseSettings):
     )
     operations_retention_batch_size: int = Field(default=1_000, ge=1, le=10_000)
     operations_stalled_after_seconds: float = Field(default=60, ge=1, le=86_400)
+    telemetry_enabled: bool = True
+    telemetry_local_span_capacity: int = Field(default=5_000, ge=100, le=100_000)
+    research_runtime_enabled: bool = False
+    research_search_base_url: str | None = None
     runner_heartbeat_interval_seconds: float = Field(default=0.5, ge=0.1, le=60)
     runner_heartbeat_timeout_seconds: float = Field(default=3.0, gt=0.1, le=300)
     runner_startup_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
@@ -134,6 +142,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = [
         "http://127.0.0.1:5173",
         "http://localhost:5173",
+        "http://tauri.localhost",
     ]
 
     model_config = SettingsConfigDict(
@@ -174,4 +183,10 @@ class Settings(BaseSettings):
             )
         if self.event_transport == "rabbitmq" and self.rabbitmq_url is None:
             raise ValueError("rabbitmq_url is required when event_transport is rabbitmq")
+        invalid_search_url = (
+            self.research_search_base_url is not None
+            and not self.research_search_base_url.startswith(("http://", "https://"))
+        )
+        if invalid_search_url:
+            raise ValueError("research_search_base_url must use HTTP(S)")
         return self

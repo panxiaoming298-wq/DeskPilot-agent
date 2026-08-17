@@ -17,6 +17,7 @@ from deskpilot.application.tool_registry import ToolRegistry
 from deskpilot.domain.policy import ToolAuthorizationGrant
 from deskpilot.domain.tool_commit import ToolCommitReceipt
 from deskpilot.domain.tool_contracts import ToolIdempotency
+from deskpilot.observability import TelemetryFacade
 from deskpilot.runner.ipc_codec import (
     DEFAULT_MAX_FRAME_BYTES,
     BootstrapCodec,
@@ -107,6 +108,7 @@ class RunnerClient:
         commit_receipt_database_path: str = "./data/runner/commit-receipts.db",
         worker_memory_limit_bytes: int = 268_435_456,
         worker_active_process_limit: int = 1,
+        telemetry: TelemetryFacade | None = None,
     ) -> None:
         if heartbeat_interval_seconds < 0.1:
             raise ValueError("Runner heartbeat interval must be at least 0.1 seconds")
@@ -128,6 +130,7 @@ class RunnerClient:
         self._commit_receipt_database_path = commit_receipt_database_path
         self._worker_memory_limit_bytes = worker_memory_limit_bytes
         self._worker_active_process_limit = worker_active_process_limit
+        self._telemetry = telemetry
         self._codec = NdjsonIpcCodec()
         self._bootstrap_codec = BootstrapCodec()
         self._process: asyncio.subprocess.Process | None = None
@@ -353,6 +356,60 @@ class RunnerClient:
         self._isolation_mode = None
 
     async def call_tool(
+        self,
+        *,
+        task_id: str,
+        step_id: str,
+        tool_name: str,
+        tool_version: str,
+        arguments: dict[str, object],
+        actor: str,
+        call_id: str | None = None,
+        idempotency_key: str | None = None,
+        expected_resource_versions: dict[str, str] | None = None,
+        authorization: ToolAuthorizationGrant,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        if self._telemetry is None:
+            return await self._call_tool(
+                task_id=task_id,
+                step_id=step_id,
+                tool_name=tool_name,
+                tool_version=tool_version,
+                arguments=arguments,
+                actor=actor,
+                call_id=call_id,
+                idempotency_key=idempotency_key,
+                expected_resource_versions=expected_resource_versions,
+                authorization=authorization,
+                progress_callback=progress_callback,
+            )
+        with self._telemetry.operation(
+            "deskpilot.tool.execute",
+            "tool",
+            {
+                "deskpilot.subject.type": "tool_call",
+                "deskpilot.tool.class": tool_name,
+            },
+        ) as operation:
+            result = await self._call_tool(
+                task_id=task_id,
+                step_id=step_id,
+                tool_name=tool_name,
+                tool_version=tool_version,
+                arguments=arguments,
+                actor=actor,
+                call_id=call_id,
+                idempotency_key=idempotency_key,
+                expected_resource_versions=expected_resource_versions,
+                authorization=authorization,
+                progress_callback=progress_callback,
+            )
+            operation.set_attribute("deskpilot.subject.id", result.call_id)
+            operation.set_outcome("succeeded")
+            return result
+
+    async def _call_tool(
         self,
         *,
         task_id: str,

@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0026_alert_notifications"
+CURRENT_REVISION = "0034_long_term_memory"
 
 
 def _sync_url(path: Path) -> str:
@@ -66,6 +66,17 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
             "effect_runtime_operations_audit",
             "effect_runtime_alert_states",
             "effect_runtime_alert_notifications",
+            "knowledge_artifacts",
+            "knowledge_sources",
+            "knowledge_chunks",
+            "mcp_server_states",
+            "mcp_audit_state",
+            "mcp_audit_events",
+            "evaluation_runs",
+            "evaluation_trace_events",
+            "task_planning_states",
+            "task_contract_versions",
+            "task_plan_generations",
             "tool_effect_ready_set_checkpoints",
             "tool_effect_compensation_plans",
             "inbox_deliveries",
@@ -1061,6 +1072,273 @@ def test_stage_61_alert_notification_migration_round_trips(tmp_path: Path) -> No
     assert "last_alert_event_digest" not in state_columns
     assert "effect_runtime_alert_states" not in tables
     assert "effect_runtime_alert_notifications" not in tables
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_63_local_knowledge_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-63-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert {
+            "knowledge_artifacts",
+            "knowledge_sources",
+            "knowledge_chunks",
+        }.issubset(inspect(connection).get_table_names())
+    engine.dispose()
+
+    command.downgrade(config, "0026_alert_notifications")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == "0026_alert_notifications"
+    assert not {"knowledge_artifacts", "knowledge_sources", "knowledge_chunks"} & tables
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_64_controlled_mcp_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-64-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert {"mcp_server_states", "mcp_audit_state", "mcp_audit_events"}.issubset(
+            inspect(connection).get_table_names()
+        )
+        audit_state = connection.exec_driver_sql(
+            "SELECT state_id, next_sequence FROM mcp_audit_state"
+        ).one()
+    engine.dispose()
+    assert audit_state == ("mcp", 1)
+
+    command.downgrade(config, "0027_local_knowledge")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+    engine.dispose()
+    assert not {"mcp_server_states", "mcp_audit_state", "mcp_audit_events"} & tables
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_65_evaluation_trace_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-65-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert {"evaluation_runs", "evaluation_trace_events"}.issubset(
+            inspect(connection).get_table_names()
+        )
+    engine.dispose()
+
+    command.downgrade(config, "0028_controlled_mcp")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+    engine.dispose()
+    assert not {"evaluation_runs", "evaluation_trace_events"} & tables
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_69_task_contract_plan_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-69-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == CURRENT_REVISION
+    assert {
+        "task_planning_states",
+        "task_contract_versions",
+        "task_plan_generations",
+    }.issubset(tables)
+
+    command.downgrade(config, "0029_evaluation_traces")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == "0029_evaluation_traces"
+    assert (
+        not {
+            "task_planning_states",
+            "task_contract_versions",
+            "task_plan_generations",
+        }
+        & tables
+    )
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_70_agent_research_runtime_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-70-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+    engine.dispose()
+    expected = {
+        "task_execution_runs",
+        "task_execution_nodes",
+        "task_execution_edges",
+        "agent_handoffs",
+        "agent_invocations",
+        "agent_model_turns",
+        "agent_results",
+        "research_sessions",
+        "research_search_calls",
+        "research_page_snapshots",
+        "research_claims",
+        "research_citations",
+    }
+    assert expected.issubset(tables)
+
+    command.downgrade(config, "0030_task_contract_plans")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == "0030_task_contract_plans"
+    assert not expected & tables
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_71_verified_artifact_delivery_migration_round_trips(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-71-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    expected = {
+        "verification_runs",
+        "verification_evidence_snapshots",
+        "claim_verdicts",
+        "task_artifact_workspaces",
+        "artifacts",
+        "artifact_revisions",
+        "artifact_patch_receipts",
+        "browser_render_runs",
+        "delivery_manifests",
+    }
+    with engine.connect() as connection:
+        assert expected.issubset(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0031_agent_research_runtime")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert not expected & set(inspect(connection).get_table_names())
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_72_context_working_memory_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-72-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    expected = {
+        "conversations",
+        "conversation_messages",
+        "working_memory_items",
+        "context_requests",
+        "context_manifests",
+    }
+    with engine.connect() as connection:
+        assert expected.issubset(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0032_verified_artifact_delivery")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert not expected & set(inspect(connection).get_table_names())
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_73_long_term_memory_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-73-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    expected = {
+        "long_term_memory_proposals",
+        "long_term_memory_items",
+        "long_term_memory_conflicts",
+        "long_term_memory_tombstones",
+        "long_term_memory_usage",
+    }
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert expected.issubset(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0033_context_working_memory")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert not expected & set(inspect(connection).get_table_names())
+    engine.dispose()
 
     command.upgrade(config, "head")
     command.check(config)

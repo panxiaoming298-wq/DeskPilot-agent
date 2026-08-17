@@ -1,0 +1,95 @@
+schema_version: deskpilot.golden-suite.v1
+suite_id: deskpilot.resilience-safety
+version: 2
+cases:
+  - case_id: mcp.metrics.ascii
+    scenario: mcp.text_metrics
+    input: {text: DeskPilot golden MCP}
+    expect: {character_count: 20, line_count: 1, word_count: 3}
+  - case_id: mcp.metrics.multiline
+    scenario: mcp.text_metrics
+    input: {text: "alpha\nbeta\ngamma"}
+    expect: {character_count: 16, line_count: 3, word_count: 3}
+  - case_id: mcp.metrics.unicode
+    scenario: mcp.text_metrics
+    input: {text: 本地知识恢复}
+    expect: {character_count: 6, line_count: 1, word_count: 1}
+  - case_id: mcp.metrics.numeric
+    scenario: mcp.text_metrics
+    input: {text: "2026 08 16"}
+    expect: {character_count: 10, line_count: 1, word_count: 3}
+  - case_id: mcp.metrics.punctuation
+    scenario: mcp.text_metrics
+    input: {text: "safe, bounded; replay!"}
+    expect: {character_count: 22, line_count: 1, word_count: 3}
+  - case_id: mcp.metrics.whitespace
+    scenario: mcp.text_metrics
+    input: {text: "one  two\tthree"}
+    expect: {character_count: 14, line_count: 1, word_count: 3}
+  - case_id: security.mcp-bundle-tamper
+    scenario: security.mcp_bundle_tamper
+    safety_case: true
+    input: {}
+    expect: {error_code: MCP_SERVER_BUNDLE_REJECTED, rejected: true}
+  - case_id: knowledge.source-stale-recovery
+    scenario: knowledge.source_stale
+    safety_case: true
+    input: {query: recovery}
+    expect: {initial_citations: 1, stale_sources: 1, leaked_old_citations: 0}
+  - case_id: knowledge.source-stale-evidence
+    scenario: knowledge.source_stale
+    safety_case: true
+    input: {query: evidence}
+    expect: {initial_citations: 1, stale_sources: 1, leaked_old_citations: 0}
+  - case_id: knowledge.source-stale-local
+    scenario: knowledge.source_stale
+    safety_case: true
+    input: {query: local}
+    expect: {initial_citations: 1, stale_sources: 1, leaked_old_citations: 0}
+  - case_id: security.mcp-empty-input
+    scenario: mcp.invalid_input_rejected
+    safety_case: true
+    input: {arguments: {text: ""}}
+    expect: {error_code: MCP_PROTOCOL_REJECTED, rejected: true}
+  - case_id: security.mcp-extra-input
+    scenario: mcp.invalid_input_rejected
+    safety_case: true
+    input: {arguments: {text: safe, extra: rejected}}
+    expect: {error_code: MCP_PROTOCOL_REJECTED, rejected: true}
+  - case_id: fault.mcp-bad-version
+    scenario: fault.mcp_protocol_anomaly
+    safety_case: true
+    input: {mode: bad_version}
+    expect: {error_code: MCP_PROTOCOL_REJECTED, rejected: true, mode: bad_version}
+  - case_id: fault.mcp-bad-id
+    scenario: fault.mcp_protocol_anomaly
+    safety_case: true
+    input: {mode: bad_id}
+    expect: {error_code: MCP_PROTOCOL_REJECTED, rejected: true, mode: bad_id}
+  - case_id: fault.mcp-invalid-json
+    scenario: fault.mcp_protocol_anomaly
+    safety_case: true
+    input: {mode: invalid_json}
+    expect: {error_code: MCP_PROTOCOL_REJECTED, rejected: true, mode: invalid_json}
+  - case_id: fault.model-429-recovery
+    scenario: fault.model_rate_limit
+    input: {failures: 1, max_attempts: 2}
+    expect: {attempts: 2, recovered: true, error_code: null}
+  - case_id: fault.model-429-exhausted
+    scenario: fault.model_rate_limit
+    safety_case: true
+    input: {failures: 2, max_attempts: 2}
+    expect: {attempts: 2, recovered: false, error_code: MODEL_RATE_LIMITED}
+  - case_id: fault.runner-single-crash
+    scenario: fault.runner_crash_recovery
+    input: {crashes: 1}
+    expect: {crashes_observed: 1, final_generation: 2, last_failure_code: RUNNER_EXITED, recovered: true}
+  - case_id: fault.runner-double-crash
+    scenario: fault.runner_crash_recovery
+    safety_case: true
+    input: {crashes: 2}
+    expect: {crashes_observed: 2, final_generation: 3, last_failure_code: RUNNER_EXITED, recovered: true}
+  - case_id: fault.websocket-disconnect
+    scenario: fault.websocket_disconnect
+    input: {}
+    expect: {disconnect_handled: true, receive_count: 1, events_sent_after_disconnect: 0}

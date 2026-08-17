@@ -32,6 +32,18 @@ import type {
   OutboxRequeueResult,
   OperationsAlertNotificationPage,
   RetentionRunResult,
+  KnowledgeSearchResult,
+  KnowledgeSource,
+  McpAuditPage,
+  McpServer,
+  McpServerMutation,
+  McpToolCallResult,
+  EvaluationRun,
+  EvaluationRunPage,
+  EvaluationReport,
+  CreateLongTermMemory,
+  LongTermMemoryExport,
+  LongTermMemoryPage,
 } from './types'
 
 const configuredBase = (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, '')
@@ -120,6 +132,156 @@ export function createTask(command: TaskCreate): Promise<Task> {
     method: 'POST',
     body: JSON.stringify(command),
   })
+}
+
+export function listKnowledgeSources(): Promise<KnowledgeSource[]> {
+  return request<KnowledgeSource[]>('/api/v1/knowledge/sources', { cache: 'no-store' })
+}
+
+export function importKnowledgeSource(path: string): Promise<KnowledgeSource> {
+  return request<KnowledgeSource>('/api/v1/knowledge/sources:import', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  })
+}
+
+export function searchKnowledge(query: string, limit = 10): Promise<KnowledgeSearchResult> {
+  return request<KnowledgeSearchResult>('/api/v1/knowledge/search', {
+    method: 'POST',
+    body: JSON.stringify({ query, limit }),
+  })
+}
+
+export function getLongTermMemory(): Promise<LongTermMemoryPage> {
+  return request<LongTermMemoryPage>('/api/v1/memory', { cache: 'no-store' })
+}
+
+export function createLongTermMemory(
+  command: CreateLongTermMemory,
+): Promise<LongTermMemoryPage> {
+  return request<LongTermMemoryPage>('/api/v1/memory', {
+    method: 'POST',
+    body: JSON.stringify(command),
+  })
+}
+
+export function confirmMemoryProposal(proposalId: string): Promise<LongTermMemoryPage> {
+  return request<LongTermMemoryPage>(
+    `/api/v1/memory/proposals/${encodeURIComponent(proposalId)}:confirm`,
+    { method: 'POST' },
+  )
+}
+
+export function rejectMemoryProposal(proposalId: string): Promise<LongTermMemoryPage> {
+  return request<LongTermMemoryPage>(
+    `/api/v1/memory/proposals/${encodeURIComponent(proposalId)}:reject`,
+    { method: 'POST' },
+  )
+}
+
+export function editLongTermMemory(
+  memoryId: string,
+  value: string,
+  classification: 'public' | 'internal' | 'sensitive',
+): Promise<LongTermMemoryPage> {
+  return request<LongTermMemoryPage>(`/api/v1/memory/${encodeURIComponent(memoryId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ value, classification }),
+  })
+}
+
+export function deleteLongTermMemory(memoryId: string): Promise<LongTermMemoryPage> {
+  return request<LongTermMemoryPage>(`/api/v1/memory/${encodeURIComponent(memoryId)}`, {
+    method: 'DELETE',
+  })
+}
+
+export function resolveMemoryConflict(
+  conflictId: string,
+  selectedMemoryId: string,
+): Promise<LongTermMemoryPage> {
+  return request<LongTermMemoryPage>(
+    `/api/v1/memory-conflicts/${encodeURIComponent(conflictId)}:resolve`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ selected_memory_id: selectedMemoryId }),
+    },
+  )
+}
+
+export function exportLongTermMemory(): Promise<LongTermMemoryExport> {
+  return request<LongTermMemoryExport>('/api/v1/memory/export', { cache: 'no-store' })
+}
+
+export function listMcpServers(): Promise<McpServer[]> {
+  return request<McpServer[]>('/api/v1/mcp/servers', { cache: 'no-store' })
+}
+
+export function setMcpServerEnabled(serverId: string, enabled: boolean): Promise<McpServerMutation> {
+  const action = enabled ? 'enable' : 'disable'
+  return request<McpServerMutation>(
+    `/api/v1/mcp/servers/${encodeURIComponent(serverId)}:${action}`,
+    { method: 'POST' },
+  )
+}
+
+export function callMcpTool(
+  serverId: string,
+  toolName: string,
+  argumentsValue: Record<string, unknown>,
+): Promise<McpToolCallResult> {
+  return request<McpToolCallResult>(
+    `/api/v1/mcp/servers/${encodeURIComponent(serverId)}/tools:call`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ tool_name: toolName, arguments: argumentsValue }),
+    },
+  )
+}
+
+export function getMcpAudit(): Promise<McpAuditPage> {
+  return request<McpAuditPage>('/api/v1/mcp/audit', { cache: 'no-store' })
+}
+
+export function listEvaluationRuns(): Promise<EvaluationRunPage> {
+  return request<EvaluationRunPage>('/api/v1/evaluations/runs', { cache: 'no-store' })
+}
+
+export function runGoldenEvaluation(): Promise<EvaluationRun> {
+  return request<EvaluationRun>('/api/v1/evaluations/golden:run', { method: 'POST' })
+}
+
+export function replayEvaluation(runId: string): Promise<EvaluationRun> {
+  return request<EvaluationRun>(
+    `/api/v1/evaluations/runs/${encodeURIComponent(runId)}:replay`,
+    { method: 'POST' },
+  )
+}
+
+export function getEvaluationReport(limit = 50): Promise<EvaluationReport> {
+  return request<EvaluationReport>(
+    `/api/v1/evaluations/reports/latest?limit=${encodeURIComponent(limit)}`,
+    { cache: 'no-store' },
+  )
+}
+
+export async function downloadEvaluationReport(limit = 50): Promise<void> {
+  const response = await authenticatedResponse(
+    `/api/v1/evaluations/reports/latest:export?limit=${encodeURIComponent(limit)}`,
+    { cache: 'no-store' },
+  )
+  const report = (await response.json()) as EvaluationReport
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1]
+    ?? 'deskpilot-evaluation-report-v1.json'
+  const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], {
+    type: 'application/json',
+  }))
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 
 export function listTasks(

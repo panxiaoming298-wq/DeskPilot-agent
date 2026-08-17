@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException
 
+from deskpilot.agents import create_builtin_agent_registry
 from deskpilot.api.problem_details import (
     ProblemException,
     http_exception_handler,
@@ -18,16 +19,33 @@ from deskpilot.api.problem_details import (
     validation_exception_handler,
 )
 from deskpilot.api.routes import (
+    agent_runtime,
+    agents,
     approvals,
+    context_memory,
+    evaluations,
     health,
+    knowledge,
+    long_term_memory,
+    mcp,
     model_providers,
     operations,
+    planning,
     reconciliations,
     session,
     tasks,
+    telemetry,
     websocket,
 )
 from deskpilot.api.security_middleware import LocalApiSecurityMiddleware
+from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
+from deskpilot.application.artifact_delivery_runtime import ArtifactDeliveryRuntime
+from deskpilot.application.browser_verifier import (
+    BrowserVerifier,
+    IsolatedChromiumVerifier,
+)
+from deskpilot.application.capability_catalog import create_builtin_capability_catalog
+from deskpilot.application.context_memory_runtime import ContextMemoryRuntime
 from deskpilot.application.credential_resolver import CredentialResolver
 from deskpilot.application.effect_dag_cluster_admission import (
     EffectDagClusterAdmissionController,
@@ -38,13 +56,19 @@ from deskpilot.application.effect_graph_control_router import (
     EffectGraphControlStore,
 )
 from deskpilot.application.effect_runtime_operations import EffectRuntimeOperationsService
+from deskpilot.application.evaluation_service import EvaluationService
 from deskpilot.application.event_broker import EventBroker
 from deskpilot.application.inbox_consumer import InboxConsumer
+from deskpilot.application.knowledge_base import LocalKnowledgeBase
+from deskpilot.application.long_term_memory_runtime import LongTermMemoryRuntime
+from deskpilot.application.mcp_control_plane import McpControlPlane
 from deskpilot.application.model_gateway import (
     ModelGateway,
     ModelProvider,
 )
 from deskpilot.application.outbox_publisher import DeliveryPublisher, OutboxPublisher
+from deskpilot.application.plan_compilation_service import PlanCompilationService
+from deskpilot.application.plan_compiler import PlanCompiler
 from deskpilot.application.policy_engine import BuiltinPolicyEngine, PolicyEngine
 from deskpilot.application.processor import TaskProcessor
 from deskpilot.application.provider_catalog import ProviderCatalogService
@@ -54,10 +78,16 @@ from deskpilot.application.provider_management_service import (
 )
 from deskpilot.application.provider_runtime_codec import ProviderRuntimeConfigCodec
 from deskpilot.application.provider_runtime_store import RuntimeConfigProtector
+from deskpilot.application.research_runtime import ResearchRuntime
 from deskpilot.application.runner_client import RunnerClient
 from deskpilot.application.runner_supervisor import RunnerSupervisor
 from deskpilot.application.task_checkpoint_codec import TaskCheckpointCodec
 from deskpilot.application.task_service import TaskService
+from deskpilot.application.web_research import (
+    SafePageReader,
+    SearchProvider,
+    SearxngSearchProvider,
+)
 from deskpilot.core.config import Settings
 from deskpilot.core.security import LocalSessionSecurity
 from deskpilot.domain.provider_management import (
@@ -82,6 +112,7 @@ from deskpilot.infrastructure.windows_dpapi import WindowsDpapiProtector
 from deskpilot.model_providers.factory import (
     effective_model_provider_configs,
 )
+from deskpilot.observability import TelemetryFacade
 from deskpilot.tools import create_builtin_registry
 from deskpilot.tools.files import (
     FILE_MOVE_DESTINATION_CAPABILITY,
@@ -97,9 +128,16 @@ def create_app(
     runtime_config_protector: RuntimeConfigProtector | None = None,
     runner_supervisor: RunnerSupervisor | None = None,
     policy_engine: PolicyEngine | None = None,
+    search_provider: SearchProvider | None = None,
+    page_reader: SafePageReader | None = None,
+    browser_verifier: BrowserVerifier | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings()
     instance_id = f"api_{uuid4().hex}"
+    telemetry_facade = TelemetryFacade(
+        capacity=resolved_settings.telemetry_local_span_capacity,
+        enabled=resolved_settings.telemetry_enabled,
+    )
     session_security = LocalSessionSecurity.create(
         resolved_settings.session_token,
         resolved_settings.cors_origins,
@@ -107,8 +145,14 @@ def create_app(
     model_gateway = ModelGateway(
         default_provider_id=resolved_settings.model_default_provider_id,
         policy=resolved_settings.model_gateway_policy,
+        telemetry=telemetry_facade,
     )
     provider_configs = effective_model_provider_configs(resolved_settings)
+    resolved_search_provider = search_provider
+    if resolved_search_provider is None and resolved_settings.research_search_base_url:
+        resolved_search_provider = SearxngSearchProvider(resolved_settings.research_search_base_url)
+    if resolved_settings.research_runtime_enabled and resolved_search_provider is None:
+        raise ValueError("research_runtime_enabled requires a configured SearchProvider")
     canonical_disk_usage_path = str(
         Path(resolved_settings.disk_usage_path).expanduser().resolve(strict=True)
     )
@@ -165,6 +209,7 @@ def create_app(
         except BaseException:
             await provider_health_service.shutdown()
             await database.dispose()
+            telemetry_facade.shutdown()
             raise
         provider_catalog = ProviderCatalogService(
             store=provider_catalog_repository,
@@ -221,7 +266,47 @@ def create_app(
             outbox_notify=outbox_publisher.notify,
             checkpoint_codec=TaskCheckpointCodec(resolved_runtime_config_protector),
         )
+        knowledge_base = LocalKnowledgeBase(database)
+        mcp_control_plane = McpControlPlane(database, telemetry=telemetry_facade)
+        evaluation_service = EvaluationService(database, telemetry=telemetry_facade)
         registry = create_builtin_registry()
+        agent_registry = create_builtin_agent_registry(
+            registry,
+            model_gateway.descriptors(),
+        )
+        capability_catalog = create_builtin_capability_catalog(
+            research_runtime_enabled=(
+                resolved_settings.research_runtime_enabled and resolved_search_provider is not None
+            )
+        )
+        plan_compiler = PlanCompiler(agent_registry, registry, capability_catalog)
+        plan_compilation_service = PlanCompilationService(
+            database,
+            plan_compiler,
+        )
+        agent_execution_runtime = AgentExecutionRuntime(database, plan_compiler, agent_registry)
+        long_term_memory_runtime = LongTermMemoryRuntime(
+            database, resolved_runtime_config_protector
+        )
+        context_memory_runtime = ContextMemoryRuntime(database, long_term_memory_runtime)
+        research_runtime = (
+            ResearchRuntime(
+                database,
+                agent_execution_runtime,
+                model_gateway,
+                resolved_search_provider,
+                page_reader or SafePageReader(),
+                context_memory_runtime,
+            )
+            if resolved_settings.research_runtime_enabled and resolved_search_provider is not None
+            else None
+        )
+        artifact_delivery_runtime = ArtifactDeliveryRuntime(
+            database,
+            model_gateway,
+            browser_verifier or IsolatedChromiumVerifier(resolved_settings.browser_executable_path),
+            resolved_settings.artifact_workspace_root,
+        )
         resolved_policy_engine = policy_engine or BuiltinPolicyEngine(
             allowed_capabilities=(
                 "filesystem.metadata.read",
@@ -252,6 +337,7 @@ def create_app(
                 ),
                 worker_memory_limit_bytes=(resolved_settings.runner_worker_memory_limit_bytes),
                 worker_active_process_limit=(resolved_settings.runner_worker_active_process_limit),
+                telemetry=telemetry_facade,
             ),
             restart_base_delay_seconds=(resolved_settings.runner_restart_base_delay_seconds),
             restart_max_delay_seconds=(resolved_settings.runner_restart_max_delay_seconds),
@@ -305,6 +391,18 @@ def create_app(
         app.state.rabbitmq_transport = rabbitmq_transport
         app.state.effect_runtime_operations = effect_runtime_operations
         app.state.task_service = task_service
+        app.state.agent_registry = agent_registry
+        app.state.capability_catalog = capability_catalog
+        app.state.plan_compilation_service = plan_compilation_service
+        app.state.agent_execution_runtime = agent_execution_runtime
+        app.state.context_memory_runtime = context_memory_runtime
+        app.state.long_term_memory_runtime = long_term_memory_runtime
+        app.state.research_runtime = research_runtime
+        app.state.artifact_delivery_runtime = artifact_delivery_runtime
+        app.state.knowledge_base = knowledge_base
+        app.state.mcp_control_plane = mcp_control_plane
+        app.state.evaluation_service = evaluation_service
+        app.state.telemetry = telemetry_facade
         app.state.processor = processor
         app.state.effect_dag_admission = effect_dag_admission
         app.state.effect_graph_control_router = effect_graph_control_router
@@ -351,6 +449,7 @@ def create_app(
             if rabbitmq_transport is not None:
                 await rabbitmq_transport.shutdown()
             await database.dispose()
+            telemetry_facade.shutdown()
 
     app = FastAPI(
         title=resolved_settings.app_name,
@@ -381,12 +480,21 @@ def create_app(
         expose_headers=["ETag"],
     )
     app.include_router(health.router, prefix=resolved_settings.api_prefix)
+    app.include_router(agents.router, prefix=resolved_settings.api_prefix)
+    app.include_router(planning.router, prefix=resolved_settings.api_prefix)
+    app.include_router(agent_runtime.router, prefix=resolved_settings.api_prefix)
+    app.include_router(context_memory.router, prefix=resolved_settings.api_prefix)
+    app.include_router(long_term_memory.router, prefix=resolved_settings.api_prefix)
     app.include_router(session.router, prefix=resolved_settings.api_prefix)
     app.include_router(model_providers.router, prefix=resolved_settings.api_prefix)
     app.include_router(tasks.router, prefix=resolved_settings.api_prefix)
     app.include_router(approvals.router, prefix=resolved_settings.api_prefix)
     app.include_router(reconciliations.router, prefix=resolved_settings.api_prefix)
     app.include_router(operations.router, prefix=resolved_settings.api_prefix)
+    app.include_router(knowledge.router, prefix=resolved_settings.api_prefix)
+    app.include_router(mcp.router, prefix=resolved_settings.api_prefix)
+    app.include_router(evaluations.router, prefix=resolved_settings.api_prefix)
+    app.include_router(telemetry.router, prefix=resolved_settings.api_prefix)
     app.include_router(websocket.router, prefix=resolved_settings.api_prefix)
     return app
 

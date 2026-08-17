@@ -8,6 +8,10 @@ from collections.abc import AsyncIterator
 
 from pydantic import JsonValue
 
+from deskpilot.domain.artifact_runtime import (
+    CitationJudgment,
+    CitationVerificationDecision,
+)
 from deskpilot.domain.model_contracts import (
     ModelCapabilities,
     ModelFinishReason,
@@ -30,10 +34,13 @@ from deskpilot.domain.planning import (
     TaskIntent,
     TaskPlan,
 )
+from deskpilot.domain.research import ResearchAgentDecision, ResearchClaimProposal
 from deskpilot.domain.tool_contracts import ToolRiskLevel
 
 TASK_CLASSIFICATION_SCHEMA = "task_classification"
 TASK_PLAN_SCHEMA = "task_plan"
+RESEARCH_AGENT_DECISION_SCHEMA = "research_agent_decision"
+CITATION_VERIFICATION_DECISION_SCHEMA = "citation_verification_decision"
 
 
 class FakeModelProvider:
@@ -202,6 +209,32 @@ class FakeModelProvider:
                     ),
                 ),
             ).model_dump(mode="json")
-        raise ValueError(
-            f"Fake provider has no fixture for Schema {request.output_schema.name}"
-        )
+        if request.output_schema.name == RESEARCH_AGENT_DECISION_SCHEMA:
+            raw_ids = request.metadata.get("page_snapshot_ids", [])
+            snapshot_ids = tuple(str(item) for item in raw_ids) if isinstance(raw_ids, list) else ()
+            if not snapshot_ids:
+                raise ValueError("Fake research fixture requires Page Snapshot IDs")
+            return ResearchAgentDecision(
+                claims=(
+                    ResearchClaimProposal(
+                        statement="受控页面快照包含与研究目标直接相关的公开信息。",
+                        page_snapshot_ids=snapshot_ids[:2],
+                    ),
+                ),
+            ).model_dump(mode="json")
+        if request.output_schema.name == CITATION_VERIFICATION_DECISION_SCHEMA:
+            raw_ids = request.metadata.get("claim_ids", [])
+            claim_ids = tuple(str(item) for item in raw_ids) if isinstance(raw_ids, list) else ()
+            if not claim_ids:
+                raise ValueError("Fake citation verifier requires Claim IDs")
+            return CitationVerificationDecision(
+                judgments=tuple(
+                    CitationJudgment(
+                        claim_id=claim_id,
+                        supported=True,
+                        reason_code="SUPPORTED",
+                    )
+                    for claim_id in claim_ids
+                )
+            ).model_dump(mode="json")
+        raise ValueError(f"Fake provider has no fixture for Schema {request.output_schema.name}")
