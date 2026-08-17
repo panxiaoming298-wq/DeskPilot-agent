@@ -4,7 +4,7 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 74 已完成 source-bound `CompactionSnapshot`、逐字段 coverage、conflict/stale、parent chain 与确定性重建；长 Context 超预算时只能使用来源和摘要均可复核的 active 快照。Summary/Memory 仍不能放宽 Policy、覆盖 Task/Event 真值或绕过阶段 71 verified edge。下一阶段为 75 通用任务与多 Agent 对抗发布门禁。** 详细进度、验证结果和续接入口见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 75 已完成独立版本化 multi-agent suite、不可变 EvaluationPlan/cohort/baseline、外部 Oracle、Verifier mutant 混淆矩阵、false-success 零容忍门禁和可签发 release attestation。两个不同只读 Agent Contract 已在隔离 trial 中产生持久 Invocation/Handoff/Result，只有入边全部 verified 才解锁 join；`research_to_html` 亦经过完整生产路径与独立 Workspace Oracle。下一阶段转入 Conversation/Research/Artifact 统一用户工作台与精确导出。** 详细进度、验证结果和续接入口见[项目进度](项目进度.md)。
 
 ## 一句话架构
 
@@ -152,6 +152,7 @@ flowchart LR
 87. [通用对话、联网研究与 Artifact 工作区总体架构](doc/通用对话联网研究与Artifact工作区总体架构.md)
 88. [ADR-015：通用任务 Agent 产品边界与首个纵向切片](doc/ADR-015-通用任务Agent产品边界与首个纵向切片.md)
 89. [Task Contract 与 Executable Plan Compiler 最小闭环](doc/69-Task-Contract与Executable-Plan-Compiler最小闭环.md)
+90. [多 Agent 对抗评测与发布门禁](doc/75-多Agent对抗评测与发布门禁.md)
 
 ## 目标 MVP 与当前边界
 
@@ -217,4 +218,4 @@ flowchart LR
 
 ## 下一步
 
-阶段 74 已完成确定性上下文压缩、coverage/conflict/stale 和重建闭环。下一开发项是阶段 75 通用任务与多 Agent 对抗发布门禁；每次开发结束同步更新[项目进度](项目进度.md)。
+阶段 75 已完成独立多 Agent 对抗发布门禁。下一开发项是 Conversation/Research/Artifact 统一用户工作台和精确用户路径导出；导出/覆盖仍需独立授权。每次开发结束同步更新[项目进度](项目进度.md)。

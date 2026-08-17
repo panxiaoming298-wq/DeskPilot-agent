@@ -117,6 +117,30 @@ class AgentResult(BaseModel):
         return self
 
 
+class AgentOutputResult(BaseModel):
+    """Generic candidate envelope validated against the bound Agent output schema."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["deskpilot.agent-output-result.v1"] = "deskpilot.agent-output-result.v1"
+    result_id: str = Field(pattern=RESULT_ID_PATTERN)
+    invocation_id: str = Field(pattern=INVOCATION_ID_PATTERN)
+    disposition: Literal["candidate"] = "candidate"
+    output: dict[str, object]
+    evidence_refs: tuple[str, ...] = Field(min_length=1, max_length=200)
+    limitation_codes: tuple[str, ...] = Field(default=(), max_length=20)
+    input_digest: str = Field(pattern=DIGEST_PATTERN)
+    model_response_digest: str = Field(pattern=DIGEST_PATTERN)
+    output_schema_digest: str = Field(pattern=DIGEST_PATTERN)
+    result_digest: str = Field(pattern=DIGEST_PATTERN)
+
+    @model_validator(mode="after")
+    def digest_matches(self) -> Self:
+        material = self.model_dump(mode="json", exclude={"result_digest"})
+        if self.result_digest != sha256_digest(material):
+            raise ValueError("Agent Output Result digest does not match")
+        return self
+
+
 class ExecutionNodeRead(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     node_id: str = Field(pattern=PLAN_NODE_ID_PATTERN)

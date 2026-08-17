@@ -8,7 +8,7 @@ from typing import Literal, cast
 from urllib.parse import urlsplit
 
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deskpilot.application.browser_verifier import (
@@ -18,6 +18,10 @@ from deskpilot.application.browser_verifier import (
     audit_static_html,
 )
 from deskpilot.application.model_gateway import ModelGateway, ModelGatewayError
+from deskpilot.application.verified_edges import (
+    VerifiedEdgeProofError,
+    mark_verified_and_unlock,
+)
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_runtime import AgentResult, ExecutionNodeStatus, ExecutionRunStatus
 from deskpilot.domain.artifact_runtime import (
@@ -59,7 +63,6 @@ from deskpilot.infrastructure.models import (
     ResearchSessionRecord,
     TaskArtifactWorkspaceRecord,
     TaskContractVersionRecord,
-    TaskExecutionEdgeRecord,
     TaskExecutionNodeRecord,
     TaskExecutionRunRecord,
     TaskPlanGenerationRecord,
@@ -1008,56 +1011,10 @@ class ArtifactDeliveryRuntime:
         run: TaskExecutionRunRecord,
         node: TaskExecutionNodeRecord,
     ) -> None:
-        now = utc_now()
-        node.status = ExecutionNodeStatus.VERIFIED.value
-        node.revision += 1
-        node.updated_at = now
-        outgoing = tuple(
-            (
-                await session.scalars(
-                    select(TaskExecutionEdgeRecord).where(
-                        TaskExecutionEdgeRecord.run_id == run.run_id,
-                        TaskExecutionEdgeRecord.from_node_id == node.node_id,
-                    )
-                )
-            ).all()
-        )
-        for edge in outgoing:
-            if edge.requirement != "verified":
-                raise ArtifactDeliveryProofRejectedError("Unsupported edge requirement")
-            target = await session.scalar(
-                select(TaskExecutionNodeRecord)
-                .where(TaskExecutionNodeRecord.node_id == edge.to_node_id)
-                .with_for_update()
-            )
-            if target is None or target.status != ExecutionNodeStatus.PENDING.value:
-                continue
-            incoming = tuple(
-                (
-                    await session.scalars(
-                        select(TaskExecutionEdgeRecord).where(
-                            TaskExecutionEdgeRecord.run_id == run.run_id,
-                            TaskExecutionEdgeRecord.to_node_id == target.node_id,
-                        )
-                    )
-                ).all()
-            )
-            source_ids = [item.from_node_id for item in incoming if item.requirement == "verified"]
-            verified_count = await session.scalar(
-                select(func.count())
-                .select_from(TaskExecutionNodeRecord)
-                .where(
-                    TaskExecutionNodeRecord.node_id.in_(source_ids),
-                    TaskExecutionNodeRecord.status == ExecutionNodeStatus.VERIFIED.value,
-                )
-            )
-            if source_ids and int(verified_count or 0) == len(source_ids):
-                target.status = ExecutionNodeStatus.READY.value
-                target.revision += 1
-                target.updated_at = now
-        run.status = ExecutionRunStatus.ACTIVE.value
-        run.revision += 1
-        run.updated_at = now
+        try:
+            await mark_verified_and_unlock(session, run, node)
+        except VerifiedEdgeProofError as error:
+            raise ArtifactDeliveryProofRejectedError(str(error)) from error
 
     @staticmethod
     async def _mark_failed(

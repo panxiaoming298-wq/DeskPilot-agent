@@ -13,6 +13,7 @@ from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import BoundAgentRef
 from deskpilot.domain.agent_runtime import (
     AgentInvocationRead,
+    AgentOutputResult,
     AgentResult,
     ClaimedInvocation,
     ExecutionNodeRead,
@@ -279,7 +280,7 @@ class AgentExecutionRuntime:
 
     async def submit_result(
         self,
-        result: AgentResult,
+        result: AgentResult | AgentOutputResult,
         *,
         owner_id: str,
         fencing_token: int,

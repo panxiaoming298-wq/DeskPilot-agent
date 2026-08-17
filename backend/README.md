@@ -223,7 +223,7 @@ GET /api/v1/agents/registry-snapshot
 GET /api/v1/agents/{agent_id}/versions/{version}
 ```
 
-接口只返回脱敏 Descriptor/Schema digest，不返回 Prompt 正文或本地根路径。阶段 70 的研究结果仍严格停在待验证状态；阶段 71 已新增独立 Claim/Citation Verification、ArtifactRevision/PatchReceipt、隔离 Browser evidence 和 DeliveryManifest。阶段 72 为实际 Model Turn 增加 ContextManifest 与短期 Working Memory；阶段 73 新增受保护长期 Memory；阶段 74 新增 source-bound CompactionSnapshot、coverage/conflict/stale 和确定性重建，详见 [`doc/74-可证明上下文压缩与重建.md`](../doc/74-可证明上下文压缩与重建.md)。
+接口只返回脱敏 Descriptor/Schema digest，不返回 Prompt 正文或本地根路径。阶段 70 的研究结果仍严格停在待验证状态；阶段 71 已新增独立 Claim/Citation Verification、ArtifactRevision/PatchReceipt、隔离 Browser evidence 和 DeliveryManifest。阶段 72 为实际 Model Turn 增加 ContextManifest 与短期 Working Memory；阶段 73 新增受保护长期 Memory；阶段 74 新增 source-bound CompactionSnapshot、coverage/conflict/stale 和确定性重建；阶段 75 新增独立 multi-agent suite、外部 Oracle、Verifier mutant/false-success 硬门禁、精确 cohort/baseline 和 HMAC release attestation，详见 [`doc/75-多Agent对抗评测与发布门禁.md`](../doc/75-多Agent对抗评测与发布门禁.md)。
 
 阶段 68 验证：专项 8 项全通过；默认后端全量 `429 passed, 12 skipped, 1 warning`（441 collected）；Ruff、mypy 176 个生产源码、Alembic check、依赖锁、wheel Prompt 资源和 evaluation baseline compare 全部通过。
 
@@ -237,6 +237,8 @@ GET /api/v1/agents/{agent_id}/versions/{version}
 
 阶段 74 验证：后端全量 `463 passed, 12 skipped, 1 warning`；Context/Registry/Research/verified-delivery 联合 29 项及 `0035` migration 往返通过。长上下文实际触发确定性压缩，删除/Contract amendment 使旧 snapshot stale，冲突与存储篡改 fail closed。Ruff、mypy 202 个生产源码通过；前端未修改，沿用 21 文件/141 项测试、type-check 和 build 结果。
 
+阶段 75 验证：`deskpilot.multi-agent-core@1` 共 11 个隔离 trial，report 为 11/11 通过、false-success=0、unauthorized-effect=0，mutant 混淆矩阵 TA=1/TR=2/FA=0/FR=0。两个不同只读 Agent Contract 实际产生 2 个 Invocation/Handoff/Result 并通过共享 verified-edge reducer join；`research_to_html` 使用 recorded Search/Page 走完生产路径后，外部 Oracle 直接读取隔离 Workspace 复核。阶段 68～75 联合门禁 40 项通过；后端全量 `467 passed, 12 skipped, 1 warning`，耗时 1012.77 秒。Ruff 全仓、mypy 208 个生产源码、Alembic upgrade/check、`uv lock --check`、Workflow YAML、旧/新两个 baseline compare 和 diff whitespace 全部通过。
+
 ## 测试
 
 ```powershell
@@ -247,6 +249,7 @@ GET /api/v1/agents/{agent_id}/versions/{version}
 
 ```powershell
 .\.venv\Scripts\python.exe -m deskpilot.evaluation_gate compare
+.\.venv\Scripts\python.exe -m deskpilot.phase75_gate compare
 ```
 
 基线位于 `tests/baselines/evaluations/`；CI 禁止 `record` 且检查 baseline diff。完整脱敏、阈值和显式新版本 record 流程见 [`doc/67-脱敏OpenTelemetry与回归基线CI门禁.md`](../doc/67-脱敏OpenTelemetry与回归基线CI门禁.md)。
