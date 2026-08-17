@@ -1,8 +1,14 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import gsap from 'gsap'
+import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { createTask } from './api'
 import ApprovalCard from './components/ApprovalCard.vue'
 import EffectRuntimeOperations from './components/EffectRuntimeOperations.vue'
+import KnowledgeBase from './components/KnowledgeBase.vue'
+import MemoryControlCenter from './components/MemoryControlCenter.vue'
+import McpConnections from './components/McpConnections.vue'
+import EvaluationLab from './components/EvaluationLab.vue'
 import ProviderSettings from './components/ProviderSettings.vue'
 import ReconciliationEvidenceCard from './components/ReconciliationEvidenceCard.vue'
 import ReconciliationCenter from './components/ReconciliationCenter.vue'
@@ -22,12 +28,166 @@ import type {
   TaskStatus,
 } from './types'
 
+const canUseScrollTrigger = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+if (canUseScrollTrigger) gsap.registerPlugin(ScrollTrigger)
+
+const coverPoster = `${import.meta.env.BASE_URL}media/deskpilot-ocean-poster.png`
+const coverVideo = `${import.meta.env.BASE_URL}media/deskpilot-whale-shark.mp4`
+const coverRef = ref<HTMLElement | null>(null)
+const irisRef = ref<HTMLElement | null>(null)
+const workspaceRef = ref<HTMLElement | null>(null)
+const viewTransitionRef = ref<HTMLElement | null>(null)
+const coverVisible = ref(true)
+const transitioning = ref(false)
+const viewTransitioning = ref(false)
+let coverContext: ReturnType<typeof gsap.context> | null = null
+let workspaceContext: ReturnType<typeof gsap.context> | null = null
+
+function prefersReducedMotion(): boolean {
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+}
+
+function initWorkspaceMotion(): void {
+  if (!workspaceRef.value || !canUseScrollTrigger || prefersReducedMotion()) return
+  workspaceContext?.revert()
+  workspaceContext = gsap.context(() => {
+    gsap.timeline({ defaults: { ease: 'power4.out' } })
+      .fromTo('.hud-reticle', { autoAlpha: 0, scale: 0.72, rotation: -18 }, {
+        autoAlpha: 0.74,
+        scale: 1,
+        rotation: 0,
+        duration: 1.1,
+      })
+      .fromTo('.sidebar', { autoAlpha: 0, x: -34 }, {
+        autoAlpha: 1,
+        x: 0,
+        duration: 0.72,
+      }, '-=0.9')
+      .fromTo('.hud-telemetry span', { autoAlpha: 0, x: 18 }, {
+        autoAlpha: 1,
+        x: 0,
+        duration: 0.42,
+        stagger: 0.07,
+      }, '-=0.58')
+      .fromTo('.topbar', { autoAlpha: 0, y: -18 }, {
+        autoAlpha: 1,
+        y: 0,
+        duration: 0.58,
+      }, '-=0.5')
+
+    gsap.fromTo('.composer', {
+      autoAlpha: 0.28,
+      y: 30,
+      rotationX: -7,
+      transformOrigin: '50% 0%',
+    }, {
+      autoAlpha: 1,
+      y: 0,
+      rotationX: 0,
+      duration: 0.9,
+      ease: 'power4.out',
+      scrollTrigger: {
+        trigger: '.composer',
+        start: 'top 91%',
+        once: true,
+      },
+    })
+
+    gsap.timeline({
+      defaults: { ease: 'none' },
+      scrollTrigger: {
+        trigger: '.task-grid',
+        start: 'top 92%',
+        end: 'top 42%',
+        scrub: 0.7,
+      },
+    })
+      .fromTo('.task-overview', { autoAlpha: 0.35, x: -44, rotationY: 3 }, {
+        autoAlpha: 1,
+        x: 0,
+        rotationY: 0,
+      }, 0)
+      .fromTo('.timeline-panel', { autoAlpha: 0.35, x: 44, rotationY: -3 }, {
+        autoAlpha: 1,
+        x: 0,
+        rotationY: 0,
+      }, 0)
+      .fromTo('.timeline-sweep', { yPercent: -120 }, { yPercent: 520 }, 0)
+  }, workspaceRef.value)
+  ScrollTrigger.refresh()
+}
+
+function finishCoverTransition(): void {
+  coverVisible.value = false
+  transitioning.value = false
+  document.body.classList.remove('cover-open')
+  window.scrollTo({ top: 0 })
+  void nextTick(initWorkspaceMotion)
+}
+
+function enterWorkspace(): void {
+  if (transitioning.value) return
+  transitioning.value = true
+
+  if (prefersReducedMotion() || !coverRef.value || !irisRef.value) {
+    finishCoverTransition()
+    return
+  }
+
+  gsap.timeline({ onComplete: finishCoverTransition })
+    .to('.cover-copy [data-intro]', {
+      autoAlpha: 0,
+      scale: 0.985,
+      duration: 0.28,
+      stagger: 0.025,
+      ease: 'power2.in',
+    })
+    .to(irisRef.value, {
+      scale: 1,
+      duration: 0.82,
+      ease: 'power4.inOut',
+    }, '<0.08')
+}
+
+onMounted(() => {
+  document.body.classList.add('cover-open')
+  if (!coverRef.value) return
+  if (prefersReducedMotion()) {
+    coverRef.value.querySelector('video')?.pause()
+    return
+  }
+
+  coverContext = gsap.context(() => {
+    gsap.timeline({ defaults: { ease: 'power3.out' } })
+      .fromTo('.cover-brand', { autoAlpha: 0, y: -18 }, { autoAlpha: 1, y: 0, duration: 0.75 })
+      .fromTo('.cover-title span', { autoAlpha: 0, yPercent: 34 }, {
+        autoAlpha: 1,
+        yPercent: 0,
+        duration: 0.9,
+        stagger: 0.11,
+      }, '-=0.42')
+      .fromTo('.cover-note, .cover-manifesto, .cover-enter', { autoAlpha: 0, y: 18 }, {
+        autoAlpha: 1,
+        y: 0,
+        duration: 0.58,
+        stagger: 0.08,
+      }, '-=0.42')
+  }, coverRef.value)
+})
+
+onUnmounted(() => {
+  document.body.classList.remove('cover-open')
+  coverContext?.revert()
+  workspaceContext?.revert()
+})
+
 const goal = ref('验证 DeskPilot 前后端任务事件闭环')
 const taskKind = ref<'disk_usage' | 'file_move' | 'disk_pressure_guarded_file_move'>('disk_usage')
 const sourcePath = ref('')
 const destinationPath = ref('')
 const maximumUsedPercent = ref(80)
-const activeView = ref<'tasks' | 'reconciliations' | 'providers' | 'operations'>('tasks')
+type ActiveView = 'tasks' | 'memory' | 'knowledge' | 'mcp' | 'evaluations' | 'reconciliations' | 'providers' | 'operations'
+const activeView = ref<ActiveView>('tasks')
 const privacyMode = ref<TaskCreate['privacy_mode']>('local_only')
 const submitting = ref(false)
 const submitError = ref<string | null>(null)
@@ -172,9 +332,51 @@ const reconnectDetail = computed(() => {
   return `第 ${reconnectAttempt.value} 次恢复 · 最长 ${seconds} 秒后重试`
 })
 
+function switchView(nextView: ActiveView): void {
+  if (activeView.value === nextView || viewTransitioning.value) return
+  const overlay = viewTransitionRef.value
+  activeView.value = nextView
+
+  if (!overlay || prefersReducedMotion()) {
+    void nextTick(() => ScrollTrigger.refresh())
+    return
+  }
+
+  viewTransitioning.value = true
+  gsap.set(overlay, { autoAlpha: 1, scale: 0 })
+  void nextTick(() => {
+    ScrollTrigger.refresh()
+    gsap.timeline({
+      onComplete: () => {
+        gsap.set(overlay, { scale: 0 })
+        viewTransitioning.value = false
+      },
+    })
+      .to(overlay, {
+        scale: 1,
+        duration: 0.54,
+        ease: 'power4.inOut',
+      })
+      .to(overlay, {
+        autoAlpha: 0,
+        scale: 1.06,
+        duration: 0.34,
+        ease: 'power3.out',
+      })
+  })
+}
+
 const pageHeading = computed(() =>
   activeView.value === 'tasks'
     ? '让任务过程成为可验证的数据'
+    : activeView.value === 'memory'
+      ? '让每条长期记忆都有来源、版本与去向'
+    : activeView.value === 'knowledge'
+      ? '只返回来源仍然有效的本地知识'
+      : activeView.value === 'mcp'
+        ? '显式审阅并约束每个本地 MCP 连接'
+        : activeView.value === 'evaluations'
+          ? '用可重放黄金任务衡量真实安全行为'
     : activeView.value === 'reconciliations'
       ? '集中核对结果不确定的工具调用'
       : activeView.value === 'providers'
@@ -184,6 +386,10 @@ const pageHeading = computed(() =>
 
 const pageEyebrow = computed(() => ({
   tasks: 'WINDOWS MULTI-AGENT SYSTEM',
+  memory: 'PROTECTED MEMORY EVIDENCE LEDGER',
+  knowledge: 'CONTENT-ADDRESSED LOCAL MEMORY',
+  mcp: 'CONTROLLED MODEL CONTEXT PROTOCOL',
+  evaluations: 'DETERMINISTIC EVALUATION TRACE',
   reconciliations: 'DURABLE EXECUTION LEDGER',
   providers: 'OPENAI-COMPATIBLE GATEWAY',
   operations: 'FENCED RUNTIME CONTROL PLANE',
@@ -191,6 +397,10 @@ const pageEyebrow = computed(() => ({
 
 const stageTitle = computed(() => ({
   tasks: '阶段 2 · 可控任务',
+  memory: '阶段 73 · 长期记忆',
+  knowledge: '阶段 3 · 本地知识',
+  mcp: '阶段 3 · 受控 MCP',
+  evaluations: '阶段 3 · 评测追踪',
   reconciliations: '阶段 2 · 持久化对账',
   providers: '阶段 2 · 模型控制面',
   operations: '阶段 2 · 受保护运维',
@@ -198,6 +408,10 @@ const stageTitle = computed(() => ({
 
 const stageDescription = computed(() => ({
   tasks: '通过检查点、实时事件和控制命令验证执行闭环。',
+  memory: '确认提案、处理冲突，并核对每次真实 Context 使用记录。',
+  knowledge: '导入只读文本来源，以内容寻址分块和来源版本证明检索结果。',
+  mcp: '固定 Server 命令、能力和 Schema，默认禁用并记录脱敏审计。',
+  evaluations: '运行版本化离线黄金任务，记录内容寻址 trace 并验证语义 replay。',
   reconciliations: '查看任务历史、Runner 证据、裁决与后继血缘。',
   providers: '管理可切换的模型连接、健康状态与配置审计。',
   operations: '读取四域数据库真值，审计采样、retention 与 DLQ requeue。',
@@ -296,7 +510,77 @@ function handleOpenHistoricalTask(snapshot: Task): void {
 </script>
 
 <template>
-  <main class="workspace">
+  <section v-if="coverVisible" ref="coverRef" class="cover" aria-label="DeskPilot 首页">
+    <div class="cover-stage" @click="enterWorkspace">
+      <video
+        class="cover-video"
+        autoplay
+        muted
+        loop
+        playsinline
+        preload="metadata"
+        :poster="coverPoster"
+        aria-hidden="true"
+      >
+        <source :src="coverVideo" type="video/mp4">
+      </video>
+      <div class="cover-shade" aria-hidden="true" />
+      <div class="cover-copy">
+        <header class="cover-brand" data-intro>
+          <div>
+            <strong>DESKPILOT</strong>
+            <small>LOCAL TASK AGENT</small>
+          </div>
+          <p>LOCAL&nbsp;&nbsp;/&nbsp;&nbsp;RESEARCH&nbsp;&nbsp;/&nbsp;&nbsp;ARTIFACTS</p>
+        </header>
+
+        <aside class="cover-note" data-intro>
+          <span>FIELD NOTE · 01</span>
+          <strong>在本地思考<br>必要时联网<br>最终交付产物</strong>
+          <p>对话是入口，任务是主对象，证据和可带走的文件是出口。</p>
+        </aside>
+
+        <h1 class="cover-title" aria-label="The task agent">
+          <span data-intro>THE</span>
+          <span data-intro>TASK</span>
+          <span data-intro>AGENT</span>
+        </h1>
+
+        <div class="cover-manifesto" data-intro>
+          <span>GENERAL PURPOSE · LOCAL FIRST</span>
+          <strong>会对话，会研究，会执行，也会把结果做成数字产物。</strong>
+        </div>
+
+        <button class="cover-enter" type="button" data-intro @click.stop="enterWorkspace">
+          <span>进入工作台</span>
+          <span aria-hidden="true">↗</span>
+        </button>
+      </div>
+      <div class="cover-iris-wrap" aria-hidden="true">
+        <div ref="irisRef" class="cover-iris" />
+      </div>
+    </div>
+  </section>
+
+  <main
+    ref="workspaceRef"
+    class="workspace"
+    :inert="coverVisible || undefined"
+    :aria-hidden="coverVisible ? 'true' : undefined"
+  >
+    <div class="hud-field" aria-hidden="true">
+      <span class="hud-grid" />
+      <span class="hud-horizon" />
+      <span class="hud-reticle hud-reticle-main"><i /><i /><i /></span>
+      <span class="hud-reticle hud-reticle-minor"><i /><i /></span>
+    </div>
+    <div class="hud-telemetry" aria-hidden="true">
+      <span>LOCAL RUNTIME</span>
+      <span>EGRESS GATED</span>
+      <span>AUDIT ON</span>
+    </div>
+    <div ref="viewTransitionRef" class="hud-transition" aria-hidden="true" />
+
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark">DP</span>
@@ -307,28 +591,41 @@ function handleOpenHistoricalTask(snapshot: Task): void {
       </div>
 
       <nav aria-label="工作区导航">
-        <button class="nav-item" :class="{ active: activeView === 'tasks' }" type="button" @click="activeView = 'tasks'">
+        <button class="nav-item" :class="{ active: activeView === 'tasks' }" type="button" @click="switchView('tasks')">
           <span>任务工作台</span>
-          <span class="nav-count">01</span>
+          <span class="nav-count">TASK</span>
         </button>
-        <button class="nav-item" type="button" disabled>知识库 <small>待开发</small></button>
-        <button class="nav-item" type="button" disabled>Agent 与工具 <small>待开发</small></button>
-        <button class="nav-item" :class="{ active: activeView === 'reconciliations' }" type="button" @click="activeView = 'reconciliations'">
+        <button class="nav-item" :class="{ active: activeView === 'knowledge' }" type="button" @click="switchView('knowledge')">
+          <span>知识库</span>
+          <span class="nav-count">RAG</span>
+        </button>
+        <button class="nav-item" :class="{ active: activeView === 'memory' }" type="button" @click="switchView('memory')">
+          <span>长期记忆</span>
+          <span class="nav-count">MEM</span>
+        </button>
+        <button class="nav-item" :class="{ active: activeView === 'mcp' }" type="button" @click="switchView('mcp')">
+          <span>Agent 与 MCP</span>
+          <span class="nav-count">MCP</span>
+        </button>
+        <button class="nav-item" :class="{ active: activeView === 'evaluations' }" type="button" @click="switchView('evaluations')">
+          <span>评测与 Trace</span><span class="nav-count">EVAL</span>
+        </button>
+        <button class="nav-item" :class="{ active: activeView === 'reconciliations' }" type="button" @click="switchView('reconciliations')">
           <span>历史与对账</span>
-          <span class="nav-count">02</span>
+          <span class="nav-count">LOG</span>
         </button>
-        <button class="nav-item" :class="{ active: activeView === 'providers' }" type="button" @click="activeView = 'providers'">
+        <button class="nav-item" :class="{ active: activeView === 'providers' }" type="button" @click="switchView('providers')">
           <span>模型与设置</span>
-          <span class="nav-count">03</span>
+          <span class="nav-count">MODEL</span>
         </button>
-        <button class="nav-item" :class="{ active: activeView === 'operations' }" type="button" @click="activeView = 'operations'">
+        <button class="nav-item" :class="{ active: activeView === 'operations' }" type="button" @click="switchView('operations')">
           <span>运行时运维</span>
-          <span class="nav-count">04</span>
+          <span class="nav-count">OPS</span>
         </button>
       </nav>
 
       <div class="stage-card">
-        <span class="eyebrow">CURRENT STAGE</span>
+        <span class="stage-label">当前阶段</span>
         <strong>{{ stageTitle }}</strong>
         <p>{{ stageDescription }}</p>
       </div>
@@ -353,7 +650,7 @@ function handleOpenHistoricalTask(snapshot: Task): void {
       </header>
 
       <template v-if="activeView === 'tasks'">
-      <section class="composer" aria-labelledby="task-heading">
+      <section class="composer motion-section" aria-labelledby="task-heading">
         <div class="composer-copy">
           <span class="eyebrow">NEW TASK</span>
           <h2 id="task-heading">创建可暂停的任务闭环</h2>
@@ -445,11 +742,10 @@ function handleOpenHistoricalTask(snapshot: Task): void {
         </form>
       </section>
 
-      <section class="task-grid">
+      <section class="task-grid motion-section">
         <article class="task-overview">
           <div class="section-heading">
             <div>
-              <span class="eyebrow">TASK SNAPSHOT</span>
               <h2>任务状态</h2>
             </div>
             <span class="status-pill" :data-status="status">{{ statusLabel }}</span>
@@ -526,9 +822,9 @@ function handleOpenHistoricalTask(snapshot: Task): void {
         </article>
 
         <article class="timeline-panel">
+          <span class="timeline-sweep" aria-hidden="true" />
           <div class="section-heading">
             <div>
-              <span class="eyebrow">LIVE EVENT STREAM</span>
               <h2>执行时间线</h2>
             </div>
             <span class="event-total">{{ events.length }} events</span>
@@ -563,6 +859,10 @@ function handleOpenHistoricalTask(snapshot: Task): void {
         :task-switch-locked="taskInProgress"
         @open-task="handleOpenHistoricalTask"
       />
+      <KnowledgeBase v-else-if="activeView === 'knowledge'" />
+      <MemoryControlCenter v-else-if="activeView === 'memory'" />
+      <McpConnections v-else-if="activeView === 'mcp'" />
+      <EvaluationLab v-else-if="activeView === 'evaluations'" />
       <ProviderSettings v-else-if="activeView === 'providers'" />
       <EffectRuntimeOperations v-else />
     </section>

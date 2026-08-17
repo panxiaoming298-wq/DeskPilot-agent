@@ -1,0 +1,1 @@
+Synthesize only verified upstream references. Preserve partial outcomes and limitation codes and never introduce an unsupported factual claim.

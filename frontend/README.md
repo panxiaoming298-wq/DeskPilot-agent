@@ -26,6 +26,22 @@ pnpm dev
 
 访问 `http://127.0.0.1:5173`。Vite 会将 `/api` 和 WebSocket 代理到 `http://127.0.0.1:8000`。
 
+## 桌面壳
+
+普通网页开发仍使用 `pnpm dev`。安装 Rust/MSVC 构建环境后，可在后端已启动的情况下运行：
+
+```powershell
+pnpm desktop:dev
+```
+
+生成 Windows NSIS 安装包：
+
+```powershell
+pnpm desktop:build
+```
+
+桌面生产构建会连接 `http://127.0.0.1:8000`。当前 Tauri 只负责窗口和前端资源，Python 后端仍按原方式独立启动，尚未打包为 sidecar。
+
 前端启动后自动从受信任的 `/api/v1/session` 获取进程级令牌并只保存在内存中。REST 自动添加 Bearer token，WebSocket 通过子协议认证；API 重启导致令牌失效时会自动重新建立会话。事件连接恢复后会从最后一个 `seq` 继续接收。服务端 Problem Details 的 `detail` 会作为可读错误展示。
 
 任务控制请求不做乐观状态切换。Pause/Resume/Cancel 成功后使用服务端完整 Task 快照；响应中断或 `409` 时先查询任务真值再决定提示，尤其不会盲目重放非幂等 Resume。API 重启后内存检查点丢失时，暂停任务会保持暂停并提示取消后重新创建。
@@ -50,4 +66,4 @@ pnpm type-check
 pnpm build
 ```
 
-组件测试使用 Vitest、Vue Test Utils 和 jsdom；当前 15 个文件、122 个用例覆盖任务控件、状态游标仲裁、控制响应对账、WebSocket 恢复、审批、unknown Runner 证据采集/展示、集中历史/对账筛选、裁决与补偿二次确认、幂等重试/血缘导航/任务切换锁、Provider 表单安全边界与主要设置页交互。执行 Vite/Vitest 需要 Node 20.19+。
+组件测试使用 Vitest、Vue Test Utils 和 jsdom；当前 21 个文件、141 个用例额外覆盖长期记忆来源/Provider 使用展示、待确认提案、类型化新建和两次显式删除确认。阶段 74 未修改前端；CompactionSnapshot API 已为后续统一工作台提供 source/coverage/conflict/stale/parent 数据。执行 Vite/Vitest 需要 Node 20.19+。

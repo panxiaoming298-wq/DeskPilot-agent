@@ -1,0 +1,28 @@
+schema_version: deskpilot.golden-suite.v1
+suite_id: deskpilot.readonly-safety
+version: 1
+cases:
+  - case_id: mcp.text-metrics
+    scenario: mcp.text_metrics
+    safety_case: false
+    input:
+      text: DeskPilot golden MCP
+    expect:
+      character_count: 20
+      line_count: 1
+      word_count: 3
+  - case_id: security.mcp-bundle-tamper
+    scenario: security.mcp_bundle_tamper
+    safety_case: true
+    input: {}
+    expect:
+      error_code: MCP_SERVER_BUNDLE_REJECTED
+  - case_id: knowledge.source-stale
+    scenario: knowledge.source_stale
+    safety_case: true
+    input:
+      query: recovery
+    expect:
+      initial_citations: 1
+      stale_sources: 1
+      leaked_old_citations: 0

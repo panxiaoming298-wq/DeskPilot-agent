@@ -9,6 +9,167 @@ export type TaskStatus =
   | 'cancelled'
   | 'paused'
 
+export interface KnowledgeSource {
+  source_id: string
+  canonical_path: string
+  artifact_id: string
+  source_version: string
+  content_digest: string
+  byte_size: number
+  chunk_count: number
+  manifest_digest: string
+  imported_at: string
+  updated_at: string
+}
+
+export interface KnowledgeCitation {
+  source_id: string
+  artifact_id: string
+  chunk_id: string
+  canonical_path: string
+  locator: string
+  snippet: string
+  score: number
+  text_digest: string
+  chunk_proof_digest: string
+  retrieval_proof_digest: string
+}
+
+export interface KnowledgeSearchResult {
+  query_digest: string
+  citations: KnowledgeCitation[]
+  searched_sources: number
+  stale_source_ids: string[]
+  result_digest: string
+}
+
+export interface McpTool {
+  name: string
+  title: string
+  description: string
+  risk_floor: 'R0' | 'R1' | 'R2' | 'R3' | 'R4'
+  input_schema: Record<string, unknown>
+  output_schema: Record<string, unknown>
+  schema_digest: string
+}
+
+export interface McpServer {
+  server_id: string
+  title: string
+  transport: 'stdio'
+  protocol_version: string
+  command_preview: string[]
+  enabled: boolean
+  revision: number
+  network_access: boolean
+  filesystem_roots: string[]
+  client_capabilities: string[]
+  tools: McpTool[]
+  bundle_digest: string
+  manifest_digest: string
+  updated_at: string | null
+}
+
+export interface McpServerMutation {
+  server: McpServer
+  audit_event_id: string | null
+}
+
+export interface McpToolCallResult {
+  server_id: string
+  tool_name: string
+  protocol_version: string
+  structured_content: Record<string, unknown>
+  request_digest: string
+  result_digest: string
+  audit_event_id: string
+}
+
+export interface McpAuditEvent {
+  event_id: string
+  sequence: number
+  server_id: string
+  action: 'enabled' | 'disabled' | 'tool_called' | 'tool_failed'
+  request_digest: string
+  result_digest: string
+  previous_event_digest: string | null
+  event_digest: string
+  details: Record<string, unknown>
+  occurred_at: string
+}
+
+export interface McpAuditPage {
+  events: McpAuditEvent[]
+  next_after_sequence: number
+}
+
+export interface EvaluationTrace {
+  sequence: number
+  case_id: string
+  scenario: string
+  status: 'passed' | 'failed'
+  input_digest: string
+  output_digest: string
+  error_code: string | null
+  duration_ms: number
+  previous_event_digest: string | null
+  event_digest: string
+}
+
+export interface EvaluationRun {
+  run_id: string
+  suite_id: string
+  suite_version: number
+  suite_digest: string
+  status: 'passed' | 'failed'
+  replay_of_run_id: string | null
+  replay_match: boolean | null
+  case_count: number
+  passed_count: number
+  failed_count: number
+  safety_case_count: number
+  safety_passed_count: number
+  success_rate: number
+  safety_rate: number
+  duration_ms: number
+  result_manifest: Record<string, unknown>
+  manifest_digest: string
+  traces: EvaluationTrace[]
+  started_at: string
+  completed_at: string
+}
+
+export interface EvaluationRunPage { runs: EvaluationRun[] }
+
+export interface EvaluationTrendPoint {
+  run_id: string
+  status: 'passed' | 'failed'
+  success_rate: number
+  safety_rate: number
+  duration_ms: number
+  replay_of_run_id: string | null
+  started_at: string
+}
+
+export interface EvaluationReport {
+  schema_version: 'deskpilot.evaluation-report.v1'
+  suite_id: string | null
+  suite_version: number | null
+  suite_digest: string | null
+  as_of: string | null
+  run_count: number
+  passed_run_count: number
+  failed_run_count: number
+  run_success_rate: number
+  run_duration_p50_ms: number | null
+  run_duration_p95_ms: number | null
+  case_duration_p50_ms: number | null
+  case_duration_p95_ms: number | null
+  failure_counts: Record<string, number>
+  trend: EvaluationTrendPoint[]
+  report_digest: string
+}
+
 export type TaskControlAction = 'pause' | 'resume' | 'cancel'
 
 export interface TaskControlCommand {
@@ -685,4 +846,115 @@ export interface OutboxRequeueResult {
   claim_fencing_token: number
   available_at: string
   audit_event: EffectRuntimeAuditEvent
+}
+
+export type LongTermMemoryKind =
+  | 'preference'
+  | 'restrictive_permission'
+  | 'user_confirmed_fact'
+  | 'verified_episode'
+  | 'skill_template'
+
+export type LongTermMemoryStatus =
+  | 'proposal'
+  | 'pending_confirmation'
+  | 'confirmed'
+  | 'active'
+  | 'conflict'
+  | 'expired'
+  | 'deleted'
+  | 'rejected'
+
+export interface MemoryProposal {
+  proposal_id: string
+  key: string
+  kind: LongTermMemoryKind
+  value: string | null
+  source_type: 'user_explicit' | 'agent_result' | 'verified_delivery'
+  source_id: string
+  source_digest: string
+  created_by: 'user' | 'agent' | 'system'
+  scope: 'user'
+  classification: 'public' | 'internal' | 'sensitive'
+  confidence: number
+  status: LongTermMemoryStatus
+  value_digest: string
+  proposal_digest: string
+  created_at: string
+  expires_at: string | null
+  decided_at: string | null
+}
+
+export interface LongTermMemoryItem {
+  memory_id: string
+  proposal_id: string
+  key: string
+  version: number
+  kind: LongTermMemoryKind
+  value: string | null
+  source_type: MemoryProposal['source_type']
+  source_id: string
+  source_digest: string
+  created_by: MemoryProposal['created_by']
+  scope: 'user'
+  classification: MemoryProposal['classification']
+  confidence: number
+  status: LongTermMemoryStatus
+  value_digest: string
+  item_digest: string
+  supersedes_memory_id: string | null
+  created_at: string
+  expires_at: string | null
+  deleted_at: string | null
+}
+
+export interface MemoryConflict {
+  conflict_id: string
+  key: string
+  kind: LongTermMemoryKind
+  memory_ids: string[]
+  status: 'open' | 'resolved'
+  selected_memory_id: string | null
+  conflict_digest: string
+  created_at: string
+  resolved_at: string | null
+}
+
+export interface MemoryUsage {
+  usage_id: string
+  memory_id: string
+  memory_version: number
+  task_id: string
+  invocation_id: string
+  context_manifest_id: string
+  agent_id: string
+  provider_id: string
+  provider_location: string
+  purpose: string
+  supplied_at: string
+  policy_reference: string
+  deleted_after_use: boolean
+}
+
+export interface LongTermMemoryPage {
+  items: LongTermMemoryItem[]
+  proposals: MemoryProposal[]
+  conflicts: MemoryConflict[]
+  usage: MemoryUsage[]
+}
+
+export interface CreateLongTermMemory {
+  key: string
+  kind: LongTermMemoryKind
+  value: string
+  classification: MemoryProposal['classification']
+  expires_at?: string
+  verified_delivery_id?: string
+}
+
+export interface LongTermMemoryExport extends LongTermMemoryPage {
+  schema_version: 'deskpilot.long-term-memory-export.v1'
+  exported_at: string
+  tombstones: Record<string, unknown>[]
+  export_digest: string
 }

@@ -1,0 +1,1 @@
+Use only controlled local knowledge references. Every knowledge claim must retain a Citation reference and stale sources must be rejected.

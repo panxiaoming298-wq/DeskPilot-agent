@@ -33,6 +33,7 @@ from deskpilot.domain.model_routing import (
     ModelRoleRouteSnapshot,
     ModelRouteStrategy,
 )
+from deskpilot.observability import TelemetryFacade
 
 StructuredOutput = TypeVar("StructuredOutput", bound=BaseModel)
 
@@ -182,6 +183,7 @@ class ModelGateway:
         policy: ModelGatewayPolicy | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        telemetry: TelemetryFacade | None = None,
     ) -> None:
         self._default_provider_id = default_provider_id
         self._policy = policy or ModelGatewayPolicy()
@@ -191,6 +193,7 @@ class ModelGateway:
         self._runtime: dict[str, _ProviderRuntime] = {}
         self._task_costs: dict[str, _TaskCostRuntime] = {}
         self._state_lock = RLock()
+        self._telemetry = telemetry
 
     @property
     def policy(self) -> ModelGatewayPolicy:
@@ -309,7 +312,11 @@ class ModelGateway:
                         provider_id=provider_id,
                     )
                 async with asyncio.timeout(remaining_timeout):
-                    response = await provider.complete(request)
+                    response = await self._complete_provider_attempt(
+                        provider,
+                        request,
+                        attempt_number,
+                    )
                 self._validate_response(request, provider.descriptor, response)
             except TimeoutError as error:
                 mapped_timeout = ModelTimeoutError(
@@ -373,6 +380,31 @@ class ModelGateway:
         if last_error is not None:
             raise last_error
         raise RuntimeError("Model Gateway exhausted attempts without a result")
+
+    async def _complete_provider_attempt(
+        self,
+        provider: ModelProvider,
+        request: ModelRequest,
+        attempt_number: int,
+    ) -> ModelResponse:
+        telemetry = self._telemetry
+        if telemetry is None:
+            return await provider.complete(request)
+        descriptor = provider.descriptor
+        with telemetry.operation(
+            "deskpilot.model.dispatch",
+            "model",
+            {
+                "deskpilot.subject.type": "model_request",
+                "deskpilot.subject.id": request.request_id,
+                "deskpilot.model.provider_class": descriptor.location.value,
+                "deskpilot.model.protocol": descriptor.protocol.value,
+                "deskpilot.attempt.ordinal": attempt_number,
+            },
+        ) as operation:
+            response = await provider.complete(request)
+            operation.set_outcome("succeeded")
+            return response
 
     async def complete_structured(
         self,

@@ -1,0 +1,1 @@
+Use only the registered read-only computer evidence tool. Return structured claims as references and never infer missing machine facts.

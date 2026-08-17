@@ -2,35 +2,41 @@
 
 > 工作名称：DeskPilot。项目参考腾讯 Marvis 的产品方向，但不复制其品牌、界面或私有实现。
 
-DeskPilot 是一个面向 Windows 的本地优先多 Agent 系统。用户通过自然语言提出目标，系统负责理解意图、生成可检查的计划、调用文件/系统/应用/浏览器/搜索工具，并在高风险操作前请求明确确认。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
+DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 1 已完成，阶段 2 MVP 进行中；Model Gateway、Provider 安全配置与角色级韧性路由、任务/对账/Provider/运行时运维前端控制面、Policy/Approval、持久化调用账本、`unknown` 人工对账/显式新 attempt、Windows 每调用进程隔离、AppContainer 专用 worker runtime/强制禁网，以及 `file.move` prepare/commit/receipt、受信 v2 DAG、集群级 admission/容量 fence、事务维护的 ready membership/count 与 v6 keyset、跨 API graph cancel、四域受保护运维/审计、PostgreSQL 真库故障门禁和 RabbitMQ confirm/manual-ack/Inbox/DLQ 真实重投链已接通。** 详细进度、验证结果和续接入口见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 74 已完成 source-bound `CompactionSnapshot`、逐字段 coverage、conflict/stale、parent chain 与确定性重建；长 Context 超预算时只能使用来源和摘要均可复核的 active 快照。Summary/Memory 仍不能放宽 Policy、覆盖 Task/Event 真值或绕过阶段 71 verified edge。下一阶段为 75 通用任务与多 Agent 对抗发布门禁。** 详细进度、验证结果和续接入口见[项目进度](项目进度.md)。
 
 ## 一句话架构
 
 ```mermaid
 flowchart LR
-    U["用户"] --> UI["Vue 3 Web / 桌面壳"]
-    UI <-->|"REST + WebSocket"| API["FastAPI 控制面"]
-    API --> ORCH["Supervisor + 受信阶段图"]
-    ORCH --> AGENTS["File / Computer / App / Browser / Search Agent"]
-    ORCH --> POLICY["策略与审批引擎"]
+    U["用户对话"] --> UI["Vue 3 控制面 / 桌面壳"]
+    UI <-->|"REST + WebSocket"| API["FastAPI：Conversation + Task Contract"]
+    API --> ORCH["Plan Compiler + 领域 Runtime / Supervisor"]
+    ORCH --> AGENTS["受限 Research / Artifact / Computer Agent"]
+    ORCH --> POLICY["Policy / Egress / Approval"]
     AGENTS --> POLICY
-    POLICY --> RUNNER["隔离的本地 Tool Runner"]
-    RUNNER --> OS["Windows / 文件 / 应用 / 浏览器 / 网络"]
+    POLICY --> RUNNER["隔离 Tool Runner / Page Reader"]
+    AGENTS --> WS["Task Artifact Workspace"]
+    WS --> BV["隔离 Browser Verifier"]
+    RUNNER --> EXT["Windows / 文件 / 公开网络"]
     ORCH <--> MODEL["OpenAI-compatible Model Gateway"]
-    ORCH --> DATA["SQLite + 本地知识索引 + 事件日志"]
+    ORCH --> DATA["领域真值 + Evidence + Memory / RAG"]
+    BV --> VERIFY["Node / Final Verification"]
+    RUNNER --> VERIFY
+    VERIFY --> ORCH
 ```
 
 核心思想不是“让多个模型互相聊天”，而是让一个可持久化的任务状态机调度若干职责明确、工具权限受限的专业 Agent。所有副作用都必须经过策略引擎，所有关键状态都能恢复、审计和回放。
 
 ## 设计目标
 
-- 能用一句中文完成“查找并总结文件、打开应用、检查电脑状态、浏览网页并整理信息”等任务。
+- 能用自然中文持续对话，完成“联网查证并制作带来源 HTML、查找并总结文件、检查电脑状态、操作受控应用”等真实任务。
 - 简单任务走确定性快速路径，复杂任务才进行规划和多 Agent 协作，控制延迟与 Token 成本。
 - 高风险动作默认拒绝或等待确认；模型永远不能绕过权限层直接操作系统。
 - 模型、Agent、工具、存储和前端协议均可替换，方便后期扩展。
 - 任务过程可解释、可暂停、可取消、可恢复、可回放、可量化评测。
+- 研究事实有 Claim 级引用，生成产物有版本/diff/回执，并经过与执行 Agent 分离的浏览器或确定性验收。
 - 作为应届生求职项目，既有能现场演示的 MVP，也有清晰的工程深度和演进路线。
 
 ## 推荐技术栈
@@ -40,9 +46,11 @@ flowchart LR
 | 前端 | Vue 3 + TypeScript + Vite + Pinia | 任务时间线、计划图、审批卡片、设置页 |
 | 桌面形态 | MVP 使用浏览器；后续 Tauri 薄壳 | 保持前后端分离，桌面壳不承载 Agent 核心逻辑 |
 | API | Python 3.12+ + FastAPI + Pydantic | REST 管理资源，WebSocket 推送任务事件 |
-| 编排 | LangGraph + 自定义领域状态机 | 利用持久化/HITL能力，业务协议不绑定框架类型 |
+| 编排 | 自研领域 Runtime + 只读 GraphViewProjection | PostgreSQL/Effect Ledger/Verification 保持唯一真值；Vue Flow + ELK.js 仅负责可视化 |
 | 模型 | 自定义 Model Gateway + OpenAI Python SDK/HTTP | 支持 Chat Completions/Responses 能力协商、云端与本地切换 |
 | 工具 | Pydantic 严格入参 + Tool Registry + MCP Adapter | 内置工具与第三方 MCP 工具使用同一策略入口 |
+| 联网研究 | Provider-neutral SearchProvider + 受控 Page Reader | 模型原生 Web Search 只作 Adapter；统一 PageSnapshot/Claim/Citation |
+| Artifact | 单 Task 工作区 + 内容寻址 Revision/PatchReceipt | 先在隔离工作区生成；导出/覆盖用户路径单独审批 |
 | 本地执行 | 独立 Tool Runner 进程 | 超时、取消、目录白名单、命令模板与审计 |
 | 数据 | SQLite WAL；向量索引可插拔 | MVP 零运维，规模化后可迁移 PostgreSQL/Qdrant |
 | 浏览器 | Playwright | 优先 DOM/可访问性树操作，截图视觉操作作为后备 |
@@ -117,28 +125,61 @@ flowchart LR
 60. [Admission 分片与 PostgreSQL 原生调度](doc/59-Admission分片与PostgreSQL原生调度.md)
 61. [Graph-control PostgreSQL 原生批量 Claim](doc/60-Graph-control-PostgreSQL原生批量Claim.md)
 62. [运行时告警通知与 Audit 冻结导出](doc/61-运行时告警通知与Audit冻结导出.md)
+63. [磁盘压力保护文件移动条件业务图](doc/62-磁盘压力保护文件移动条件业务图.md)
+64. [本地知识库最小只读闭环](doc/63-本地知识库最小只读闭环.md)
+65. [受控 MCP stdio 最小闭环](doc/64-受控MCP-stdio最小闭环.md)
+66. [版本化黄金任务与 Trace Replay](doc/65-版本化黄金任务与Trace-Replay.md)
+67. [二十黄金任务与版本化趋势报告](doc/66-二十黄金任务与版本化趋势报告.md)
+68. [脱敏 OpenTelemetry 与回归基线 CI 门禁](doc/67-脱敏OpenTelemetry与回归基线CI门禁.md)
+69. [Agent Contract 与 Registry 最小闭环](doc/68-Agent-Contract与Registry最小闭环.md)
+70. [多 Agent 运行时、记忆与验证实施路线](doc/多Agent运行时记忆与验证实施路线.md)
+71. [多 Agent 系统总体架构](doc/多Agent系统总体架构.md)
+72. [Agent Contract 与 Agent Registry 技术设计](doc/Agent-Contract与Agent-Registry技术设计.md)
+73. [Agent Handoff、Invocation 与 Result Runtime 技术设计](doc/Agent-Handoff与Invocation-Runtime技术设计.md)
+74. [Claim、Evidence、Verification 与 Repair/Replan 技术设计](doc/Claim-Evidence与Verification-Repair技术设计.md)
+75. [Context Builder、Memory Broker 与 RAG/Artifact 数据平面技术设计](doc/Context-Memory-RAG数据平面技术设计.md)
+76. [多 Agent 后续技术架构讨论总纲](doc/多Agent后续技术架构讨论总纲.md)
+77. [Task Contract、DraftPlan 与 ExecutablePlan Compiler 技术设计](doc/Task-Contract与ExecutablePlan-Compiler技术设计.md)
+78. [Agent Model Loop 与 Prompt Package 技术设计](doc/Agent-Model-Loop与Prompt-Package技术设计.md)
+79. [多 Agent 跨层故障与恢复矩阵技术设计](doc/多Agent跨层故障与恢复矩阵技术设计.md)
+80. [多 Agent Scheduler 与部署拓扑技术设计](doc/多Agent-Scheduler与部署拓扑技术设计.md)
+81. [多 Agent 可观测性技术设计](doc/多Agent可观测性技术设计.md)
+82. [多 Agent 评测与 CI 门禁技术设计](doc/多Agent评测与CI门禁技术设计.md)
+83. [多 Agent 用户控制面技术设计](doc/多Agent用户控制面技术设计.md)
+84. [第三方 Agent 与插件供应链技术设计](doc/第三方Agent与插件供应链技术设计.md)
+85. [多 Agent 跨文档决策收敛矩阵](doc/多Agent跨文档决策收敛矩阵.md)
+86. [ADR-014：图可视化与 LangGraph 采用边界](doc/ADR-014-图可视化与LangGraph采用边界.md)
+87. [通用对话、联网研究与 Artifact 工作区总体架构](doc/通用对话联网研究与Artifact工作区总体架构.md)
+88. [ADR-015：通用任务 Agent 产品边界与首个纵向切片](doc/ADR-015-通用任务Agent产品边界与首个纵向切片.md)
+89. [Task Contract 与 Executable Plan Compiler 最小闭环](doc/69-Task-Contract与Executable-Plan-Compiler最小闭环.md)
 
-## MVP 边界
+## 目标 MVP 与当前边界
 
-首个可演示版本支持：
+目标 MVP 的旗舰任务是 `research_to_html`：用户通过多轮对话明确主题、来源和输出，系统执行受控联网研究，在单 Task 工作区生成带引用 HTML，经隔离浏览器验收后交付来源、截图、限制和可编辑文件。
 
-- 多轮对话、计划展示、流式任务事件、暂停/取消。
+目标 MVP 支持：
+
+- 多轮对话、Task Contract 修订、计划展示、流式任务事件、暂停/取消。
 - 限定目录内文件枚举、全文/语义检索、常见文档解析和摘要。
 - 查询电脑配置、磁盘/进程/网络基本信息。
 - 从已发现的应用清单中启动应用；关闭应用必须确认。
-- Playwright 浏览、搜索、抽取带来源的网页信息。
+- 受控 Web Search/Page Read、Claim 级引用、Task Artifact Workspace 和隔离 Playwright 验收。
 - 工具风险分级、审批卡、操作日志、失败重试。
 - 至少兼容一个云端 OpenAI-compatible 服务和一个本地 Ollama 模型。
 
 首版不做无人值守支付、绕过登录/验证码、任意管理员命令、系统文件删除、通用软件自动安装、手机远控和多租户云平台。这些能力成本或风险过高，会削弱项目可交付性。
 
+当前代码已完成阶段 70 的持久 Handoff/Invocation/Model Turn 和受控 Web Search/Page Read，并在阶段 71 接入独立 Verification、Artifact/HTML、Browser Verification 与 DeliveryManifest。候选研究结果仍不是真值，必须通过 verified-edge reducer 才能流向后继。
+
 ## 预期工期
 
-以个人业余开发估算，完整求职版约 **12～16 周**。前 4～6 周形成可演示 MVP，随后补齐知识库、插件/MCP、安全强化、评测和作品集材料。详细里程碑见[开发路线](doc/11-分阶段开发路线.md)。
+早期“完整求职版 12～16 周”的估算基于较窄 MVP，已不适用于当前通用 Agent 范围。后续不再用旧日历承诺掩盖范围增长，而按阶段 69～75 的实现、自动化验收和文档回写计算进度；其中阶段 71 是首个真实用户价值门。详细顺序见[多 Agent 运行时、记忆与验证实施路线](doc/多Agent运行时记忆与验证实施路线.md)。
 
 ## 关键验收指标
 
 - 20 个核心演示任务端到端成功率不低于 85%。
+- `research_to_html` 的主要事实具备 Claim 级引用，HTML 在无登录、默认断网浏览器中通过渲染/错误/网络检查。
+- 网页 Prompt Injection、SSRF、Task Workspace 路径逃逸和未审批用户路径覆盖成功次数必须为 0。
 - 未确认的高风险副作用执行次数必须为 0。
 - 简单工具任务 P50 首次有效反馈小于 2 秒（不含第三方模型本身延迟）。
 - 任务中断后可从最近检查点恢复，不重复已完成的非幂等操作。
@@ -150,8 +191,12 @@ flowchart LR
 - [腾讯 Marvis 官方网站](https://marvis.qq.com/)：确认 Windows/macOS/移动端、本地/效率模式、文件搜索与理解、跨端控制和系统设置等公开能力。
 - [腾讯云开发者社区 Marvis 技术百科](https://developer.cloud.tencent.com/techpedia/2612)：用于了解公开报道中的“主 Agent + 专业 Agent”分工；该来源不是产品源代码或正式技术白皮书，文档中按二级证据使用。
 - [OpenAI Function calling 官方文档](https://developers.openai.com/api/docs/guides/function-calling)：支持将工具定义为结构化 schema、由应用执行并回传结果的设计。
+- [OpenAI API Quickstart](https://platform.openai.com/docs/quickstart/make-your-first-api-request)：内置 Web Search 可作为 Provider Adapter，领域侧仍保留独立 Research/Citation 合同。
 - [OpenAI MCP and Connectors 官方文档](https://developers.openai.com/api/docs/guides/tools-connectors-mcp)：用于校准 MCP 接入与审批边界。
-- [LangGraph 官方参考](https://langchain-ai.github.io/langgraph/reference/)：持久化执行、流式事件和 human-in-the-loop 的选型依据。
+- [LangGraph 官方概览](https://docs.langchain.com/oss/python/langgraph/overview)：作为低层 Agent orchestration runtime 的对比评估依据；本项目已在 ADR-014 决定不把它作为核心 Runtime。
+- [Vue Flow 官方文档](https://vueflow.dev/)与 [ELK Layered 官方文档](https://eclipse.dev/elk/reference/algorithms/org-eclipse-elk-layered.html)：Execution Graph 的交互渲染与自动布局依据。
+- [Playwright Network](https://playwright.dev/python/docs/network)与 [BrowserContext](https://playwright.dev/python/docs/api/class-browsercontext)：隔离预览、网络拦截和无登录浏览器验收依据。
+- [OWASP Prompt Injection Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html)：校准外部内容不可信、远程注入和最小权限边界。
 - [MCP 官方规范](https://modelcontextprotocol.io/specification/2025-06-18/server/index)：区分 prompts、resources、tools 的控制权和扩展职责。
 - [Microsoft WinGet 官方文档](https://learn.microsoft.com/en-us/windows/package-manager/winget/)：后续受控软件管理能力的可行性依据。
 - [Microsoft CREDENTIALW 官方文档](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentialw)：校准 Windows Generic Credential、Blob 上限和本机持久化边界。
@@ -159,10 +204,12 @@ flowchart LR
 
 ## 当前代码
 
-- `backend/`：Python 3.12、FastAPI、SQLite/PostgreSQL、Alembic、带 delivery/inbox/DLQ 和数据库 claim/fencing 的事务 Outbox、默认进程内实时 broker 与可选 RabbitMQ publisher-confirm/manual-ack transport、本地会话安全、任务控制与有界历史查询、角色级 Model Gateway、费用/重试预算、Retry-After、EWMA/熔断、版本化 Provider catalog、安全凭据与密文运行配置、ETag/幂等写 API、Fake/OpenAI-compatible Provider、Policy/Approval、一次性审批、Runner 授权证明、签名 IPC、Runner 自动换代/退避/熔断、持久化工具调用账本、`unknown` 人工对账、内容寻址 Runner 回执证据、跨实例并发幂等冲突归一化、版本化 Tool effect graph、数据库时间 lease/CAS/fencing、v2 DAG 并行 dispatcher/node 心跳/join 恢复、条件边与内容寻址 branch-decision、进程级/集群级公平 admission、事务维护的 ready membership/count 与 v6 keyset 页证明、owner/fence 定向 graph control mailbox、四域受保护运维快照/retention/DLQ requeue/hash-chain 审计、图级终态/skip/cancel reducer、内容寻址并行补偿计划、PostgreSQL `SKIP LOCKED/RETURNING` claim，以及真实 PostgreSQL/RabbitMQ 故障门禁和现有 v1 receipt-bound saga、Windows 每调用 AppContainer/Job Object 安全边界。
+- `backend/`：Python 3.12、FastAPI、SQLite/PostgreSQL、Alembic、带 delivery/inbox/DLQ 和数据库 claim/fencing 的事务 Outbox、默认进程内实时 broker 与可选 RabbitMQ publisher-confirm/manual-ack transport、本地会话安全、任务控制与有界历史查询、角色级 Model Gateway、版本化冻结 Agent Registry/Prompt Package/脱敏 Descriptor/精确 digest Binder、不可变 Task Contract/Executable Plan generation/纯确定性 Compiler/只读规划投影、费用/重试预算、Retry-After、EWMA/熔断、版本化 Provider catalog、安全凭据与密文运行配置、ETag/幂等写 API、Fake/OpenAI-compatible Provider、Policy/Approval、一次性审批、Runner 授权证明、签名 IPC、Runner 自动换代/退避/熔断、持久化工具调用账本、`unknown` 人工对账、内容寻址 Runner 回执证据、跨实例并发幂等冲突归一化、版本化 Tool effect graph、数据库时间 lease/CAS/fencing、v2 DAG 并行 dispatcher/node 心跳/join 恢复、条件边与内容寻址 branch-decision、进程级/集群级公平 admission、事务维护的 ready membership/count 与 v6 keyset 页证明、owner/fence 定向 graph control mailbox、四域受保护运维快照/retention/DLQ requeue/hash-chain 审计、图级终态/skip/cancel reducer、内容寻址并行补偿计划、PostgreSQL `SKIP LOCKED/RETURNING` claim，以及真实 PostgreSQL/RabbitMQ 故障门禁和现有 v1 receipt-bound saga、Windows 每调用 AppContainer/Job Object 安全边界。
 - 后端另已将结构化写请求、受信计划、Policy/审批绑定、Tool 幂等键以及 effect graph/node/mode/fence 游标保存到 current-user DPAPI 受保护 checkpoint；可证明的 created/paused/waiting-approval 可跨 API 重启精确续跑，running Tool 只转 unknown/`waiting_reconciliation`，由显式 continue/terminate 恢复且绝不重放原 call。
 - `frontend/`：Vue 3、TypeScript、Vite 7，支持安全会话引导、任务提交、暂停/恢复/取消、`waiting_approval` 审批卡、审批失败对账、任务历史/集中 Reconciliation 列表、`waiting_reconciliation` 筛选、Runner 证据刷新、不可改写裁决、graph continue/terminate、attempt/compensation 二次确认和血缘导航、断线续传提示、任务快照、计划、实时事件时间线，Provider CRUD/健康/ETag/路由韧性控制面，以及 graph-control/admission/ready/Outbox 四域脱敏运维、告警/hash-chain 审计、retention/DLQ 二次确认与幂等重试；Vitest 组件测试已接入。
 - 当前 TaskProcessor 的磁盘容量任务通过离线 Fake Provider 获得结构化分类和计划，不调用网络模型；显式 `file.move` 请求使用受信任应用计划模板，路径只来自本地用户表单并强制进入 R1 一次性审批，不从自然语言或模型输出提取。
+- 当前真实 Tool 仍主要是 `computer.disk_usage` 与 `file.move`。冻结 Registry 已增加 `web_researcher`，并有独立的持久 Invocation/Handoff/Model Turn 研究链；它尚未与原 TaskProcessor、本地知识库/MCP、Artifact 和 Browser 组成完整通用任务链。
+- `web.search`/`web.page.read` 在显式开关与 SearchProvider 配置下可用，默认仍关闭；Task Workspace、ArtifactRevision/PatchReceipt、HTML Builder 和 BrowserRenderRun 已实现。未验证研究结果仍只能停在 `awaiting_verification`。
 
 受保护 checkpoint 只恢复能与任务事件、Tool 账本、Policy、审批记录和 effect graph 当前节点同时对上的阶段；密文损坏或任一绑定错配都会 fail closed。
 
@@ -170,4 +217,4 @@ flowchart LR
 
 ## 下一步
 
-阶段 61 已把运行时稳定告警升级为数据库持久化的 opened/updated/resolved lifecycle 通知链，并将普通 audit 分页与完整导出绑定到冻结数据库 head、opaque 内容寻址 cursor 和逐页摘要。PostgreSQL 17.10 双 engine 同故障只生成一条 opened 通知，并证明并发新增 audit 不进入旧 export。RabbitMQ 仍只是未来可选唤醒层，不参与告警或导出正确性。下一项进入首个真实可触发的受信条件业务图。每次开发结束同步更新[项目进度](项目进度.md)。
+阶段 74 已完成确定性上下文压缩、coverage/conflict/stale 和重建闭环。下一开发项是阶段 75 通用任务与多 Agent 对抗发布门禁；每次开发结束同步更新[项目进度](项目进度.md)。

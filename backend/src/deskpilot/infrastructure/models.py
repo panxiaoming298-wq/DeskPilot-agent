@@ -9,6 +9,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -25,6 +26,146 @@ def utc_now() -> datetime:
 
 class Base(DeclarativeBase):
     pass
+
+
+class KnowledgeArtifactRecord(Base):
+    __tablename__ = "knowledge_artifacts"
+    __table_args__ = (
+        CheckConstraint(
+            "byte_size >= 0 AND chunk_count >= 1",
+            name="ck_knowledge_artifacts_values",
+        ),
+    )
+
+    artifact_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    content_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    byte_size: Mapped[int] = mapped_column(Integer)
+    parser_version: Mapped[str] = mapped_column(String(64))
+    chunker_version: Mapped[str] = mapped_column(String(64))
+    extracted_text: Mapped[str] = mapped_column(Text)
+    chunk_count: Mapped[int] = mapped_column(Integer)
+    manifest_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class KnowledgeSourceRecord(Base):
+    __tablename__ = "knowledge_sources"
+
+    source_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    canonical_path: Mapped[str] = mapped_column(Text, unique=True)
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_artifacts.artifact_id", ondelete="RESTRICT"), index=True
+    )
+    source_version: Mapped[str] = mapped_column(String(64))
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class KnowledgeChunkRecord(Base):
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint("artifact_id", "ordinal", name="uq_knowledge_chunks_ordinal"),
+        Index("ix_knowledge_chunks_artifact", "artifact_id", "ordinal"),
+    )
+
+    chunk_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_artifacts.artifact_id", ondelete="CASCADE")
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    locator: Mapped[str] = mapped_column(String(80))
+    text: Mapped[str] = mapped_column(Text)
+    text_digest: Mapped[str] = mapped_column(String(64))
+    proof_digest: Mapped[str] = mapped_column(String(64))
+
+
+class McpServerStateRecord(Base):
+    __tablename__ = "mcp_server_states"
+    __table_args__ = (CheckConstraint("revision >= 1", name="ck_mcp_server_state_revision"),)
+
+    server_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    manifest_digest: Mapped[str] = mapped_column(String(64))
+    enabled: Mapped[bool] = mapped_column(Boolean)
+    revision: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class McpAuditStateRecord(Base):
+    __tablename__ = "mcp_audit_state"
+    __table_args__ = (CheckConstraint("next_sequence >= 1", name="ck_mcp_audit_state_sequence"),)
+
+    state_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    next_sequence: Mapped[int] = mapped_column(Integer)
+    last_event_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class McpAuditEventRecord(Base):
+    __tablename__ = "mcp_audit_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_mcp_audit_event_id"),
+        UniqueConstraint("event_digest", name="uq_mcp_audit_event_digest"),
+        CheckConstraint("sequence >= 1", name="ck_mcp_audit_sequence"),
+        Index("ix_mcp_audit_server_sequence", "server_id", "sequence"),
+    )
+
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(40))
+    server_id: Mapped[str] = mapped_column(String(80))
+    action: Mapped[str] = mapped_column(String(32))
+    request_digest: Mapped[str] = mapped_column(String(64))
+    result_digest: Mapped[str] = mapped_column(String(64))
+    previous_event_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    event_digest: Mapped[str] = mapped_column(String(64))
+    details: Mapped[dict[str, Any]] = mapped_column(JSON)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EvaluationRunRecord(Base):
+    __tablename__ = "evaluation_runs"
+    __table_args__ = (
+        CheckConstraint("case_count >= 1", name="ck_evaluation_run_case_count"),
+        Index("ix_evaluation_runs_started", "started_at"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    suite_id: Mapped[str] = mapped_column(String(80))
+    suite_version: Mapped[int] = mapped_column(Integer)
+    suite_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16))
+    replay_of_run_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    replay_match: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    case_count: Mapped[int] = mapped_column(Integer)
+    passed_count: Mapped[int] = mapped_column(Integer)
+    failed_count: Mapped[int] = mapped_column(Integer)
+    safety_case_count: Mapped[int] = mapped_column(Integer)
+    safety_passed_count: Mapped[int] = mapped_column(Integer)
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    result_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    manifest_digest: Mapped[str] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EvaluationTraceRecord(Base):
+    __tablename__ = "evaluation_trace_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "case_id", name="uq_evaluation_trace_case"),
+        CheckConstraint("sequence >= 1 AND duration_ms >= 0", name="ck_evaluation_trace_values"),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("evaluation_runs.run_id", ondelete="CASCADE"), primary_key=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[str] = mapped_column(String(80))
+    scenario: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(16))
+    input_digest: Mapped[str] = mapped_column(String(64))
+    output_digest: Mapped[str] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    previous_event_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    event_digest: Mapped[str] = mapped_column(String(64))
 
 
 class TaskRecord(Base):
@@ -62,6 +203,850 @@ class TaskRecord(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+
+
+class ConversationRecord(Base):
+    __tablename__ = "conversations"
+
+    conversation_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ConversationMessageRecord(Base):
+    __tablename__ = "conversation_messages"
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_conversation_message_role"),
+        CheckConstraint(
+            "classification IN ('public', 'internal', 'sensitive')",
+            name="ck_conversation_message_classification",
+        ),
+        CheckConstraint("status IN ('active', 'deleted')", name="ck_conversation_message_status"),
+        CheckConstraint(
+            "(content IS NULL) <> (content_ref IS NULL)",
+            name="ck_conversation_message_content",
+        ),
+        Index("ix_conversation_messages_scope", "conversation_id", "task_id", "created_at"),
+    )
+
+    message_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.conversation_id", ondelete="CASCADE")
+    )
+    task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=True
+    )
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    classification: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))
+    message_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkingMemoryItemRecord(Base):
+    __tablename__ = "working_memory_items"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('current_goal', 'active_constraint', 'confirmed_decision', "
+            "'open_question', 'selected_artifact', 'temporary_fact')",
+            name="ck_working_memory_kind",
+        ),
+        CheckConstraint(
+            "source_type IN ('user_explicit', 'task_contract', 'verified_claim')",
+            name="ck_working_memory_source_type",
+        ),
+        CheckConstraint(
+            "classification IN ('public', 'internal', 'sensitive')",
+            name="ck_working_memory_classification",
+        ),
+        CheckConstraint(
+            "verification_status IN ('not_required', 'verified')",
+            name="ck_working_memory_verification",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'expired', 'deleted')", name="ck_working_memory_status"
+        ),
+        Index("ix_working_memory_active", "task_id", "status", "created_at"),
+    )
+
+    memory_item_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    content: Mapped[str] = mapped_column(Text)
+    source_type: Mapped[str] = mapped_column(String(32))
+    source_ref: Mapped[str] = mapped_column(String(500))
+    source_digest: Mapped[str] = mapped_column(String(64))
+    classification: Mapped[str] = mapped_column(String(16))
+    verification_status: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ContextRequestRecord(Base):
+    __tablename__ = "context_requests"
+
+    context_request_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="CASCADE"), index=True
+    )
+    model_turn_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_model_turns.turn_id", ondelete="CASCADE"), unique=True
+    )
+    allowed_sources: Mapped[list[str]] = mapped_column(JSON)
+    selectors: Mapped[dict[str, Any]] = mapped_column(JSON)
+    maximum_input_tokens: Mapped[int] = mapped_column(Integer)
+    reserved_output_tokens: Mapped[int] = mapped_column(Integer)
+    privacy_mode: Mapped[str] = mapped_column(String(32))
+    target_provider_location: Mapped[str] = mapped_column(String(16))
+    request_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ContextManifestRecord(Base):
+    __tablename__ = "context_manifests"
+
+    manifest_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    context_request_id: Mapped[str] = mapped_column(
+        ForeignKey("context_requests.context_request_id", ondelete="CASCADE"), unique=True
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), index=True
+    )
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="CASCADE"), index=True
+    )
+    model_turn_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_model_turns.turn_id", ondelete="CASCADE"), unique=True
+    )
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    manifest_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class CompactionSnapshotRecord(Base):
+    __tablename__ = "compaction_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'conflict', 'stale')",
+            name="ck_compaction_snapshot_status",
+        ),
+        CheckConstraint(
+            "classification IN ('public', 'internal', 'sensitive')",
+            name="ck_compaction_snapshot_classification",
+        ),
+        Index("ix_compaction_snapshots_task", "task_id", "status", "created_at"),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    parent_snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("compaction_snapshots.snapshot_id", ondelete="RESTRICT"), nullable=True
+    )
+    source_set_digest: Mapped[str] = mapped_column(String(64))
+    structured_fields: Mapped[dict[str, Any]] = mapped_column(JSON)
+    narrative_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    coverage_manifest: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    compressor_version: Mapped[str] = mapped_column(String(64))
+    classification: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))
+    snapshot_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CompactionSourceRefRecord(Base):
+    __tablename__ = "compaction_source_refs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'stale', 'deleted', 'out_of_scope')",
+            name="ck_compaction_source_status",
+        ),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("compaction_snapshots.snapshot_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_type: Mapped[str] = mapped_column(String(100))
+    source_ref: Mapped[str] = mapped_column(String(500))
+    source_version: Mapped[str] = mapped_column(String(100))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    authority_class: Mapped[str] = mapped_column(String(32))
+    classification: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))
+
+
+class CompactionCoverageItemRecord(Base):
+    __tablename__ = "compaction_coverage_items"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('covered', 'conflict', 'stale')",
+            name="ck_compaction_coverage_status",
+        ),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("compaction_snapshots.snapshot_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    field_kind: Mapped[str] = mapped_column(String(32))
+    value_digest: Mapped[str] = mapped_column(String(64))
+    source_refs: Mapped[list[str]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16))
+
+
+class LongTermMemoryProposalRecord(Base):
+    __tablename__ = "long_term_memory_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('proposal', 'pending_confirmation', 'confirmed', 'rejected')",
+            name="ck_long_term_memory_proposal_status",
+        ),
+        Index("ix_long_term_memory_proposals_status", "status", "created_at"),
+    )
+
+    proposal_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    memory_key: Mapped[str] = mapped_column(String(100), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    value_scheme: Mapped[str] = mapped_column(String(64))
+    value_payload: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    value_digest: Mapped[str] = mapped_column(String(64))
+    source_type: Mapped[str] = mapped_column(String(32))
+    source_id: Mapped[str] = mapped_column(String(100))
+    source_digest: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[str] = mapped_column(String(16))
+    scope: Mapped[str] = mapped_column(String(16))
+    classification: Mapped[str] = mapped_column(String(16))
+    confidence_micros: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    proposal_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LongTermMemoryItemRecord(Base):
+    __tablename__ = "long_term_memory_items"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'conflict', 'expired', 'deleted')",
+            name="ck_long_term_memory_item_status",
+        ),
+        UniqueConstraint("memory_key", "kind", "version", name="uq_long_term_memory_version"),
+        Index("ix_long_term_memory_recall", "scope", "status", "kind", "created_at"),
+    )
+
+    memory_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("long_term_memory_proposals.proposal_id", ondelete="RESTRICT"), unique=True
+    )
+    memory_key: Mapped[str] = mapped_column(String(100), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(32))
+    value_scheme: Mapped[str] = mapped_column(String(64))
+    value_payload: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    value_digest: Mapped[str] = mapped_column(String(64))
+    source_type: Mapped[str] = mapped_column(String(32))
+    source_id: Mapped[str] = mapped_column(String(100))
+    source_digest: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[str] = mapped_column(String(16))
+    scope: Mapped[str] = mapped_column(String(16))
+    classification: Mapped[str] = mapped_column(String(16))
+    confidence_micros: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    item_digest: Mapped[str] = mapped_column(String(64))
+    supersedes_memory_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LongTermMemoryConflictRecord(Base):
+    __tablename__ = "long_term_memory_conflicts"
+
+    conflict_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    memory_key: Mapped[str] = mapped_column(String(100), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    memory_ids: Mapped[list[str]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16))
+    selected_memory_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    conflict_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LongTermMemoryTombstoneRecord(Base):
+    __tablename__ = "long_term_memory_tombstones"
+
+    tombstone_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    memory_id: Mapped[str] = mapped_column(String(68), unique=True)
+    memory_key_digest: Mapped[str] = mapped_column(String(64))
+    value_digest: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str] = mapped_column(String(32))
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class LongTermMemoryUsageRecord(Base):
+    __tablename__ = "long_term_memory_usage"
+    __table_args__ = (
+        UniqueConstraint("memory_id", "context_manifest_id", name="uq_memory_manifest_usage"),
+        Index("ix_long_term_memory_usage_memory", "memory_id", "supplied_at"),
+    )
+
+    usage_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    memory_id: Mapped[str] = mapped_column(String(68))
+    memory_version: Mapped[int] = mapped_column(Integer)
+    task_id: Mapped[str] = mapped_column(String(40))
+    invocation_id: Mapped[str] = mapped_column(String(68))
+    context_manifest_id: Mapped[str] = mapped_column(String(68))
+    agent_id: Mapped[str] = mapped_column(String(100))
+    provider_id: Mapped[str] = mapped_column(String(64))
+    provider_location: Mapped[str] = mapped_column(String(16))
+    purpose: Mapped[str] = mapped_column(String(100))
+    supplied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    policy_reference: Mapped[str] = mapped_column(String(100))
+
+
+class TaskPlanningStateRecord(Base):
+    """Mutable pointer to immutable Task Contract and Plan generations."""
+
+    __tablename__ = "task_planning_states"
+    __table_args__ = (
+        CheckConstraint(
+            "active_contract_version >= 1 AND active_plan_generation >= 1 AND revision >= 1",
+            name="ck_task_planning_state_versions",
+        ),
+    )
+
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), primary_key=True
+    )
+    active_contract_version: Mapped[int] = mapped_column(Integer)
+    active_contract_digest: Mapped[str] = mapped_column(String(64))
+    active_plan_generation: Mapped[int] = mapped_column(Integer)
+    active_plan_digest: Mapped[str] = mapped_column(String(64))
+    revision: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TaskContractVersionRecord(Base):
+    __tablename__ = "task_contract_versions"
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="ck_task_contract_version"),
+        UniqueConstraint("contract_id", "version", name="uq_task_contract_identity"),
+        Index("ix_task_contract_versions_task", "task_id", "version"),
+    )
+
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), primary_key=True
+    )
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[str] = mapped_column(String(40))
+    previous_contract_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    contract_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TaskPlanGenerationRecord(Base):
+    __tablename__ = "task_plan_generations"
+    __table_args__ = (
+        CheckConstraint("generation >= 1", name="ck_task_plan_generation"),
+        CheckConstraint("status IN ('active', 'superseded')", name="ck_task_plan_status"),
+        UniqueConstraint("plan_id", name="uq_task_plan_id"),
+        Index("ix_task_plan_generations_task", "task_id", "generation"),
+    )
+
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), primary_key=True
+    )
+    generation: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(68))
+    contract_version: Mapped[int] = mapped_column(Integer)
+    contract_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TaskExecutionRunRecord(Base):
+    __tablename__ = "task_execution_runs"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id", "plan_generation"],
+            ["task_plan_generations.task_id", "task_plan_generations.generation"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("plan_generation >= 1 AND revision >= 1", name="ck_execution_run"),
+        CheckConstraint(
+            "status IN ('active', 'awaiting_verification', 'paused', 'cancelled', "
+            "'superseded', 'failed', 'succeeded')",
+            name="ck_execution_run_status",
+        ),
+        UniqueConstraint("task_id", "plan_generation", name="uq_execution_run_plan"),
+        Index("ix_execution_runs_task", "task_id", "created_at"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
+    plan_generation: Mapped[int] = mapped_column(Integer)
+    plan_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32))
+    revision: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TaskExecutionNodeRecord(Base):
+    __tablename__ = "task_execution_nodes"
+    __table_args__ = (
+        CheckConstraint("revision >= 1 AND attempt_count >= 0", name="ck_execution_node"),
+        CheckConstraint(
+            "status IN ('pending', 'ready', 'claimed', 'running', "
+            "'awaiting_verification', 'verified', 'cancelled', 'failed')",
+            name="ck_execution_node_status",
+        ),
+        UniqueConstraint("run_id", "local_key", name="uq_execution_node_key"),
+        Index("ix_execution_nodes_ready", "run_id", "status", "local_key"),
+        Index("ix_execution_nodes_lease", "status", "claim_expires_at"),
+    )
+
+    node_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="CASCADE")
+    )
+    local_key: Mapped[str] = mapped_column(String(64))
+    node_kind: Mapped[str] = mapped_column(String(32))
+    node_spec_digest: Mapped[str] = mapped_column(String(64))
+    depends_on: Mapped[list[str]] = mapped_column(JSON, default=list)
+    bound_agent: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    capability: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    acceptance_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
+    budget: Mapped[dict[str, Any]] = mapped_column(JSON)
+    runtime_enabled: Mapped[bool] = mapped_column(Boolean)
+    status: Mapped[str] = mapped_column(String(32))
+    revision: Mapped[int] = mapped_column(Integer)
+    attempt_count: Mapped[int] = mapped_column(Integer)
+    claim_owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    claim_fencing_token: Mapped[int] = mapped_column(Integer, default=0)
+    claim_acquired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    claim_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TaskExecutionEdgeRecord(Base):
+    __tablename__ = "task_execution_edges"
+    __table_args__ = (
+        CheckConstraint(
+            "requirement IN ('verified')",
+            name="ck_execution_edge_requirement",
+        ),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="CASCADE"), primary_key=True
+    )
+    from_node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="CASCADE"), primary_key=True
+    )
+    to_node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="CASCADE"), primary_key=True
+    )
+    requirement: Mapped[str] = mapped_column(String(32), default="verified")
+
+
+class AgentHandoffRecord(Base):
+    __tablename__ = "agent_handoffs"
+
+    handoff_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="CASCADE"), index=True
+    )
+    target_node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="CASCADE")
+    )
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    handoff_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentInvocationRecord(Base):
+    __tablename__ = "agent_invocations"
+    __table_args__ = (
+        CheckConstraint("attempt >= 1", name="ck_agent_invocation_attempt"),
+        CheckConstraint(
+            "execution_status IN ('created', 'running', 'result_submitted', "
+            "'failed_retryable', 'failed_terminal', 'cancelled', 'expired')",
+            name="ck_agent_invocation_execution_status",
+        ),
+        CheckConstraint(
+            "verification_status IN ('not_requested', 'pending', 'verified', 'rejected')",
+            name="ck_agent_invocation_verification_status",
+        ),
+        UniqueConstraint("node_id", "attempt", name="uq_agent_invocation_attempt"),
+        Index("ix_agent_invocations_run", "run_id", "created_at"),
+    )
+
+    invocation_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="CASCADE")
+    )
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="CASCADE")
+    )
+    attempt: Mapped[int] = mapped_column(Integer)
+    handoff_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_handoffs.handoff_id", ondelete="RESTRICT"), unique=True
+    )
+    agent_id: Mapped[str] = mapped_column(String(100))
+    agent_version: Mapped[str] = mapped_column(String(32))
+    agent_contract_digest: Mapped[str] = mapped_column(String(64))
+    prompt_package_digest: Mapped[str] = mapped_column(String(64))
+    execution_status: Mapped[str] = mapped_column(String(32))
+    verification_status: Mapped[str] = mapped_column(String(32))
+    result_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentModelTurnRecord(Base):
+    __tablename__ = "agent_model_turns"
+    __table_args__ = (
+        CheckConstraint("turn_no >= 1", name="ck_agent_model_turn_no"),
+        CheckConstraint(
+            "status IN ('prepared', 'dispatching', 'succeeded', 'failed', 'outcome_unknown')",
+            name="ck_agent_model_turn_status",
+        ),
+        UniqueConstraint("invocation_id", "turn_no", name="uq_agent_model_turn"),
+    )
+
+    turn_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="CASCADE"), index=True
+    )
+    turn_no: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    request_digest: Mapped[str] = mapped_column(String(64))
+    response_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_micros: Mapped[int] = mapped_column(Integer, default=0)
+    stable_error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    claim_owner_id: Mapped[str] = mapped_column(String(128))
+    claim_fencing_token: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentResultRecord(Base):
+    __tablename__ = "agent_results"
+
+    result_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="CASCADE"), unique=True
+    )
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ResearchSessionRecord(Base):
+    __tablename__ = "research_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('created', 'running', 'awaiting_verification', 'verified', "
+            "'rejected', 'failed')",
+            name="ck_research_session_status",
+        ),
+    )
+
+    research_session_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), index=True
+    )
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="CASCADE"), unique=True
+    )
+    status: Mapped[str] = mapped_column(String(32))
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ResearchSearchCallRecord(Base):
+    __tablename__ = "research_search_calls"
+    __table_args__ = (
+        UniqueConstraint("research_session_id", "attempt", name="uq_research_search_attempt"),
+    )
+
+    search_call_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    research_session_id: Mapped[str] = mapped_column(
+        ForeignKey("research_sessions.research_session_id", ondelete="CASCADE"), index=True
+    )
+    attempt: Mapped[int] = mapped_column(Integer)
+    provider_id: Mapped[str] = mapped_column(String(64))
+    query_digest: Mapped[str] = mapped_column(String(64))
+    hits: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ResearchPageSnapshotRecord(Base):
+    __tablename__ = "research_page_snapshots"
+
+    page_snapshot_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    research_session_id: Mapped[str] = mapped_column(
+        ForeignKey("research_sessions.research_session_id", ondelete="CASCADE"), index=True
+    )
+    search_hit_id: Mapped[str] = mapped_column(String(68))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    snapshot_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ResearchClaimRecord(Base):
+    __tablename__ = "research_claims"
+
+    claim_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    research_session_id: Mapped[str] = mapped_column(
+        ForeignKey("research_sessions.research_session_id", ondelete="CASCADE"), index=True
+    )
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    claim_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ResearchCitationRecord(Base):
+    __tablename__ = "research_citations"
+
+    citation_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    research_session_id: Mapped[str] = mapped_column(
+        ForeignKey("research_sessions.research_session_id", ondelete="CASCADE"), index=True
+    )
+    claim_id: Mapped[str] = mapped_column(
+        ForeignKey("research_claims.claim_id", ondelete="CASCADE")
+    )
+    page_snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("research_page_snapshots.page_snapshot_id", ondelete="CASCADE")
+    )
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    citation_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class VerificationRunRecord(Base):
+    __tablename__ = "verification_runs"
+    __table_args__ = (
+        CheckConstraint("attempt >= 1", name="ck_verification_run_attempt"),
+        CheckConstraint("status IN ('completed', 'failed')", name="ck_verification_run_status"),
+        CheckConstraint(
+            "outcome IN ('verified', 'rejected', 'verification_error')",
+            name="ck_verification_run_outcome",
+        ),
+        UniqueConstraint("result_id", "policy_digest", "attempt", name="uq_verification_attempt"),
+    )
+
+    verification_run_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="CASCADE"), index=True
+    )
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="CASCADE")
+    )
+    result_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_results.result_id", ondelete="CASCADE")
+    )
+    attempt: Mapped[int] = mapped_column(Integer)
+    policy_id: Mapped[str] = mapped_column(String(100))
+    policy_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32))
+    outcome: Mapped[str] = mapped_column(String(32))
+    evidence_snapshot_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    input_manifest_digest: Mapped[str] = mapped_column(String(64))
+    grader_request_digest: Mapped[str] = mapped_column(String(64))
+    grader_output_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    grader_provider_id: Mapped[str] = mapped_column(String(64))
+    grader_model: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class VerificationEvidenceSnapshotRecord(Base):
+    __tablename__ = "verification_evidence_snapshots"
+
+    evidence_snapshot_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    verification_run_id: Mapped[str] = mapped_column(
+        ForeignKey("verification_runs.verification_run_id", ondelete="CASCADE"), unique=True
+    )
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    snapshot_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ClaimVerdictRecord(Base):
+    __tablename__ = "claim_verdicts"
+
+    verification_run_id: Mapped[str] = mapped_column(
+        ForeignKey("verification_runs.verification_run_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    claim_id: Mapped[str] = mapped_column(
+        ForeignKey("research_claims.claim_id", ondelete="CASCADE"), primary_key=True
+    )
+    outcome: Mapped[str] = mapped_column(String(32))
+    reason_code: Mapped[str] = mapped_column(String(100))
+    citation_ids: Mapped[list[str]] = mapped_column(JSON)
+    verdict_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TaskArtifactWorkspaceRecord(Base):
+    __tablename__ = "task_artifact_workspaces"
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_task_artifact_workspace_revision"),
+        CheckConstraint("status IN ('active', 'delivered')", name="ck_task_workspace_status"),
+        UniqueConstraint("task_id", "run_id", name="uq_task_workspace_run"),
+    )
+
+    workspace_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), index=True
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="CASCADE"), unique=True
+    )
+    allowed_extensions: Mapped[list[str]] = mapped_column(JSON)
+    max_total_bytes: Mapped[int] = mapped_column(Integer)
+    max_files: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    revision: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ArtifactRecord(Base):
+    __tablename__ = "artifacts"
+    __table_args__ = (UniqueConstraint("workspace_id", "relative_path", name="uq_artifact_path"),)
+
+    artifact_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("task_artifact_workspaces.workspace_id", ondelete="CASCADE"), index=True
+    )
+    relative_path: Mapped[str] = mapped_column(String(512))
+    active_revision_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ArtifactRevisionRecord(Base):
+    __tablename__ = "artifact_revisions"
+    __table_args__ = (
+        CheckConstraint("revision_no >= 1 AND byte_count >= 1", name="ck_artifact_revision"),
+        UniqueConstraint("artifact_id", "revision_no", name="uq_artifact_revision_no"),
+    )
+
+    revision_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.artifact_id", ondelete="CASCADE"), index=True
+    )
+    revision_no: Mapped[int] = mapped_column(Integer)
+    media_type: Mapped[str] = mapped_column(String(100))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    byte_count: Mapped[int] = mapped_column(Integer)
+    blob_name: Mapped[str] = mapped_column(String(128))
+    patch_receipt_id: Mapped[str] = mapped_column(String(68), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ArtifactPatchReceiptRecord(Base):
+    __tablename__ = "artifact_patch_receipts"
+
+    patch_receipt_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("task_artifact_workspaces.workspace_id", ondelete="CASCADE"), index=True
+    )
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.artifact_id", ondelete="CASCADE")
+    )
+    operation: Mapped[str] = mapped_column(String(32))
+    relative_path: Mapped[str] = mapped_column(String(512))
+    base_revision_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    new_revision_id: Mapped[str] = mapped_column(String(68), unique=True)
+    base_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    new_digest: Mapped[str] = mapped_column(String(64))
+    byte_count: Mapped[int] = mapped_column(Integer)
+    receipt_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class BrowserRenderRunRecord(Base):
+    __tablename__ = "browser_render_runs"
+    __table_args__ = (
+        CheckConstraint("status IN ('passed', 'failed')", name="ck_browser_render_status"),
+        UniqueConstraint("run_id", "revision_id", name="uq_browser_render_revision"),
+    )
+
+    browser_run_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="CASCADE"), index=True
+    )
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="CASCADE")
+    )
+    revision_id: Mapped[str] = mapped_column(
+        ForeignKey("artifact_revisions.revision_id", ondelete="CASCADE")
+    )
+    status: Mapped[str] = mapped_column(String(32))
+    engine: Mapped[str] = mapped_column(String(200))
+    profile_id: Mapped[str] = mapped_column(String(100))
+    viewport_width: Mapped[int] = mapped_column(Integer)
+    viewport_height: Mapped[int] = mapped_column(Integer)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON)
+    evidence_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class DeliveryManifestRecord(Base):
+    __tablename__ = "delivery_manifests"
+
+    delivery_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), index=True
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="CASCADE"), unique=True
+    )
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    manifest_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class TaskRuntimeCheckpointRecord(Base):

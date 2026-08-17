@@ -1,0 +1,1 @@
+{"schema_version":"deskpilot.prompt-package.v1","package_id":"builtin.task_synthesizer","version":"1.0.0","renderer_version":1,"instruction_file":"task_synthesizer.txt","variables":["objective_ref","context_refs"]}
