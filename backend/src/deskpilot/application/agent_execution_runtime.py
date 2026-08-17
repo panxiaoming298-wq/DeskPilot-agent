@@ -178,6 +178,72 @@ class AgentExecutionRuntime:
         except IntegrityError as error:
             raise AgentRuntimeConflictError("Execution run changed concurrently") from error
 
+    async def cancel(self, run_id: str) -> ExecutionRunRead:
+        """Fence all unfinished work so a stale Agent result cannot unlock successors."""
+        async with self._database.session() as session, session.begin():
+            run = await session.scalar(
+                select(TaskExecutionRunRecord)
+                .where(TaskExecutionRunRecord.run_id == run_id)
+                .with_for_update()
+            )
+            if run is None:
+                raise AgentRuntimeNotFoundError("Execution run does not exist")
+            if run.status in {
+                ExecutionRunStatus.CANCELLED.value,
+                ExecutionRunStatus.FAILED.value,
+                ExecutionRunStatus.SUCCEEDED.value,
+                ExecutionRunStatus.SUPERSEDED.value,
+            }:
+                return await self._read_run(session, run)
+
+            now = utc_now()
+            run.status = ExecutionRunStatus.CANCELLED.value
+            run.revision += 1
+            run.updated_at = now
+            nodes = (
+                await session.scalars(
+                    select(TaskExecutionNodeRecord).where(
+                        TaskExecutionNodeRecord.run_id == run_id,
+                        TaskExecutionNodeRecord.status.not_in(
+                            (
+                                ExecutionNodeStatus.VERIFIED.value,
+                                ExecutionNodeStatus.FAILED.value,
+                                ExecutionNodeStatus.CANCELLED.value,
+                            )
+                        ),
+                    )
+                )
+            ).all()
+            for node in nodes:
+                node.status = ExecutionNodeStatus.CANCELLED.value
+                node.claim_fencing_token += 1
+                node.claim_owner_id = None
+                node.claim_acquired_at = None
+                node.claim_heartbeat_at = None
+                node.claim_expires_at = None
+                node.revision += 1
+                node.updated_at = now
+            invocations = (
+                await session.scalars(
+                    select(AgentInvocationRecord).where(
+                        AgentInvocationRecord.run_id == run_id,
+                        AgentInvocationRecord.execution_status.not_in(
+                            (
+                                InvocationExecutionStatus.CANCELLED.value,
+                                InvocationExecutionStatus.FAILED_TERMINAL.value,
+                                InvocationExecutionStatus.EXPIRED.value,
+                            )
+                        ),
+                    )
+                )
+            ).all()
+            for invocation in invocations:
+                invocation.execution_status = InvocationExecutionStatus.CANCELLED.value
+                invocation.finished_at = now
+                invocation.revision += 1
+            await session.flush()
+            return await self._read_run(session, run)
+
     async def claim_next(
         self, run_id: str, owner_id: str, *, lease_seconds: int = 60
     ) -> ClaimedInvocation | None:

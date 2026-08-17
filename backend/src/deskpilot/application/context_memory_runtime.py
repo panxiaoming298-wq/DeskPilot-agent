@@ -180,6 +180,24 @@ class ContextMemoryRuntime:
                 record.deleted_at = utc_now()
         return self._message_read(record)
 
+    async def list_task_messages(self, task_id: str) -> tuple[ConversationMessageRead, ...]:
+        """Return only messages explicitly bound to one Task scope."""
+
+        async with self._database.session() as session:
+            task = await session.get(TaskRecord, task_id)
+            if task is None:
+                raise ContextMemoryNotFoundError("Task does not exist")
+            records = tuple(
+                (
+                    await session.scalars(
+                        select(ConversationMessageRecord)
+                        .where(ConversationMessageRecord.task_id == task_id)
+                        .order_by(ConversationMessageRecord.created_at)
+                    )
+                ).all()
+            )
+            return tuple(self._message_read(item) for item in records)
+
     async def add_working_memory(
         self, task_id: str, request: CreateWorkingMemoryRequest
     ) -> WorkingMemoryItemRead:

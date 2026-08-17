@@ -958,3 +958,179 @@ export interface LongTermMemoryExport extends LongTermMemoryPage {
   tombstones: Record<string, unknown>[]
   export_digest: string
 }
+
+export type WorkbenchStage =
+  | 'idle'
+  | 'planned'
+  | 'researching'
+  | 'awaiting_verification'
+  | 'building_artifact'
+  | 'verifying_browser'
+  | 'ready_to_deliver'
+  | 'delivered'
+  | 'exported'
+  | 'blocked'
+
+export type WorkbenchAction =
+  | 'activate_research_plan'
+  | 'start_execution'
+  | 'run_research'
+  | 'verify_claims'
+  | 'build_artifact'
+  | 'verify_browser'
+  | 'finalize_delivery'
+  | 'prepare_export'
+  | 'stop_execution'
+
+export type WorkbenchStepCommand =
+  | 'research:run'
+  | 'claims:verify'
+  | 'artifacts:build'
+  | 'browser:verify'
+  | 'final-acceptance:run'
+
+export interface WorkbenchActionState {
+  action: WorkbenchAction
+  enabled: boolean
+  reason_code: string
+  explanation: string
+  effect_class: 'read_only' | 'workspace_write' | 'user_path_write' | 'execution_control'
+}
+
+export interface WorkbenchNode {
+  node_id: string
+  local_key: string
+  status: string
+  revision: number
+  attempt_count: number
+  claim_owner_id: string | null
+  claim_fencing_token: number
+  claim_expires_at: string | null
+  bound_agent: { agent_id: string } | null
+  runtime_enabled: boolean
+}
+
+export interface WorkbenchRun {
+  run_id: string
+  task_id: string
+  status: string
+  revision: number
+  nodes: WorkbenchNode[]
+  invocations: Array<{ invocation_id: string; execution_status: string; verification_status: string }>
+  created_at: string
+  updated_at: string
+}
+
+export interface WorkbenchClaim {
+  claim_id: string
+  statement: string
+  citation_ids: string[]
+  status: string
+}
+
+export interface WorkbenchCitation {
+  citation_id: string
+  claim_id: string
+  locator_text: string
+  status: string
+}
+
+export interface ArtifactExport {
+  export_id: string
+  delivery_id: string
+  task_id: string
+  artifact_id: string
+  revision_id: string
+  target_path: string
+  conflict_policy: 'fail_if_exists'
+  status: 'prepared' | 'committing' | 'committed' | 'failed'
+  source_digest: string
+  request_digest: string
+  confirmation_digest: string
+  receipt_digest: string | null
+  byte_count: number
+  error_code: string | null
+  requested_at: string
+  committed_at: string | null
+}
+
+export interface TaskWorkbench {
+  schema_version: 'deskpilot.task-workbench.v1'
+  task: Task
+  stage: WorkbenchStage
+  actions: WorkbenchActionState[]
+  conversation: Array<{
+    message_id: string
+    role: 'user' | 'assistant'
+    content: string | null
+    created_at: string
+  }>
+  planning: Record<string, unknown> | null
+  contract: Record<string, unknown> | null
+  plans: { plans: Array<Record<string, unknown>> }
+  executions: { runs: WorkbenchRun[] }
+  research: {
+    research_session_id: string
+    status: string
+    claims: WorkbenchClaim[]
+    citations: WorkbenchCitation[]
+    search_calls: Array<Record<string, unknown>>
+    page_snapshots: Array<Record<string, unknown>>
+  } | null
+  verification: {
+    verification_run_id: string
+    status: string
+    outcome: string
+    verdicts: Array<{
+      claim_id: string
+      outcome: 'verified' | 'unsupported' | 'contradicted'
+      reason_code: string
+      citation_ids: string[]
+    }>
+  } | null
+  workspace: {
+    workspace_id: string
+    status: string
+    artifacts: Array<{
+      artifact_id: string
+      relative_path: string
+      active_revision: {
+        revision_id: string
+        content_digest: string
+        byte_count: number
+        patch_receipt_id: string
+      }
+    }>
+  } | null
+  browser: {
+    browser_run_id: string
+    status: 'passed' | 'failed'
+    engine: string
+    viewport_width: number
+    viewport_height: number
+    title: string
+    heading_count: number
+    link_count: number
+    external_request_count: number
+    console_error_count: number
+    page_error_count: number
+    issue_codes: string[]
+    screenshot_digest: string
+  } | null
+  delivery: {
+    delivery_id: string
+    revision_id: string
+    verified_claim_ids: string[]
+    citation_ids: string[]
+    limitation_codes: string[]
+    manifest_digest: string
+  } | null
+  exports: ArtifactExport[]
+  projection_digest: string
+}
+
+export interface CreateResearchWorkbenchTask {
+  goal: string
+  privacy_mode: 'local_preferred' | 'balanced'
+  constraints: string[]
+}

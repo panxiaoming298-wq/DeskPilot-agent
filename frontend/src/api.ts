@@ -44,6 +44,11 @@ import type {
   CreateLongTermMemory,
   LongTermMemoryExport,
   LongTermMemoryPage,
+  ArtifactExport,
+  CreateResearchWorkbenchTask,
+  TaskWorkbench,
+  WorkbenchRun,
+  WorkbenchStepCommand,
 } from './types'
 
 const configuredBase = (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, '')
@@ -704,6 +709,68 @@ export function requeueOutboxDeadLetter(
     {
       method: 'POST',
       headers: { 'Idempotency-Key': idempotencyKey },
+    },
+  )
+}
+
+export function createResearchWorkbenchTask(
+  command: CreateResearchWorkbenchTask,
+): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>('/api/v1/research-workbench/tasks', {
+    method: 'POST',
+    body: JSON.stringify(command),
+  })
+}
+
+export function getTaskWorkbench(taskId: string): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/workbench`,
+    { cache: 'no-store' },
+  )
+}
+
+export function runWorkbenchStep(
+  runId: string,
+  command: WorkbenchStepCommand,
+): Promise<unknown> {
+  return request(`/api/v1/execution-runs/${encodeURIComponent(runId)}/${command}`, {
+    method: 'POST',
+  })
+}
+
+export function cancelWorkbenchExecution(runId: string): Promise<WorkbenchRun> {
+  return request<WorkbenchRun>(
+    `/api/v1/execution-runs/${encodeURIComponent(runId)}:cancel`,
+    { method: 'POST' },
+  )
+}
+
+export function prepareArtifactExport(
+  deliveryId: string,
+  targetPath: string,
+  idempotencyKey: string,
+): Promise<ArtifactExport> {
+  return request<ArtifactExport>(
+    `/api/v1/deliveries/${encodeURIComponent(deliveryId)}/exports:prepare`,
+    {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify({ target_path: targetPath }),
+    },
+  )
+}
+
+export function commitArtifactExport(
+  exportId: string,
+  confirmationDigest: string,
+  idempotencyKey: string,
+): Promise<ArtifactExport> {
+  return request<ArtifactExport>(
+    `/api/v1/artifact-exports/${encodeURIComponent(exportId)}:commit`,
+    {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify({ confirmation_digest: confirmationDigest }),
     },
   )
 }

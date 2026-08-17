@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0035_context_compaction"
+CURRENT_REVISION = "0036_artifact_exports"
 
 
 def _sync_url(path: Path) -> str:
@@ -1318,6 +1318,30 @@ def test_stage_73_long_term_memory_migration_round_trips(tmp_path: Path) -> None
 
     command.upgrade(config, "head")
     command.check(config)
+    expected = {
+        "long_term_memory_proposals",
+        "long_term_memory_items",
+        "long_term_memory_conflicts",
+        "long_term_memory_tombstones",
+        "long_term_memory_usage",
+    }
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert expected.issubset(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0033_context_working_memory")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert not expected & set(inspect(connection).get_table_names())
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
 
 
 def test_stage_74_context_compaction_migration_round_trips(tmp_path: Path) -> None:
@@ -1348,26 +1372,27 @@ def test_stage_74_context_compaction_migration_round_trips(tmp_path: Path) -> No
 
     command.upgrade(config, "head")
     command.check(config)
-    expected = {
-        "long_term_memory_proposals",
-        "long_term_memory_items",
-        "long_term_memory_conflicts",
-        "long_term_memory_tombstones",
-        "long_term_memory_usage",
-    }
+
+
+def test_stage_76_artifact_export_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-76-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
-        assert expected.issubset(inspect(connection).get_table_names())
+        assert "artifact_exports" in inspect(connection).get_table_names()
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
     engine.dispose()
     assert revision == CURRENT_REVISION
 
-    command.downgrade(config, "0033_context_working_memory")
+    command.downgrade(config, "0035_context_compaction")
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
-        assert not expected & set(inspect(connection).get_table_names())
+        assert "artifact_exports" not in inspect(connection).get_table_names()
     engine.dispose()
 
     command.upgrade(config, "head")

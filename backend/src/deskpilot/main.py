@@ -33,6 +33,7 @@ from deskpilot.api.routes import (
     planning,
     reconciliations,
     session,
+    task_workbench,
     tasks,
     telemetry,
     websocket,
@@ -40,6 +41,7 @@ from deskpilot.api.routes import (
 from deskpilot.api.security_middleware import LocalApiSecurityMiddleware
 from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
 from deskpilot.application.artifact_delivery_runtime import ArtifactDeliveryRuntime
+from deskpilot.application.artifact_export_runtime import ArtifactExportRuntime
 from deskpilot.application.browser_verifier import (
     BrowserVerifier,
     IsolatedChromiumVerifier,
@@ -83,6 +85,7 @@ from deskpilot.application.runner_client import RunnerClient
 from deskpilot.application.runner_supervisor import RunnerSupervisor
 from deskpilot.application.task_checkpoint_codec import TaskCheckpointCodec
 from deskpilot.application.task_service import TaskService
+from deskpilot.application.task_workbench_service import TaskWorkbenchService
 from deskpilot.application.web_research import (
     SafePageReader,
     SearchProvider,
@@ -307,6 +310,20 @@ def create_app(
             browser_verifier or IsolatedChromiumVerifier(resolved_settings.browser_executable_path),
             resolved_settings.artifact_workspace_root,
         )
+        artifact_export_runtime = ArtifactExportRuntime(
+            database,
+            resolved_settings.artifact_workspace_root,
+        )
+        task_workbench_service = TaskWorkbenchService(
+            database,
+            task_service,
+            context_memory_runtime,
+            plan_compilation_service,
+            capability_catalog,
+            agent_execution_runtime,
+            artifact_delivery_runtime,
+            artifact_export_runtime,
+        )
         resolved_policy_engine = policy_engine or BuiltinPolicyEngine(
             allowed_capabilities=(
                 "filesystem.metadata.read",
@@ -399,6 +416,8 @@ def create_app(
         app.state.long_term_memory_runtime = long_term_memory_runtime
         app.state.research_runtime = research_runtime
         app.state.artifact_delivery_runtime = artifact_delivery_runtime
+        app.state.artifact_export_runtime = artifact_export_runtime
+        app.state.task_workbench_service = task_workbench_service
         app.state.knowledge_base = knowledge_base
         app.state.mcp_control_plane = mcp_control_plane
         app.state.evaluation_service = evaluation_service
@@ -488,6 +507,7 @@ def create_app(
     app.include_router(session.router, prefix=resolved_settings.api_prefix)
     app.include_router(model_providers.router, prefix=resolved_settings.api_prefix)
     app.include_router(tasks.router, prefix=resolved_settings.api_prefix)
+    app.include_router(task_workbench.router, prefix=resolved_settings.api_prefix)
     app.include_router(approvals.router, prefix=resolved_settings.api_prefix)
     app.include_router(reconciliations.router, prefix=resolved_settings.api_prefix)
     app.include_router(operations.router, prefix=resolved_settings.api_prefix)

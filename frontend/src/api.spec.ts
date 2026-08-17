@@ -388,6 +388,57 @@ describe('task API', () => {
   })
 })
 
+describe('phase 76 workbench API', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  it('encodes identities and binds both export steps to idempotency keys', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(session))
+      .mockImplementation(() => Promise.resolve(jsonResponse({})))
+    vi.stubGlobal('fetch', fetchMock)
+    const {
+      cancelWorkbenchExecution,
+      commitArtifactExport,
+      createResearchWorkbenchTask,
+      getTaskWorkbench,
+      prepareArtifactExport,
+      runWorkbenchStep,
+    } = await import('./api')
+
+    await createResearchWorkbenchTask({
+      goal: '研究并生成 HTML', privacy_mode: 'balanced', constraints: [],
+    })
+    await getTaskWorkbench('task/with spaces?#')
+    await runWorkbenchStep('run/with spaces?#', 'claims:verify')
+    await cancelWorkbenchExecution('run/with spaces?#')
+    await prepareArtifactExport('delivery/with spaces?#', 'D:\\Reports\\x.html', 'prepare-key-0001')
+    await commitArtifactExport('export/with spaces?#', 'a'.repeat(64), 'commit-key-00001')
+
+    expectAuthenticatedRequest(fetchMock, 1, '/api/v1/research-workbench/tasks', 'POST')
+    expectAuthenticatedRequest(
+      fetchMock, 2, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench', undefined,
+    )
+    expectAuthenticatedRequest(
+      fetchMock, 3, '/api/v1/execution-runs/run%2Fwith%20spaces%3F%23/claims:verify', 'POST',
+    )
+    expectAuthenticatedRequest(
+      fetchMock, 4, '/api/v1/execution-runs/run%2Fwith%20spaces%3F%23:cancel', 'POST',
+    )
+    const prepareInit = expectAuthenticatedRequest(
+      fetchMock, 5, '/api/v1/deliveries/delivery%2Fwith%20spaces%3F%23/exports:prepare', 'POST',
+    )
+    expect(new Headers(prepareInit.headers).get('Idempotency-Key')).toBe('prepare-key-0001')
+    expect(prepareInit.body).toBe(JSON.stringify({ target_path: 'D:\\Reports\\x.html' }))
+    const commitInit = expectAuthenticatedRequest(
+      fetchMock, 6, '/api/v1/artifact-exports/export%2Fwith%20spaces%3F%23:commit', 'POST',
+    )
+    expect(new Headers(commitInit.headers).get('Idempotency-Key')).toBe('commit-key-00001')
+  })
+})
+
 describe('effect-runtime operations API', () => {
   beforeEach(() => {
     vi.resetModules()

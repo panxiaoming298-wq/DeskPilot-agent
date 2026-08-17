@@ -46,7 +46,20 @@ POST /api/v1/tasks/{task_id}:cancel
 .\.venv\Scripts\alembic.exe check
 ```
 
-第一版 migration 可初始化空库，也能接管早期数据库而不重建原有任务。当前 head 为 `0030_task_contract_plans`；在既有运行时、知识库、MCP 与 Evaluation Run/Trace 之外，新增不可变 Task Contract 版本、Executable Plan generation 和活动规划指针。
+第一版 migration 可初始化空库，也能接管早期数据库而不重建原有任务。当前 head 为 `0036_artifact_exports`；阶段 76 新增只保存摘要、精确目标、幂等绑定和不可变回执的 Artifact export 记录。
+
+## 阶段 76 Task Workbench 与精确导出 API
+
+```text
+POST /api/v1/research-workbench/tasks
+GET  /api/v1/tasks/{task_id}/workbench
+POST /api/v1/execution-runs/{run_id}:cancel
+POST /api/v1/deliveries/{delivery_id}/exports:prepare
+POST /api/v1/artifact-exports/{export_id}:commit
+GET  /api/v1/artifact-exports/{export_id}
+```
+
+Workbench 投影组合精确 task 的 Conversation、Planning、Execution、Research、Verification、Workspace、Browser、Delivery 和 export 真值，并为每个用户动作给出服务器拥有的可用性。导出只接受 Contract 显式授权的绝对 `.html` 新路径：prepare 只预览，commit 需要确认摘要并使用 exclusive create，绝不覆盖已有文件。完整边界见 [`doc/76-统一研究工作台与精确Artifact导出.md`](../doc/76-统一研究工作台与精确Artifact导出.md)。
 
 ## Task Contract 与 Executable Plan 只读 API
 
@@ -223,7 +236,7 @@ GET /api/v1/agents/registry-snapshot
 GET /api/v1/agents/{agent_id}/versions/{version}
 ```
 
-接口只返回脱敏 Descriptor/Schema digest，不返回 Prompt 正文或本地根路径。阶段 70 的研究结果仍严格停在待验证状态；阶段 71 已新增独立 Claim/Citation Verification、ArtifactRevision/PatchReceipt、隔离 Browser evidence 和 DeliveryManifest。阶段 72 为实际 Model Turn 增加 ContextManifest 与短期 Working Memory；阶段 73 新增受保护长期 Memory；阶段 74 新增 source-bound CompactionSnapshot、coverage/conflict/stale 和确定性重建；阶段 75 新增独立 multi-agent suite、外部 Oracle、Verifier mutant/false-success 硬门禁、精确 cohort/baseline 和 HMAC release attestation，详见 [`doc/75-多Agent对抗评测与发布门禁.md`](../doc/75-多Agent对抗评测与发布门禁.md)。
+接口只返回脱敏 Descriptor/Schema digest，不返回 Prompt 正文或本地根路径。阶段 70 的研究结果仍严格停在待验证状态；阶段 71 已新增独立 Claim/Citation Verification、ArtifactRevision/PatchReceipt、隔离 Browser evidence 和 DeliveryManifest。阶段 72 为实际 Model Turn 增加 ContextManifest 与短期 Working Memory；阶段 73 新增受保护长期 Memory；阶段 74 新增 source-bound CompactionSnapshot、coverage/conflict/stale 和确定性重建；阶段 75 新增独立对抗发布门禁；阶段 76 新增统一 Task Workbench、停止 fencing 与两步精确 HTML 导出，详见 [`doc/76-统一研究工作台与精确Artifact导出.md`](../doc/76-统一研究工作台与精确Artifact导出.md)。
 
 阶段 68 验证：专项 8 项全通过；默认后端全量 `429 passed, 12 skipped, 1 warning`（441 collected）；Ruff、mypy 176 个生产源码、Alembic check、依赖锁、wheel Prompt 资源和 evaluation baseline compare 全部通过。
 
@@ -238,6 +251,8 @@ GET /api/v1/agents/{agent_id}/versions/{version}
 阶段 74 验证：后端全量 `463 passed, 12 skipped, 1 warning`；Context/Registry/Research/verified-delivery 联合 29 项及 `0035` migration 往返通过。长上下文实际触发确定性压缩，删除/Contract amendment 使旧 snapshot stale，冲突与存储篡改 fail closed。Ruff、mypy 202 个生产源码通过；前端未修改，沿用 21 文件/141 项测试、type-check 和 build 结果。
 
 阶段 75 验证：`deskpilot.multi-agent-core@1` 共 11 个隔离 trial，report 为 11/11 通过、false-success=0、unauthorized-effect=0，mutant 混淆矩阵 TA=1/TR=2/FA=0/FR=0。两个不同只读 Agent Contract 实际产生 2 个 Invocation/Handoff/Result 并通过共享 verified-edge reducer join；`research_to_html` 使用 recorded Search/Page 走完生产路径后，外部 Oracle 直接读取隔离 Workspace 复核。阶段 68～75 联合门禁 40 项通过；后端全量 `467 passed, 12 skipped, 1 warning`，耗时 1012.77 秒。Ruff 全仓、mypy 208 个生产源码、Alembic upgrade/check、`uv lock --check`、Workflow YAML、旧/新两个 baseline compare 和 diff whitespace 全部通过。
+
+阶段 76 验证：后端全量回归通过，最终 Task Workbench/精确导出/stop fencing/默认关闭专项 4 项通过，`0036` 与相邻阶段 migration 往返 4 项通过；当前收集 484 项。Ruff 全仓、mypy 211 个生产源码、Alembic 单一 `0036` head/upgrade/check 和 `uv lock --check` 通过。前端 22 个测试文件/143 项、type-check、production build、静态界面检测和 320/375/414/768/桌面浏览器验收全部通过，控制台无警告或错误。
 
 ## 测试
 

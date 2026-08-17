@@ -398,7 +398,12 @@ class PlanCompiler:
         return tuple(result)
 
 
-def research_to_html_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
+def research_to_html_contract(
+    task_id: str,
+    capabilities: CapabilityCatalog,
+    *,
+    allow_user_path_export: bool = False,
+) -> TaskContract:
     suffix = task_id.removeprefix("tsk_")
     capability_ids = {
         "artifact.html.v1",
@@ -485,10 +490,11 @@ def research_to_html_contract(task_id: str, capabilities: CapabilityCatalog) -> 
         ),
         workspace=TaskWorkspaceContract(
             workspace_ref=f"workspace://task/{suffix}",
-        allowed_extensions=(".html", ".css"),
+            allowed_extensions=(".html", ".css"),
             max_total_bytes=1_048_576,
             max_files=10,
             retention_days=30,
+            allow_user_path_export=allow_user_path_export,
         ),
         browser_verify=BrowserVerifyContract(
             profile_id="deskpilot.browser-static-html.v1"

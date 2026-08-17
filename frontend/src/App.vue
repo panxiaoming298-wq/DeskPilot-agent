@@ -10,6 +10,7 @@ import MemoryControlCenter from './components/MemoryControlCenter.vue'
 import McpConnections from './components/McpConnections.vue'
 import EvaluationLab from './components/EvaluationLab.vue'
 import ProviderSettings from './components/ProviderSettings.vue'
+import ResearchArtifactWorkbench from './components/ResearchArtifactWorkbench.vue'
 import ReconciliationEvidenceCard from './components/ReconciliationEvidenceCard.vue'
 import ReconciliationCenter from './components/ReconciliationCenter.vue'
 import TaskControls from './components/TaskControls.vue'
@@ -186,7 +187,7 @@ const taskKind = ref<'disk_usage' | 'file_move' | 'disk_pressure_guarded_file_mo
 const sourcePath = ref('')
 const destinationPath = ref('')
 const maximumUsedPercent = ref(80)
-type ActiveView = 'tasks' | 'memory' | 'knowledge' | 'mcp' | 'evaluations' | 'reconciliations' | 'providers' | 'operations'
+type ActiveView = 'tasks' | 'research' | 'memory' | 'knowledge' | 'mcp' | 'evaluations' | 'reconciliations' | 'providers' | 'operations'
 const activeView = ref<ActiveView>('tasks')
 const privacyMode = ref<TaskCreate['privacy_mode']>('local_only')
 const submitting = ref(false)
@@ -369,6 +370,8 @@ function switchView(nextView: ActiveView): void {
 const pageHeading = computed(() =>
   activeView.value === 'tasks'
     ? '让任务过程成为可验证的数据'
+    : activeView.value === 'research'
+      ? '从 Claim 到 HTML，每一步都由证据解锁'
     : activeView.value === 'memory'
       ? '让每条长期记忆都有来源、版本与去向'
     : activeView.value === 'knowledge'
@@ -386,6 +389,7 @@ const pageHeading = computed(() =>
 
 const pageEyebrow = computed(() => ({
   tasks: 'WINDOWS MULTI-AGENT SYSTEM',
+  research: 'VERIFIED RESEARCH DELIVERY',
   memory: 'PROTECTED MEMORY EVIDENCE LEDGER',
   knowledge: 'CONTENT-ADDRESSED LOCAL MEMORY',
   mcp: 'CONTROLLED MODEL CONTEXT PROTOCOL',
@@ -397,6 +401,7 @@ const pageEyebrow = computed(() => ({
 
 const stageTitle = computed(() => ({
   tasks: '阶段 2 · 可控任务',
+  research: '阶段 76 · 研究交付台',
   memory: '阶段 73 · 长期记忆',
   knowledge: '阶段 3 · 本地知识',
   mcp: '阶段 3 · 受控 MCP',
@@ -408,6 +413,7 @@ const stageTitle = computed(() => ({
 
 const stageDescription = computed(() => ({
   tasks: '通过检查点、实时事件和控制命令验证执行闭环。',
+  research: '统一查看 Claim、Citation、Artifact、PatchReceipt、浏览器验收与精确导出。',
   memory: '确认提案、处理冲突，并核对每次真实 Context 使用记录。',
   knowledge: '导入只读文本来源，以内容寻址分块和来源版本证明检索结果。',
   mcp: '固定 Server 命令、能力和 Schema，默认禁用并记录脱敏审计。',
@@ -594,6 +600,10 @@ function handleOpenHistoricalTask(snapshot: Task): void {
         <button class="nav-item" :class="{ active: activeView === 'tasks' }" type="button" @click="switchView('tasks')">
           <span>任务工作台</span>
           <span class="nav-count">TASK</span>
+        </button>
+        <button class="nav-item" :class="{ active: activeView === 'research' }" type="button" @click="switchView('research')">
+          <span>研究交付台</span>
+          <span class="nav-count">P76</span>
         </button>
         <button class="nav-item" :class="{ active: activeView === 'knowledge' }" type="button" @click="switchView('knowledge')">
           <span>知识库</span>
@@ -853,6 +863,7 @@ function handleOpenHistoricalTask(snapshot: Task): void {
         </article>
       </section>
       </template>
+      <ResearchArtifactWorkbench v-else-if="activeView === 'research'" />
       <ReconciliationCenter
         v-else-if="activeView === 'reconciliations'"
         :active-task-id="task?.task_id ?? null"

@@ -1049,6 +1049,47 @@ class DeliveryManifestRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class ArtifactExportRecord(Base):
+    __tablename__ = "artifact_exports"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('prepared', 'committing', 'committed', 'failed')",
+            name="ck_artifact_export_status",
+        ),
+        CheckConstraint("byte_count >= 1", name="ck_artifact_export_byte_count"),
+        UniqueConstraint("delivery_id", "target_path", name="uq_artifact_export_target"),
+        UniqueConstraint("prepare_key_digest", name="uq_artifact_export_prepare_key"),
+    )
+
+    export_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    delivery_id: Mapped[str] = mapped_column(
+        ForeignKey("delivery_manifests.delivery_id", ondelete="CASCADE"), index=True
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), index=True
+    )
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.artifact_id", ondelete="CASCADE")
+    )
+    revision_id: Mapped[str] = mapped_column(
+        ForeignKey("artifact_revisions.revision_id", ondelete="CASCADE")
+    )
+    target_path: Mapped[str] = mapped_column(String(32767))
+    conflict_policy: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    source_digest: Mapped[str] = mapped_column(String(64))
+    request_digest: Mapped[str] = mapped_column(String(64))
+    confirmation_digest: Mapped[str] = mapped_column(String(64))
+    prepare_key_digest: Mapped[str] = mapped_column(String(64))
+    commit_key_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    receipt_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    byte_count: Mapped[int] = mapped_column(Integer)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class TaskRuntimeCheckpointRecord(Base):
     """Current protected runtime snapshot bound to one task event sequence."""
 

@@ -8,6 +8,7 @@ from deskpilot.api.problem_details import ProblemException
 from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
 from deskpilot.application.agent_registry import AgentRegistry
 from deskpilot.application.artifact_delivery_runtime import ArtifactDeliveryRuntime
+from deskpilot.application.artifact_export_runtime import ArtifactExportRuntime
 from deskpilot.application.capability_catalog import CapabilityCatalog
 from deskpilot.application.context_memory_runtime import ContextMemoryRuntime
 from deskpilot.application.effect_runtime_operations import EffectRuntimeOperationsService
@@ -25,6 +26,7 @@ from deskpilot.application.provider_management_service import (
 )
 from deskpilot.application.research_runtime import ResearchRuntime
 from deskpilot.application.task_service import TaskService
+from deskpilot.application.task_workbench_service import TaskWorkbenchService
 from deskpilot.observability import TelemetryFacade
 
 
@@ -50,6 +52,14 @@ def get_agent_execution_runtime(request: Request) -> AgentExecutionRuntime:
 
 def get_artifact_delivery_runtime(request: Request) -> ArtifactDeliveryRuntime:
     return cast(ArtifactDeliveryRuntime, request.app.state.artifact_delivery_runtime)
+
+
+def get_artifact_export_runtime(request: Request) -> ArtifactExportRuntime:
+    return cast(ArtifactExportRuntime, request.app.state.artifact_export_runtime)
+
+
+def get_task_workbench_service(request: Request) -> TaskWorkbenchService:
+    return cast(TaskWorkbenchService, request.app.state.task_workbench_service)
 
 
 def get_context_memory_runtime(request: Request) -> ContextMemoryRuntime:

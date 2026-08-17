@@ -120,6 +120,19 @@ async def get_execution(
         raise _runtime_problem(error) from error
 
 
+@router.post("/execution-runs/{run_id}:cancel", response_model=ExecutionRunRead)
+async def cancel_execution(
+    run_id: RunId,
+    execution: ExecutionDependency,
+    response: Response,
+) -> ExecutionRunRead:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await execution.cancel(run_id)
+    except AgentRuntimeError as error:
+        raise _runtime_problem(error) from error
+
+
 @router.get("/tasks/{task_id}/execution-runs", response_model=ExecutionRunPage)
 async def list_executions(
     task_id: TaskId,
