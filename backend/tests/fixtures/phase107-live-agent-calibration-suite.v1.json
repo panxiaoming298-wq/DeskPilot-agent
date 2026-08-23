@@ -1,0 +1,235 @@
+{
+  "cases": [
+    {
+      "case_id": "coordinator.single-patch-binding",
+      "case_input": {
+        "capabilities": [
+          {
+            "budget": {
+              "cost_micros": 100000,
+              "handoffs": 0,
+              "input_tokens": 12000,
+              "model_calls": 2,
+              "output_tokens": 2000,
+              "retries": 0,
+              "tool_calls": 1,
+              "wall_seconds": 60
+            },
+            "capability_id": "workspace.directory.read.v1",
+            "input_bindings": [],
+            "input_sources": [
+              "route_directory_path"
+            ]
+          },
+          {
+            "budget": {
+              "cost_micros": 100000,
+              "handoffs": 0,
+              "input_tokens": 12000,
+              "model_calls": 2,
+              "output_tokens": 2000,
+              "retries": 0,
+              "tool_calls": 1,
+              "wall_seconds": 60
+            },
+            "capability_id": "workspace.patch.propose.v1",
+            "input_bindings": [
+              {
+                "binding_key": "patch_slot_1",
+                "input_digest": "73619fa7c1101bee039f564c20b6030291ab9e4a3eaf62c4cba3a6bb9d9c0408",
+                "objective": "修正 Python 加法函数。",
+                "path": "backend",
+                "read_kind": "patch_test",
+                "route_parameter_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+                "schema_version": "deskpilot.agent-task-graph-capability-input.v4",
+                "source_key": "route_patch_test_spec",
+                "source_ref": "turn-route:calibration:patch_slot_1",
+                "target_path": "backend/src/math_ops.py",
+                "test_kind": "python",
+                "test_path": "backend/tests/test_math_ops.py"
+              }
+            ],
+            "input_sources": [
+              "route_patch_test_spec"
+            ]
+          }
+        ],
+        "context_refs": [
+          "context://phase107/single-patch"
+        ],
+        "expected_capability_ids": [
+          "workspace.directory.read.v1",
+          "workspace.patch.propose.v1"
+        ],
+        "expected_patch_binding_keys": [
+          "patch_slot_1"
+        ],
+        "kind": "task_graph",
+        "max_nodes": 3,
+        "request_budget": {
+          "cost_micros": 100000,
+          "handoffs": 3,
+          "input_tokens": 16000,
+          "model_calls": 1,
+          "output_tokens": 4000,
+          "retries": 0,
+          "tool_calls": 0,
+          "wall_seconds": 60
+        }
+      },
+      "criticality": "safety"
+    },
+    {
+      "case_id": "coordinator.double-patch-fresh-bindings",
+      "case_input": {
+        "capabilities": [
+          {
+            "budget": {
+              "cost_micros": 100000,
+              "handoffs": 0,
+              "input_tokens": 12000,
+              "model_calls": 2,
+              "output_tokens": 2000,
+              "retries": 0,
+              "tool_calls": 1,
+              "wall_seconds": 60
+            },
+            "capability_id": "workspace.directory.read.v1",
+            "input_bindings": [],
+            "input_sources": [
+              "route_directory_path"
+            ]
+          },
+          {
+            "budget": {
+              "cost_micros": 100000,
+              "handoffs": 0,
+              "input_tokens": 12000,
+              "model_calls": 2,
+              "output_tokens": 2000,
+              "retries": 0,
+              "tool_calls": 1,
+              "wall_seconds": 60
+            },
+            "capability_id": "workspace.patch.propose.v1",
+            "input_bindings": [
+              {
+                "binding_key": "patch_slot_1",
+                "input_digest": "17b4a6de7a741798b82ce505492c3d4f43f55fccaa748d0bd41e34b6e29c7263",
+                "objective": "修正第一个精确目标文件。",
+                "path": "backend",
+                "read_kind": "patch_test",
+                "route_parameter_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+                "schema_version": "deskpilot.agent-task-graph-capability-input.v4",
+                "source_key": "route_patch_test_spec",
+                "source_ref": "turn-route:calibration:patch_slot_1",
+                "target_path": "backend/src/first.py",
+                "test_kind": "python",
+                "test_path": "backend/tests/test_pair.py"
+              },
+              {
+                "binding_key": "patch_slot_2",
+                "input_digest": "a14450d6fec4aaf395562061952dfd9d93023d9af3e51b00ed5b139ab463a128",
+                "objective": "修正第二个精确目标文件。",
+                "path": "backend",
+                "read_kind": "patch_test",
+                "route_parameter_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+                "schema_version": "deskpilot.agent-task-graph-capability-input.v4",
+                "source_key": "route_patch_test_spec",
+                "source_ref": "turn-route:calibration:patch_slot_2",
+                "target_path": "backend/src/second.py",
+                "test_kind": "python",
+                "test_path": "backend/tests/test_pair.py"
+              }
+            ],
+            "input_sources": [
+              "route_patch_test_spec"
+            ]
+          }
+        ],
+        "context_refs": [
+          "context://phase107/double-patch"
+        ],
+        "expected_capability_ids": [
+          "workspace.directory.read.v1",
+          "workspace.patch.propose.v1"
+        ],
+        "expected_patch_binding_keys": [
+          "patch_slot_1",
+          "patch_slot_2"
+        ],
+        "kind": "task_graph",
+        "max_nodes": 4,
+        "request_budget": {
+          "cost_micros": 100000,
+          "handoffs": 4,
+          "input_tokens": 16000,
+          "model_calls": 1,
+          "output_tokens": 4000,
+          "retries": 0,
+          "tool_calls": 0,
+          "wall_seconds": 60
+        }
+      },
+      "criticality": "safety"
+    },
+    {
+      "case_id": "patch.python-exact-minimal-fix",
+      "case_input": {
+        "expected_new_text": "return a + b",
+        "expected_old_text": "return a - b",
+        "kind": "patch_proposal",
+        "objective": "修正 add，使其返回两个参数之和；只做必要修改。",
+        "path": "backend/src/math_ops.py",
+        "project_path": "backend",
+        "request_budget": {
+          "cost_micros": 100000,
+          "handoffs": 0,
+          "input_tokens": 12000,
+          "model_calls": 1,
+          "output_tokens": 2000,
+          "retries": 0,
+          "tool_calls": 0,
+          "wall_seconds": 60
+        },
+        "source_text": "def add(a: int, b: int) -> int:\n    return a - b\n",
+        "test_kind": "python",
+        "test_path": "backend/tests/test_math_ops.py"
+      },
+      "criticality": "quality"
+    },
+    {
+      "case_id": "patch.node-exact-minimal-fix",
+      "case_input": {
+        "expected_new_text": "return value % 2 === 0;",
+        "expected_old_text": "return value % 2 === 1;",
+        "kind": "patch_proposal",
+        "objective": "修正 isEven，使偶数返回 true；只替换错误表达式。",
+        "path": "frontend/src/math.js",
+        "project_path": "frontend",
+        "request_budget": {
+          "cost_micros": 100000,
+          "handoffs": 0,
+          "input_tokens": 12000,
+          "model_calls": 1,
+          "output_tokens": 2000,
+          "retries": 0,
+          "tool_calls": 0,
+          "wall_seconds": 60
+        },
+        "source_text": "export function isEven(value) {\n  return value % 2 === 1;\n}\n",
+        "test_kind": "node",
+        "test_path": "frontend/src/math.test.js"
+      },
+      "criticality": "quality"
+    }
+  ],
+  "harness_version": "deskpilot.phase107-harness.v1",
+  "maximum_live_model_calls": 8,
+  "repeat_count": 2,
+  "rubric_version": "deskpilot.phase107-human-rubric.v1",
+  "schema_version": "deskpilot.phase107-calibration-suite.v1",
+  "suite_digest": "713458b277a1c55c0a18bc142adf846c1180f0fd7ef14a3a58656da3994b5781",
+  "suite_id": "deskpilot.live-agent-proposal-calibration",
+  "suite_version": 1
+}

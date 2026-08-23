@@ -22,6 +22,7 @@ from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
 from deskpilot.application.agent_registry import AgentRegistry
 from deskpilot.application.browser_verifier import BrowserEvidence, audit_static_html
 from deskpilot.application.capability_catalog import create_builtin_capability_catalog
+from deskpilot.application.pdf_artifact_renderer import RenderedPdf
 from deskpilot.application.plan_binder import AgentPlanBinder, AgentToolNotAllowedError
 from deskpilot.application.plan_compilation_service import PlanCompilationService
 from deskpilot.application.plan_compiler import PlanCompiler
@@ -31,6 +32,7 @@ from deskpilot.core.canonical_json import canonical_json_bytes, sha256_digest
 from deskpilot.core.config import Settings
 from deskpilot.domain.agent_contracts import AgentPlanBudget, AgentPlanDraftStep
 from deskpilot.domain.agent_runtime import AgentOutputResult
+from deskpilot.domain.artifact_runtime import PdfRenderVerificationRead, digested
 from deskpilot.domain.model_contracts import ModelLocation
 from deskpilot.domain.model_routing import ModelGatewayPolicy, ModelProviderPricing
 from deskpilot.domain.phase75_evaluations import (
@@ -173,6 +175,33 @@ class _Phase75Browser:
             issue_codes=issues,
             dom_digest=sha256_digest({"dom": html}),
             screenshot_digest=sha256_digest({"screenshot": html}),
+        )
+
+
+class _Phase75PdfRenderer:
+    async def render(self, entry_path: Path) -> RenderedPdf:
+        if not entry_path.name.endswith(".html"):
+            raise Phase75EvaluationError("Workflow PDF renderer received a non-HTML artifact")
+        content = b"%PDF-1.4\n" + b"75" * 256 + b"\n%%EOF\n"
+        source_digest = sha256_digest({"bytes_hex": content.hex()})
+        material: dict[str, object] = {
+            "profile_id": "deskpilot.pdf-render.v1",
+            "status": "passed",
+            "engine": "phase75-recorded-pdf-renderer-v1",
+            "source_digest": source_digest,
+            "page_count": 1,
+            "page_width_points": 595.0,
+            "page_height_points": 842.0,
+            "render_dpi": 144,
+            "rendered_page_digests": (sha256_digest({"phase75_page": 1}),),
+            "rendered_page_dimensions": ((1190, 1684),),
+            "issue_codes": (),
+        }
+        return RenderedPdf(
+            content=content,
+            verification=PdfRenderVerificationRead.model_validate(
+                digested(material, "evidence_digest")
+            ),
         )
 
 
@@ -436,6 +465,7 @@ class Phase75ScenarioRunner:
                 search_provider=_Phase75SearchProvider(),
                 page_reader=_Phase75PageReader(),
                 browser_verifier=_Phase75Browser(),
+                pdf_artifact_renderer=_Phase75PdfRenderer(),
             )
             headers = {
                 "Authorization": f"Bearer {token}",

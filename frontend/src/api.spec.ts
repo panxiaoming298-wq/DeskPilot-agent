@@ -400,40 +400,86 @@ describe('phase 76 workbench API', () => {
       .mockImplementation(() => Promise.resolve(jsonResponse({})))
     vi.stubGlobal('fetch', fetchMock)
     const {
+      advanceTaskWorkbench,
       cancelWorkbenchExecution,
       commitArtifactExport,
+      commitWorkspaceEdit,
+      commitWorkspacePatch,
+      commitWorkspacePathOperation,
+      continueConversationTurn,
+      createConversationTurn,
       createResearchWorkbenchTask,
       getTaskWorkbench,
       prepareArtifactExport,
+      replanTaskWorkbench,
       runWorkbenchStep,
+      stopTaskWorkbench,
     } = await import('./api')
 
     await createResearchWorkbenchTask({
       goal: '研究并生成 HTML', privacy_mode: 'balanced', constraints: [],
     })
+    await createConversationTurn({
+      message: '用对话研究并生成 HTML', privacy_mode: 'balanced', constraints: [],
+    })
+    await continueConversationTurn('task/with spaces?#', { message: '更换研究主题' })
+    await advanceTaskWorkbench('task/with spaces?#')
+    await stopTaskWorkbench('task/with spaces?#')
+    await replanTaskWorkbench('task/with spaces?#')
+    await commitWorkspaceEdit('task/with spaces?#', 'b'.repeat(64))
+    await commitWorkspacePatch('task/with spaces?#', 'c'.repeat(64))
+    await commitWorkspacePathOperation('task/with spaces?#', 'd'.repeat(64))
     await getTaskWorkbench('task/with spaces?#')
     await runWorkbenchStep('run/with spaces?#', 'claims:verify')
     await cancelWorkbenchExecution('run/with spaces?#')
-    await prepareArtifactExport('delivery/with spaces?#', 'D:\\Reports\\x.html', 'prepare-key-0001')
+    await prepareArtifactExport(
+      'delivery/with spaces?#', 'D:\\Reports\\x.md', 'prepare-key-0001', `art_${'e'.repeat(64)}`,
+    )
     await commitArtifactExport('export/with spaces?#', 'a'.repeat(64), 'commit-key-00001')
 
     expectAuthenticatedRequest(fetchMock, 1, '/api/v1/research-workbench/tasks', 'POST')
     expectAuthenticatedRequest(
-      fetchMock, 2, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench', undefined,
+      fetchMock, 2, '/api/v1/conversation-turns', 'POST',
     )
     expectAuthenticatedRequest(
-      fetchMock, 3, '/api/v1/execution-runs/run%2Fwith%20spaces%3F%23/claims:verify', 'POST',
+      fetchMock, 3, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/conversation-turns', 'POST',
     )
     expectAuthenticatedRequest(
-      fetchMock, 4, '/api/v1/execution-runs/run%2Fwith%20spaces%3F%23:cancel', 'POST',
+      fetchMock, 4, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench:advance', 'POST',
+    )
+    expectAuthenticatedRequest(
+      fetchMock, 5, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench:stop', 'POST',
+    )
+    expectAuthenticatedRequest(
+      fetchMock, 6, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench:replan', 'POST',
+    )
+    expectAuthenticatedRequest(
+      fetchMock, 7, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workspace-edit:commit', 'POST',
+    )
+    expectAuthenticatedRequest(
+      fetchMock, 8, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workspace-patch:commit', 'POST',
+    )
+    expectAuthenticatedRequest(
+      fetchMock, 9, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workspace-path-operation:commit', 'POST',
+    )
+    expectAuthenticatedRequest(
+      fetchMock, 10, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench', undefined,
+    )
+    expectAuthenticatedRequest(
+      fetchMock, 11, '/api/v1/execution-runs/run%2Fwith%20spaces%3F%23/claims:verify', 'POST',
+    )
+    expectAuthenticatedRequest(
+      fetchMock, 12, '/api/v1/execution-runs/run%2Fwith%20spaces%3F%23:cancel', 'POST',
     )
     const prepareInit = expectAuthenticatedRequest(
-      fetchMock, 5, '/api/v1/deliveries/delivery%2Fwith%20spaces%3F%23/exports:prepare', 'POST',
+      fetchMock, 13, '/api/v1/deliveries/delivery%2Fwith%20spaces%3F%23/exports:prepare', 'POST',
     )
     expect(new Headers(prepareInit.headers).get('Idempotency-Key')).toBe('prepare-key-0001')
-    expect(prepareInit.body).toBe(JSON.stringify({ target_path: 'D:\\Reports\\x.html' }))
+    expect(prepareInit.body).toBe(JSON.stringify({
+      target_path: 'D:\\Reports\\x.md', artifact_id: `art_${'e'.repeat(64)}`,
+    }))
     const commitInit = expectAuthenticatedRequest(
-      fetchMock, 6, '/api/v1/artifact-exports/export%2Fwith%20spaces%3F%23:commit', 'POST',
+      fetchMock, 14, '/api/v1/artifact-exports/export%2Fwith%20spaces%3F%23:commit', 'POST',
     )
     expect(new Headers(commitInit.headers).get('Idempotency-Key')).toBe('commit-key-00001')
   })

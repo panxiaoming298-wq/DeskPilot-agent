@@ -118,6 +118,12 @@ async def test_postgresql_shards_preserve_capacity_fairness_and_ttl_fences() -> 
     task_ids: list[str] = []
     try:
         await control_database.migrate()
+        # This marker is guarded to a disposable test database.  Reset the
+        # physical task/index footprint as well as logical rows so a repeated
+        # baseline run cannot inherit B-tree bloat from earlier random IDs.
+        async with control_database.session() as session:
+            async with session.begin():
+                await session.execute(text("TRUNCATE TABLE tasks CASCADE"))
         service = TaskService(control_database, "/api/v1")
         stores = tuple(EffectDagClusterAdmissionStore(database) for database in databases)
         await stores[0].ensure_configuration(

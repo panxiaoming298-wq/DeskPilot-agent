@@ -5,6 +5,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from deskpilot.application.agent_registry import (
+    AgentModelAdmissionPolicy,
     AgentRegistration,
     AgentRegistry,
     PromptPackage,
@@ -25,13 +26,19 @@ from deskpilot.domain.agent_contracts import (
     AgentToolPolicy,
     PromptPackageRef,
 )
+from deskpilot.domain.agent_loop import (
+    CoordinatorLoopDecision,
+    DynamicCoordinatorLoopDecision,
+    WorkspaceLoopDecision,
+    WorkspacePatchLoopDecision,
+)
 from deskpilot.domain.model_contracts import (
     ModelCapabilityRequirements,
     ModelLocation,
     ModelProviderDescriptor,
     ModelRole,
 )
-from deskpilot.domain.research import ResearchAgentDecision
+from deskpilot.domain.research import ResearchAgentDecision, ResearchLoopDecision
 from deskpilot.domain.tool_contracts import ToolRiskLevel
 
 
@@ -52,18 +59,312 @@ class EvidenceAgentResult(BaseModel):
 def create_builtin_agent_registry(
     tool_registry: ToolRegistry,
     model_descriptors: tuple[ModelProviderDescriptor, ...],
+    model_admissions: AgentModelAdmissionPolicy | None = None,
 ) -> AgentRegistry:
     prompt_root = Path(__file__).parent / "prompts"
     computer_prompt = load_prompt_package(prompt_root, "computer_observer.json")
     knowledge_prompt = load_prompt_package(prompt_root, "knowledge_researcher.json")
     web_prompt = load_prompt_package(prompt_root, "web_researcher.json")
+    web_loop_prompt = load_prompt_package(prompt_root, "web_researcher_loop.json")
+    workspace_prompt = load_prompt_package(prompt_root, "workspace_reader_loop.json")
+    workspace_prompt_v2 = load_prompt_package(prompt_root, "workspace_reader_loop_v2.json")
+    workspace_tester_prompt = load_prompt_package(prompt_root, "workspace_tester_loop.json")
+    coordinator_prompt = load_prompt_package(prompt_root, "workspace_coordinator_loop.json")
+    dynamic_coordinator_prompt = load_prompt_package(
+        prompt_root, "workspace_dynamic_coordinator_loop.json"
+    )
+    workspace_patch_planner_prompt = load_prompt_package(
+        prompt_root, "workspace_patch_planner_loop.json"
+    )
     synthesizer_prompt = load_prompt_package(prompt_root, "task_synthesizer.json")
     disk = tool_registry.resolve("computer.disk_usage", "1.0.0").contract
     synth_ref = AgentHandoffRef(agent_id="builtin.task_synthesizer", version="1.0.0")
     computer_ref = AgentHandoffRef(agent_id="builtin.computer_observer", version="1.0.0")
     knowledge_ref = AgentHandoffRef(agent_id="builtin.knowledge_researcher", version="1.0.0")
+    coordinator_ref = AgentHandoffRef(agent_id="builtin.workspace_coordinator", version="1.0.0")
+    dynamic_coordinator_ref = AgentHandoffRef(
+        agent_id="builtin.workspace_coordinator", version="1.1.0"
+    )
+    workspace_reader_ref = AgentHandoffRef(agent_id="builtin.workspace_reader", version="1.1.0")
+    dynamic_workspace_reader_ref = AgentHandoffRef(
+        agent_id="builtin.workspace_reader", version="1.2.0"
+    )
+    workspace_tester_ref = AgentHandoffRef(agent_id="builtin.workspace_tester", version="1.0.0")
+    workspace_patch_planner_ref = AgentHandoffRef(
+        agent_id="builtin.workspace_patch_planner", version="1.0.0"
+    )
 
-    registry = AgentRegistry()
+    registry = AgentRegistry(model_admissions)
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_patch_planner",
+                version="1.0.0",
+                kind=AgentKind.WORKER,
+                display_name="Workspace Patch Planner",
+                description=(
+                    "读取一个服务器绑定文件并提出一次精确替换；不能应用补丁或选择测试命令。"
+                ),
+                provides=("workspace.patch.propose.v1",),
+                prompt=workspace_patch_planner_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(may_receive_from=(dynamic_coordinator_ref,)),
+                role=ModelRole.TOOL_AGENT,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=1,
+                    max_input_tokens=24_000,
+                    max_output_tokens=3_000,
+                    max_wall_seconds=90,
+                    max_retries=0,
+                    max_cost_micros=100_000,
+                ),
+                required_evidence=("workspace_read_observation", "user_patch_confirmation"),
+                output_model=WorkspacePatchLoopDecision,
+                allowed_sources=(
+                    "task_contract",
+                    "conversation_message",
+                    "tool_evidence",
+                ),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=WorkspacePatchLoopDecision,
+            prompt_package=workspace_patch_planner_prompt,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_tester",
+                version="1.0.0",
+                kind=AgentKind.WORKER,
+                display_name="Workspace Tester",
+                description=(
+                    "执行服务器绑定的固定 pytest 或 node:test 文件，不接受 executable 或 argv。"
+                ),
+                provides=("workspace.python.test.v1", "workspace.node.test.v1"),
+                prompt=workspace_tester_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(may_receive_from=(dynamic_coordinator_ref,)),
+                role=ModelRole.TOOL_AGENT,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=1,
+                    max_input_tokens=20_000,
+                    max_output_tokens=2_000,
+                    max_wall_seconds=90,
+                    max_retries=0,
+                    max_cost_micros=100_000,
+                ),
+                required_evidence=("workspace_test_observation",),
+                output_model=WorkspaceLoopDecision,
+                allowed_sources=(
+                    "task_contract",
+                    "conversation_message",
+                    "tool_evidence",
+                ),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=WorkspaceLoopDecision,
+            prompt_package=workspace_tester_prompt,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_reader",
+                version="1.2.0",
+                kind=AgentKind.WORKER,
+                display_name="Workspace Reader",
+                description="执行服务器动态任务图中绑定的工作区文件或目录只读节点。",
+                provides=("workspace.file.read.v1", "workspace.directory.read.v1"),
+                prompt=workspace_prompt_v2,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(may_receive_from=(dynamic_coordinator_ref,)),
+                role=ModelRole.TOOL_AGENT,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=1,
+                    max_input_tokens=20_000,
+                    max_output_tokens=2_000,
+                    max_wall_seconds=90,
+                    max_retries=0,
+                    max_cost_micros=100_000,
+                ),
+                required_evidence=("workspace_read_observation",),
+                output_model=WorkspaceLoopDecision,
+                allowed_sources=(
+                    "task_contract",
+                    "conversation_message",
+                    "tool_evidence",
+                ),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=WorkspaceLoopDecision,
+            prompt_package=workspace_prompt_v2,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_coordinator",
+                version="1.1.0",
+                kind=AgentKind.SYNTHESIZER,
+                display_name="Dynamic Workspace Coordinator",
+                description=("提出一个完整的候选只读子任务 DAG，并只消费服务器验证后的 join。"),
+                provides=("workspace.dynamic.coordinate.v1",),
+                prompt=dynamic_coordinator_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(
+                    may_delegate_to=(
+                        dynamic_workspace_reader_ref,
+                        workspace_tester_ref,
+                        workspace_patch_planner_ref,
+                    ),
+                    max_outgoing_handoffs=4,
+                    max_depth=1,
+                ),
+                role=ModelRole.SUMMARIZER,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=0,
+                    max_input_tokens=12_000,
+                    max_output_tokens=2_000,
+                    max_wall_seconds=60,
+                    max_retries=0,
+                    max_cost_micros=100_000,
+                    max_handoffs=4,
+                ),
+                required_evidence=("verified_task_graph",),
+                output_model=DynamicCoordinatorLoopDecision,
+                allowed_sources=(
+                    "task_contract",
+                    "conversation_message",
+                    "verified_child_result",
+                ),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=DynamicCoordinatorLoopDecision,
+            prompt_package=dynamic_coordinator_prompt,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_reader",
+                version="1.1.0",
+                kind=AgentKind.WORKER,
+                display_name="Workspace Reader",
+                description="通过持久化受限 Route Loop 读取工作区文件或直接子目录。",
+                provides=("workspace.file.read.v1", "workspace.directory.read.v1"),
+                prompt=workspace_prompt_v2,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(may_receive_from=(coordinator_ref,)),
+                role=ModelRole.TOOL_AGENT,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=1,
+                    max_input_tokens=20_000,
+                    max_output_tokens=2_000,
+                    max_wall_seconds=90,
+                    max_retries=0,
+                    max_cost_micros=100_000,
+                ),
+                required_evidence=("workspace_read_observation",),
+                output_model=WorkspaceLoopDecision,
+                allowed_sources=(
+                    "task_contract",
+                    "conversation_message",
+                    "tool_evidence",
+                ),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=WorkspaceLoopDecision,
+            prompt_package=workspace_prompt_v2,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_coordinator",
+                kind=AgentKind.SYNTHESIZER,
+                display_name="Workspace Coordinator",
+                description=(
+                    "提议一个服务器预编译的只读 Workspace Reader 子任务，只消费已经验证的子结果。"
+                ),
+                provides=("workspace.directory.coordinate.v1",),
+                prompt=coordinator_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(
+                    may_delegate_to=(workspace_reader_ref,),
+                    max_outgoing_handoffs=1,
+                    max_depth=1,
+                ),
+                role=ModelRole.SUMMARIZER,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=0,
+                    max_input_tokens=12_000,
+                    max_output_tokens=1_000,
+                    max_wall_seconds=60,
+                    max_retries=0,
+                    max_cost_micros=100_000,
+                    max_handoffs=1,
+                ),
+                required_evidence=("verified_child_result",),
+                output_model=CoordinatorLoopDecision,
+                allowed_sources=(
+                    "task_contract",
+                    "conversation_message",
+                    "verified_child_result",
+                ),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=CoordinatorLoopDecision,
+            prompt_package=coordinator_prompt,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_reader",
+                kind=AgentKind.WORKER,
+                display_name="Workspace Reader",
+                description="通过持久化受限 Route Loop 读取一个工作区文本文件。",
+                provides=("workspace.file.read.v1",),
+                prompt=workspace_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(),
+                role=ModelRole.TOOL_AGENT,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=1,
+                    max_input_tokens=20_000,
+                    max_output_tokens=2_000,
+                    max_wall_seconds=90,
+                    max_retries=0,
+                    max_cost_micros=100_000,
+                ),
+                required_evidence=("workspace_file_version",),
+                output_model=WorkspaceLoopDecision,
+                allowed_sources=(
+                    "task_contract",
+                    "conversation_message",
+                    "tool_evidence",
+                ),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=WorkspaceLoopDecision,
+            prompt_package=workspace_prompt,
+        )
+    )
     registry.register(
         AgentRegistration(
             contract=_contract(
@@ -100,6 +401,46 @@ def create_builtin_agent_registry(
             input_model=AgentReferenceInput,
             output_model=EvidenceAgentResult,
             prompt_package=computer_prompt,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.web_researcher",
+                version="1.1.0",
+                kind=AgentKind.WORKER,
+                display_name="Web Researcher",
+                description="通过持久化受限 Route Loop 取得公开来源并提出待验证 Claim。",
+                provides=("research.read.v1",),
+                prompt=web_loop_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(),
+                role=ModelRole.TOOL_AGENT,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=4,
+                    max_tool_calls=10,
+                    max_input_tokens=60_000,
+                    max_output_tokens=8_000,
+                    max_wall_seconds=300,
+                    max_retries=2,
+                    max_cost_micros=1_000_000,
+                ),
+                required_evidence=("citation",),
+                require_citations=True,
+                output_model=ResearchLoopDecision,
+                allowed_sources=(
+                    "task_contract",
+                    "conversation_message",
+                    "working_memory",
+                    "long_term_memory",
+                    "compaction_snapshot",
+                    "external_untrusted_page_snapshot",
+                ),
+                memory_read_scopes=("user",),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=ResearchLoopDecision,
+            prompt_package=web_loop_prompt,
         )
     )
     registry.register(
@@ -211,6 +552,7 @@ def create_builtin_agent_registry(
 def _contract(
     *,
     agent_id: str,
+    version: str = "1.0.0",
     kind: AgentKind,
     display_name: str,
     description: str,
@@ -230,12 +572,16 @@ def _contract(
         "tool_evidence",
     ),
     memory_read_scopes: tuple[str, ...] = (),
+    allowed_locations: tuple[ModelLocation, ...] = (
+        ModelLocation.LOCAL,
+        ModelLocation.CLOUD,
+    ),
 ) -> AgentContract:
     manifest = prompt.manifest
     contract = AgentContract(
         schema_version="deskpilot.agent-contract.v1",
         agent_id=agent_id,
-        version="1.0.0",
+        version=version,
         kind=kind,
         display_name=display_name,
         description=description,
@@ -252,7 +598,7 @@ def _contract(
         handoff_policy=handoff,
         model_policy=AgentModelPolicy(
             role=role,
-            allowed_locations=(ModelLocation.LOCAL, ModelLocation.CLOUD),
+            allowed_locations=allowed_locations,
             allowed_privacy_modes=(
                 "local_only",
                 "local_preferred",

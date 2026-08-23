@@ -16,6 +16,7 @@ from deskpilot.application.plan_compilation_service import (
     PlanningNotFoundError,
     PlanningProofRejectedError,
 )
+from deskpilot.domain.agent_replanning import AgentReplanPage
 from deskpilot.domain.task_plans import (
     TASK_ID_PATTERN,
     CapabilityPackPage,
@@ -109,6 +110,19 @@ async def get_plan(
     response.headers["Cache-Control"] = "no-store"
     try:
         return await service.get_plan(task_id, generation)
+    except PlanningError as error:
+        raise _problem(error) from error
+
+
+@router.get("/tasks/{task_id}/replans", response_model=AgentReplanPage)
+async def list_replans(
+    task_id: TaskId,
+    service: PlanningDependency,
+    response: Response,
+) -> AgentReplanPage:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await service.list_replans(task_id)
     except PlanningError as error:
         raise _problem(error) from error
 

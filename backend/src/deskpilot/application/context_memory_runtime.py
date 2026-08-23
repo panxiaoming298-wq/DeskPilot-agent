@@ -198,6 +198,26 @@ class ContextMemoryRuntime:
             )
             return tuple(self._message_read(item) for item in records)
 
+    async def list_conversation_messages(
+        self, conversation_id: str
+    ) -> tuple[ConversationMessageRead, ...]:
+        """Return the visible transcript across immutable Tasks in one conversation."""
+
+        async with self._database.session() as session:
+            conversation = await session.get(ConversationRecord, conversation_id)
+            if conversation is None:
+                raise ContextMemoryNotFoundError("Conversation does not exist")
+            records = tuple(
+                (
+                    await session.scalars(
+                        select(ConversationMessageRecord)
+                        .where(ConversationMessageRecord.conversation_id == conversation_id)
+                        .order_by(ConversationMessageRecord.created_at)
+                    )
+                ).all()
+            )
+            return tuple(self._message_read(item) for item in records)
+
     async def add_working_memory(
         self, task_id: str, request: CreateWorkingMemoryRequest
     ) -> WorkingMemoryItemRead:

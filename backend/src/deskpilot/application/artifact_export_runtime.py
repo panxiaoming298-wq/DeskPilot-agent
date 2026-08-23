@@ -12,7 +12,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deskpilot.core.canonical_json import sha256_digest
-from deskpilot.domain.artifact_runtime import DeliveryManifestRead, PatchReceiptRead
+from deskpilot.domain.artifact_runtime import (
+    DeliveryManifestRead,
+    PatchReceiptRead,
+    PdfRenderVerificationRead,
+)
 from deskpilot.domain.task_plans import TaskContract
 from deskpilot.domain.task_workbench import (
     ArtifactExportRead,
@@ -62,32 +66,39 @@ class ArtifactExportRuntime:
         delivery_id: str,
         target_path: str,
         idempotency_key: str,
+        *,
+        artifact_id: str | None = None,
     ) -> ArtifactExportRead:
         key_digest = self._key_digest(idempotency_key)
-        target = self._target_path(target_path, require_absent=True)
         try:
             async with self._database.session() as session, session.begin():
+                delivery, _, artifact, revision, source_path = await self._resolve_source(
+                    session, delivery_id, artifact_id=artifact_id
+                )
+                target = self._target_path(target_path, require_absent=True)
+                self._assert_target_media_type(target, revision.media_type)
                 replay = await session.scalar(
                     select(ArtifactExportRecord).where(
                         ArtifactExportRecord.prepare_key_digest == key_digest
                     )
                 )
                 if replay is not None:
-                    if replay.delivery_id != delivery_id or replay.target_path != str(target):
+                    if (
+                        replay.delivery_id != delivery_id
+                        or replay.artifact_id != artifact.artifact_id
+                        or replay.target_path != str(target)
+                    ):
                         raise ArtifactExportConflictError(
                             "Idempotency key is bound to another export preview"
                         )
                     return self._read(replay)
 
-                delivery, _, revision, source_path = await self._resolve_source(
-                    session, delivery_id
-                )
                 request_material = {
                     "schema_version": "deskpilot.artifact-export-request.v1",
                     "delivery_id": delivery.delivery_id,
                     "task_id": delivery.task_id,
-                    "artifact_id": delivery.artifact_id,
-                    "revision_id": delivery.revision_id,
+                    "artifact_id": artifact.artifact_id,
+                    "revision_id": revision.revision_id,
                     "target_path": str(target),
                     "conflict_policy": "fail_if_exists",
                     "source_digest": revision.content_digest,
@@ -106,8 +117,8 @@ class ArtifactExportRuntime:
                     export_id=export_id,
                     delivery_id=delivery.delivery_id,
                     task_id=delivery.task_id,
-                    artifact_id=delivery.artifact_id,
-                    revision_id=delivery.revision_id,
+                    artifact_id=artifact.artifact_id,
+                    revision_id=revision.revision_id,
                     target_path=str(target),
                     conflict_policy="fail_if_exists",
                     status="prepared",
@@ -168,18 +179,20 @@ class ArtifactExportRuntime:
                     raise ArtifactExportConflictError(
                         "Failed export cannot be retried without removing the conflict"
                     )
-            _, _, revision, source_path = await self._resolve_source(
-                session, record.delivery_id
+            _, _, artifact, revision, source_path = await self._resolve_source(
+                session, record.delivery_id, artifact_id=record.artifact_id
             )
             if (
-                revision.revision_id != record.revision_id
+                artifact.artifact_id != record.artifact_id
+                or revision.revision_id != record.revision_id
                 or revision.content_digest != record.source_digest
                 or revision.byte_count != record.byte_count
                 or self._file_digest(source_path) != record.source_digest
             ):
                 raise ArtifactExportProofRejectedError("Artifact export source drifted")
             if record.status == "prepared":
-                self._target_path(record.target_path, require_absent=True)
+                target = self._target_path(record.target_path, require_absent=True)
+                self._assert_target_media_type(target, revision.media_type)
                 record.status = "committing"
                 record.commit_key_digest = key_digest
                 record.error_code = None
@@ -258,10 +271,15 @@ class ArtifactExportRuntime:
             return tuple(self._read(item) for item in records)
 
     async def _resolve_source(
-        self, session: AsyncSession, delivery_id: str
+        self,
+        session: AsyncSession,
+        delivery_id: str,
+        *,
+        artifact_id: str | None,
     ) -> tuple[
         DeliveryManifestRead,
         TaskArtifactWorkspaceRecord,
+        ArtifactRecord,
         ArtifactRevisionRecord,
         Path,
     ]:
@@ -294,8 +312,13 @@ class ArtifactExportRuntime:
                 "Active Task Contract does not authorize user-path export"
             )
         workspace = await session.get(TaskArtifactWorkspaceRecord, delivery.workspace_id)
-        artifact = await session.get(ArtifactRecord, delivery.artifact_id)
-        revision = await session.get(ArtifactRevisionRecord, delivery.revision_id)
+        selected_artifact_id = artifact_id or delivery.artifact_id
+        artifact = await session.get(ArtifactRecord, selected_artifact_id)
+        revision = (
+            await session.get(ArtifactRevisionRecord, artifact.active_revision_id)
+            if artifact is not None and artifact.active_revision_id is not None
+            else None
+        )
         receipt = (
             await session.get(ArtifactPatchReceiptRecord, revision.patch_receipt_id)
             if revision is not None
@@ -312,6 +335,10 @@ class ArtifactExportRuntime:
             or artifact.workspace_id != workspace.workspace_id
             or artifact.active_revision_id != revision.revision_id
             or revision.artifact_id != artifact.artifact_id
+            or (
+                artifact.artifact_id == delivery.artifact_id
+                and revision.revision_id != delivery.revision_id
+            )
             or receipt.workspace_id != workspace.workspace_id
             or receipt.artifact_id != artifact.artifact_id
             or receipt.new_revision_id != revision.revision_id
@@ -335,8 +362,10 @@ class ArtifactExportRuntime:
             )
         except ValueError as error:
             raise ArtifactExportProofRejectedError("PatchReceipt proof drifted") from error
+        self._assert_pdf_render_proof(revision)
         source_path = self._blob_path(workspace.workspace_id, revision.blob_name)
-        return delivery, workspace, revision, source_path
+        self._assert_blob_media_type(source_path, revision.media_type)
+        return delivery, workspace, artifact, revision, source_path
 
     async def _mark_failed(self, export_id: str, error_code: str) -> None:
         async with self._database.session() as session, session.begin():
@@ -349,7 +378,10 @@ class ArtifactExportRuntime:
                 record.updated_at = utc_now()
 
     def _blob_path(self, workspace_id: str, blob_name: str) -> Path:
-        if PurePosixPath(blob_name).name != blob_name or not blob_name.endswith(".html"):
+        if (
+            PurePosixPath(blob_name).name != blob_name
+            or Path(blob_name).suffix.lower() not in {".html", ".md", ".pdf"}
+        ):
             raise ArtifactExportProofRejectedError("Artifact blob name is invalid")
         try:
             path = (self._workspace_root / workspace_id / "blobs" / blob_name).resolve(
@@ -365,8 +397,10 @@ class ArtifactExportRuntime:
         raw = Path(value).expanduser()
         if not raw.is_absolute() or raw.name in {"", ".", ".."}:
             raise ArtifactExportPathRejectedError("Export target must be an absolute file path")
-        if raw.suffix.lower() != ".html" or ":" in raw.name:
-            raise ArtifactExportPathRejectedError("Only an exact .html target is allowed")
+        if raw.suffix.lower() not in {".html", ".md", ".pdf"} or ":" in raw.name:
+            raise ArtifactExportPathRejectedError(
+                "Only an exact .html, .md, or .pdf target is allowed"
+            )
         try:
             parent = raw.parent.resolve(strict=True)
         except OSError as error:
@@ -381,6 +415,50 @@ class ArtifactExportRuntime:
                 "Export target already exists; overwrite is forbidden"
             )
         return target
+
+    @staticmethod
+    def _assert_target_media_type(target: Path, media_type: str) -> None:
+        expected = ArtifactExportRuntime._suffix_for_media_type(media_type)
+        if target.suffix.lower() != expected:
+            raise ArtifactExportPathRejectedError(
+                f"Selected Artifact requires an exact {expected} target"
+            )
+
+    @staticmethod
+    def _assert_blob_media_type(path: Path, media_type: str) -> None:
+        expected = ArtifactExportRuntime._suffix_for_media_type(media_type)
+        if path.suffix.lower() != expected:
+            raise ArtifactExportProofRejectedError("Artifact media type and blob suffix drifted")
+
+    @staticmethod
+    def _assert_pdf_render_proof(revision: ArtifactRevisionRecord) -> None:
+        if revision.media_type != "application/pdf":
+            if revision.render_evidence is not None or revision.render_evidence_digest is not None:
+                raise ArtifactExportProofRejectedError(
+                    "Non-PDF Artifact carries unexpected render evidence"
+                )
+            return
+        if revision.render_evidence is None or revision.render_evidence_digest is None:
+            raise ArtifactExportProofRejectedError("PDF render proof is missing")
+        try:
+            proof = PdfRenderVerificationRead.model_validate(revision.render_evidence)
+        except ValueError as error:
+            raise ArtifactExportProofRejectedError("PDF render proof drifted") from error
+        if (
+            proof.evidence_digest != revision.render_evidence_digest
+            or proof.source_digest != revision.content_digest
+        ):
+            raise ArtifactExportProofRejectedError("PDF render proof source drifted")
+
+    @staticmethod
+    def _suffix_for_media_type(media_type: str) -> Literal[".html", ".md", ".pdf"]:
+        if media_type == "application/pdf":
+            return ".pdf"
+        if media_type == "text/html":
+            return ".html"
+        if media_type == "text/markdown":
+            return ".md"
+        raise ArtifactExportProofRejectedError("Artifact media type is not exportable")
 
     @staticmethod
     def _has_link_component(path: Path) -> bool:

@@ -5,12 +5,12 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, select
+from sqlalchemy import create_engine, inspect, select, text
 
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0036_artifact_exports"
+CURRENT_REVISION = "0050_agent_graph_test_conditions"
 
 
 def _sync_url(path: Path) -> str:
@@ -28,6 +28,50 @@ def _alembic_config(path: Path) -> Config:
         f"sqlite+aiosqlite:///{path.as_posix()}",
     )
     return config
+
+
+def _assert_populated_downgrade_refused(
+    database_path: Path,
+    config: Config,
+    *,
+    revision: str,
+    target_revision: str,
+    insert_statement: str,
+    parameters: dict[str, object],
+    snapshot_statement: str,
+    cleanup_statement: str,
+) -> None:
+    engine = create_engine(_sync_url(database_path))
+    with engine.begin() as connection:
+        connection.execute(text(insert_statement), parameters)
+    with engine.connect() as connection:
+        before = [
+            tuple(row)
+            for row in connection.execute(text(snapshot_statement), parameters)
+        ]
+    assert before
+    engine.dispose()
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"DESKPILOT_DOWNGRADE_UNSAFE.*Restore the reviewed stage backup",
+    ):
+        command.downgrade(config, target_revision)
+
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        after_revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+        after = [
+            tuple(row)
+            for row in connection.execute(text(snapshot_statement), parameters)
+        ]
+    assert after_revision == revision
+    assert after == before
+    with engine.begin() as connection:
+        connection.execute(text(cleanup_statement), parameters)
+    engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -94,6 +138,12 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
             "model_provider_runtime_configs",
             "model_provider_config_audit_events",
             "model_provider_idempotency_records",
+            "workbench_runtime_items",
+            "agent_delegations",
+            "agent_task_graphs",
+            "agent_task_graph_nodes",
+            "agent_replans",
+            "workspace_agent_results",
         }.issubset(inspector.get_table_names())
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
@@ -691,6 +741,83 @@ def test_stage_42_migration_round_trips_and_matches_model_metadata(
 
     command.upgrade(config, "head")
     command.check(config)
+
+
+def test_stage_101_dynamic_patch_approval_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-101-dynamic-patch-approval.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        node_columns = {
+            item["name"] for item in inspector.get_columns("agent_task_graph_nodes")
+        }
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspector.get_check_constraints("workspace_agent_results")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {"approval_manifest", "approval_digest"}.issubset(node_columns)
+    assert "patch_test" in constraints["ck_workspace_agent_result_kind"]
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0049_agent_graph_patch_approvals")
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0049_agent_graph_patch_approvals",
+        target_revision="0048_agent_test_capability_inputs",
+        insert_statement="""
+            INSERT INTO workspace_agent_results (
+                invocation_id, run_id, result_kind, manifest, result_digest, created_at
+            ) VALUES (
+                :row_id, :run_id, 'patch_test', :manifest, :digest, :created_at
+            )
+        """,
+        parameters={
+            "row_id": "invocation-stage-101-proof",
+            "run_id": "run-stage-101-proof",
+            "manifest": '{"approved":true}',
+            "digest": "a" * 64,
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT invocation_id, run_id, result_kind, manifest, result_digest
+            FROM workspace_agent_results WHERE invocation_id = :row_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM workspace_agent_results WHERE invocation_id = :row_id"
+        ),
+    )
+
+    command.downgrade(config, "0048_agent_test_capability_inputs")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        node_columns = {
+            item["name"] for item in inspector.get_columns("agent_task_graph_nodes")
+        }
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspector.get_check_constraints("workspace_agent_results")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert not {"approval_manifest", "approval_digest"} & node_columns
+    assert "patch_test" not in constraints["ck_workspace_agent_result_kind"]
+    assert revision == "0048_agent_test_capability_inputs"
+
+    command.upgrade(config, "head")
+    command.check(config)
+
     command.downgrade(config, "0015_database_claims_dag")
 
     engine = create_engine(_sync_url(database_path))
@@ -711,6 +838,100 @@ def test_stage_42_migration_round_trips_and_matches_model_metadata(
         ).scalar_one()
     engine.dispose()
     assert revision == CURRENT_REVISION
+
+
+def test_stage_102_graph_test_condition_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-102-graph-test-condition.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        columns = {item["name"] for item in inspector.get_columns("task_execution_edges")}
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspector.get_check_constraints("task_execution_edges")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {
+        "condition_manifest",
+        "condition_digest",
+        "decision_manifest",
+        "decision_digest",
+    }.issubset(columns)
+    assert "server_condition" in constraints["ck_execution_edge_requirement"]
+    assert revision == CURRENT_REVISION
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0049_agent_graph_patch_approvals",
+        insert_statement="""
+            INSERT INTO task_execution_edges (
+                run_id, from_node_id, to_node_id, requirement,
+                condition_manifest, condition_digest,
+                decision_manifest, decision_digest
+            ) VALUES (
+                :run_id, :from_node_id, :to_node_id, 'server_condition',
+                :condition_manifest, :condition_digest,
+                :decision_manifest, :decision_digest
+            )
+        """,
+        parameters={
+            "run_id": "run-stage-102-proof",
+            "from_node_id": "node-stage-102-from",
+            "to_node_id": "node-stage-102-to",
+            "condition_manifest": '{"result_kind":"python_test"}',
+            "condition_digest": "b" * 64,
+            "decision_manifest": '{"satisfied":false}',
+            "decision_digest": "c" * 64,
+        },
+        snapshot_statement="""
+            SELECT requirement, condition_manifest, condition_digest,
+                   decision_manifest, decision_digest
+            FROM task_execution_edges
+            WHERE run_id = :run_id
+              AND from_node_id = :from_node_id
+              AND to_node_id = :to_node_id
+        """,
+        cleanup_statement="""
+            DELETE FROM task_execution_edges
+            WHERE run_id = :run_id
+              AND from_node_id = :from_node_id
+              AND to_node_id = :to_node_id
+        """,
+    )
+
+    command.downgrade(config, "0049_agent_graph_patch_approvals")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        columns = {item["name"] for item in inspector.get_columns("task_execution_edges")}
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspector.get_check_constraints("task_execution_edges")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {
+        "condition_manifest",
+        "condition_digest",
+        "decision_manifest",
+        "decision_digest",
+    }.isdisjoint(columns)
+    assert "server_condition" not in constraints["ck_execution_edge_requirement"]
+    assert revision == "0049_agent_graph_patch_approvals"
+
+    command.upgrade(config, "head")
+    command.check(config)
 
 
 def test_stage_44_branch_decision_migration_round_trips(tmp_path: Path) -> None:
@@ -1394,6 +1615,910 @@ def test_stage_76_artifact_export_migration_round_trips(tmp_path: Path) -> None:
     with engine.connect() as connection:
         assert "artifact_exports" not in inspect(connection).get_table_names()
     engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_78_turn_route_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-78-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert "turn_routes" in inspect(connection).get_table_names()
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0037_turn_routes")
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0037_turn_routes",
+        target_revision="0036_artifact_exports",
+        insert_statement="""
+            INSERT INTO turn_routes (
+                task_id, conversation_id, user_message_id, decision,
+                candidate_digest, parameters, parameter_digest, reason_code,
+                status, revision, created_at, updated_at
+            ) VALUES (
+                :row_id, :conversation_id, :message_id, 'unsupported',
+                :digest, :parameters, :digest, 'NO_ROUTE_MATCHED',
+                'not_applicable', 1, :created_at, :created_at
+            )
+        """,
+        parameters={
+            "row_id": "task-stage-78-proof",
+            "conversation_id": "conversation-stage-78-proof",
+            "message_id": "message-stage-78-proof",
+            "digest": "7" * 64,
+            "parameters": "{}",
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT task_id, decision, candidate_digest, parameter_digest,
+                   reason_code, status, revision
+            FROM turn_routes WHERE task_id = :row_id
+        """,
+        cleanup_statement="DELETE FROM turn_routes WHERE task_id = :row_id",
+    )
+
+    command.downgrade(config, "0036_artifact_exports")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert "turn_routes" not in inspect(connection).get_table_names()
+        assert "artifact_exports" in inspect(connection).get_table_names()
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_86_pdf_render_evidence_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-86-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        columns = {item["name"] for item in inspect(connection).get_columns("artifact_revisions")}
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {"render_evidence", "render_evidence_digest"}.issubset(columns)
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0038_pdf_render_evidence")
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0038_pdf_render_evidence",
+        target_revision="0037_turn_routes",
+        insert_statement="""
+            INSERT INTO artifact_revisions (
+                revision_id, artifact_id, revision_no, media_type,
+                content_digest, byte_count, blob_name, patch_receipt_id,
+                created_at, render_evidence, render_evidence_digest
+            ) VALUES (
+                :row_id, :artifact_id, 1, 'application/pdf',
+                :content_digest, 1, :blob_name, :patch_receipt_id,
+                :created_at, :render_evidence, :render_evidence_digest
+            )
+        """,
+        parameters={
+            "row_id": "revision-stage-86-proof",
+            "artifact_id": "artifact-stage-86-proof",
+            "content_digest": "8" * 64,
+            "blob_name": "stage-86-proof.pdf",
+            "patch_receipt_id": "receipt-stage-86-proof",
+            "created_at": "2026-08-24 00:00:00+00:00",
+            "render_evidence": '{"pages":1}',
+            "render_evidence_digest": "9" * 64,
+        },
+        snapshot_statement="""
+            SELECT revision_id, render_evidence, render_evidence_digest
+            FROM artifact_revisions WHERE revision_id = :row_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM artifact_revisions WHERE revision_id = :row_id"
+        ),
+    )
+
+    command.downgrade(config, "0037_turn_routes")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        columns = {item["name"] for item in inspect(connection).get_columns("artifact_revisions")}
+    engine.dispose()
+    assert not {"render_evidence", "render_evidence_digest"} & columns
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_88_turn_route_resolution_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-88-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        columns = {item["name"] for item in inspect(connection).get_columns("turn_routes")}
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {
+        "resolved_from_task_id",
+        "resolution_rule",
+        "resolution_digest",
+    }.issubset(columns)
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0039_turn_route_resolutions")
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0039_turn_route_resolutions",
+        target_revision="0038_pdf_render_evidence",
+        insert_statement="""
+            INSERT INTO turn_routes (
+                task_id, conversation_id, user_message_id, decision,
+                candidate_digest, parameters, parameter_digest, reason_code,
+                status, revision, created_at, updated_at,
+                resolved_from_task_id, resolution_rule, resolution_digest
+            ) VALUES (
+                :row_id, :conversation_id, :message_id, 'routed',
+                :digest, :parameters, :digest, 'ROUTE_RESOLVED',
+                'ready', 1, :created_at, :created_at,
+                :source_task_id, 'clarification.v1', :resolution_digest
+            )
+        """,
+        parameters={
+            "row_id": "task-stage-88-proof",
+            "conversation_id": "conversation-stage-88-proof",
+            "message_id": "message-stage-88-proof",
+            "source_task_id": "task-stage-88-source",
+            "digest": "a" * 64,
+            "parameters": "{}",
+            "resolution_digest": "b" * 64,
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT task_id, resolved_from_task_id, resolution_rule,
+                   resolution_digest
+            FROM turn_routes WHERE task_id = :row_id
+        """,
+        cleanup_statement="DELETE FROM turn_routes WHERE task_id = :row_id",
+    )
+
+    command.downgrade(config, "0038_pdf_render_evidence")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        columns = {item["name"] for item in inspect(connection).get_columns("turn_routes")}
+    engine.dispose()
+    assert (
+        not {
+            "resolved_from_task_id",
+            "resolution_rule",
+            "resolution_digest",
+        }
+        & columns
+    )
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_89_durable_agent_model_loop_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-89-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {
+        "model_dispatch_attempts",
+        "agent_decisions",
+        "agent_observations",
+    }.issubset(tables)
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0040_durable_agent_model_loop")
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0040_durable_agent_model_loop",
+        target_revision="0039_turn_route_resolutions",
+        insert_statement="""
+            INSERT INTO model_dispatch_attempts (
+                dispatch_attempt_id, turn_id, attempt_no, status,
+                provider_id, model, request_digest, input_tokens,
+                output_tokens, cost_micros, claim_owner_id,
+                claim_fencing_token, created_at, updated_at
+            ) VALUES (
+                :row_id, :turn_id, 1, 'prepared',
+                'local', 'proof-model', :digest, 0,
+                0, 0, 'worker-stage-89', 1, :created_at, :created_at
+            )
+        """,
+        parameters={
+            "row_id": "dispatch-stage-89-proof",
+            "turn_id": "turn-stage-89-proof",
+            "digest": "c" * 64,
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT dispatch_attempt_id, turn_id, status, request_digest,
+                   claim_owner_id, claim_fencing_token
+            FROM model_dispatch_attempts WHERE dispatch_attempt_id = :row_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM model_dispatch_attempts WHERE dispatch_attempt_id = :row_id"
+        ),
+    )
+
+    command.downgrade(config, "0039_turn_route_resolutions")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+    engine.dispose()
+    assert (
+        not {
+            "model_dispatch_attempts",
+            "agent_decisions",
+            "agent_observations",
+        }
+        & tables
+    )
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_90_agent_input_request_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-90-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert "agent_input_requests" in tables
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0041_agent_input_requests")
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0041_agent_input_requests",
+        target_revision="0040_durable_agent_model_loop",
+        insert_statement="""
+            INSERT INTO agent_input_requests (
+                input_request_id, invocation_id, decision_id, question_code,
+                question, blocking_fields, answer_schema, request_digest,
+                status, created_at
+            ) VALUES (
+                :row_id, :invocation_id, :decision_id, 'workspace_path',
+                'Which workspace?', :blocking_fields, 'workspace_path.v1',
+                :digest, 'pending', :created_at
+            )
+        """,
+        parameters={
+            "row_id": "input-stage-90-proof",
+            "invocation_id": "invocation-stage-90-proof",
+            "decision_id": "decision-stage-90-proof",
+            "blocking_fields": '["workspace_path"]',
+            "digest": "d" * 64,
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT input_request_id, invocation_id, decision_id, request_digest, status
+            FROM agent_input_requests WHERE input_request_id = :row_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM agent_input_requests WHERE input_request_id = :row_id"
+        ),
+    )
+
+    command.downgrade(config, "0040_durable_agent_model_loop")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert "agent_input_requests" not in inspect(connection).get_table_names()
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_91_workbench_runtime_item_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-91-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert "workbench_runtime_items" in inspect(connection).get_table_names()
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0042_workbench_runtime_items")
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0042_workbench_runtime_items",
+        target_revision="0041_agent_input_requests",
+        insert_statement="""
+            INSERT INTO workbench_runtime_items (
+                work_item_id, task_id, action, status, revision,
+                attempt_count, consecutive_failure_count, available_at,
+                claim_fencing_token, created_at, updated_at
+            ) VALUES (
+                :row_id, :task_id, 'advance', 'pending', 1,
+                0, 0, :created_at, 0, :created_at, :created_at
+            )
+        """,
+        parameters={
+            "row_id": "work-item-stage-91-proof",
+            "task_id": "task-stage-91-proof",
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT work_item_id, task_id, status, revision,
+                   attempt_count, consecutive_failure_count,
+                   claim_fencing_token
+            FROM workbench_runtime_items WHERE work_item_id = :row_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM workbench_runtime_items WHERE work_item_id = :row_id"
+        ),
+    )
+
+    command.downgrade(config, "0041_agent_input_requests")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert "workbench_runtime_items" not in inspect(connection).get_table_names()
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_93_agent_delegation_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-93-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        tables = set(inspector.get_table_names())
+        node_columns = {item["name"] for item in inspector.get_columns("task_execution_nodes")}
+        invocation_columns = {item["name"] for item in inspector.get_columns("agent_invocations")}
+        delegation_columns = {item["name"] for item in inspector.get_columns("agent_delegations")}
+    engine.dispose()
+    assert "agent_delegations" in tables
+    assert "handoff_parent_node_id" in node_columns
+    assert "parent_invocation_id" in invocation_columns
+    assert {
+        "delegation_id",
+        "parent_invocation_id",
+        "child_invocation_id",
+        "decision_id",
+        "binding_id",
+        "status",
+        "depth",
+        "proposal_digest",
+        "budget_allocation",
+        "child_result_id",
+        "observation_id",
+    }.issubset(delegation_columns)
+
+    command.downgrade(config, "0043_agent_delegations")
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0043_agent_delegations",
+        target_revision="0042_workbench_runtime_items",
+        insert_statement="""
+            INSERT INTO agent_delegations (
+                delegation_id, run_id, parent_invocation_id, parent_node_id,
+                child_node_id, decision_id, binding_id, status, depth,
+                proposal_manifest, proposal_digest, budget_allocation,
+                created_at, updated_at
+            ) VALUES (
+                :row_id, :run_id, :parent_invocation_id, :parent_node_id,
+                :child_node_id, :decision_id, :binding_id, 'waiting_child', 1,
+                :proposal_manifest, :proposal_digest, :budget_allocation,
+                :created_at, :updated_at
+            )
+        """,
+        parameters={
+            "row_id": "delegation-stage-93-proof",
+            "run_id": "run-stage-93-proof",
+            "parent_invocation_id": "invocation-stage-93-parent",
+            "parent_node_id": "node-stage-93-parent",
+            "child_node_id": "node-stage-93-child",
+            "decision_id": "decision-stage-93-proof",
+            "binding_id": "binding-stage-93-proof",
+            "proposal_manifest": '{"agent":"workspace_reader"}',
+            "proposal_digest": "e" * 64,
+            "budget_allocation": '{"max_turns":1}',
+            "created_at": "2026-08-24 00:00:00+00:00",
+            "updated_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT delegation_id, status, proposal_manifest, proposal_digest,
+                   budget_allocation
+            FROM agent_delegations WHERE delegation_id = :row_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM agent_delegations WHERE delegation_id = :row_id"
+        ),
+    )
+
+    command.downgrade(config, "0042_workbench_runtime_items")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        assert "agent_delegations" not in inspector.get_table_names()
+        assert "handoff_parent_node_id" not in {
+            item["name"] for item in inspector.get_columns("task_execution_nodes")
+        }
+        assert "parent_invocation_id" not in {
+            item["name"] for item in inspector.get_columns("agent_invocations")
+        }
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_94_agent_task_graph_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-94-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        tables = set(inspector.get_table_names())
+        graph_columns = {item["name"] for item in inspector.get_columns("agent_task_graphs")}
+        graph_node_columns = {
+            item["name"] for item in inspector.get_columns("agent_task_graph_nodes")
+        }
+        decision_check = next(
+            item["sqltext"]
+            for item in inspector.get_check_constraints("agent_decisions")
+            if item["name"] == "ck_agent_decision_kind"
+        )
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {
+        "agent_task_graphs",
+        "agent_task_graph_nodes",
+        "workspace_agent_results",
+    }.issubset(tables)
+    assert {
+        "graph_id",
+        "parent_invocation_id",
+        "decision_id",
+        "binding_id",
+        "status",
+        "manifest",
+        "graph_digest",
+        "node_count",
+        "max_depth",
+        "observation_id",
+    }.issubset(graph_columns)
+    assert {
+        "graph_id",
+        "local_key",
+        "child_node_id",
+        "child_invocation_id",
+        "binding_id",
+        "status",
+        "budget_allocation",
+        "child_result_id",
+    }.issubset(graph_node_columns)
+    assert "propose_task_graph" in decision_check
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0044_agent_task_graphs")
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0044_agent_task_graphs",
+        target_revision="0043_agent_delegations",
+        insert_statement="""
+            INSERT INTO workspace_agent_results (
+                invocation_id, run_id, result_kind, manifest, result_digest, created_at
+            ) VALUES (
+                :row_id, :run_id, 'file', :manifest, :digest, :created_at
+            )
+        """,
+        parameters={
+            "row_id": "invocation-stage-94-proof",
+            "run_id": "run-stage-94-proof",
+            "manifest": '{"path":"proof.txt"}',
+            "digest": "f" * 64,
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT invocation_id, run_id, result_kind, manifest, result_digest
+            FROM workspace_agent_results WHERE invocation_id = :row_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM workspace_agent_results WHERE invocation_id = :row_id"
+        ),
+    )
+
+    command.downgrade(config, "0043_agent_delegations")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        tables = set(inspector.get_table_names())
+        decision_check = next(
+            item["sqltext"]
+            for item in inspector.get_check_constraints("agent_decisions")
+            if item["name"] == "ck_agent_decision_kind"
+        )
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert (
+        not {
+            "agent_task_graphs",
+            "agent_task_graph_nodes",
+            "workspace_agent_results",
+        }
+        & tables
+    )
+    assert "propose_task_graph" not in decision_check
+    assert revision == "0043_agent_delegations"
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_95_agent_task_graph_result_ref_migration_round_trips(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-95-result-ref-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    command.downgrade(config, "0045_agent_task_graph_result_refs")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        graph_columns = {
+            item["name"] for item in inspector.get_columns("agent_task_graphs")
+        }
+        node_columns = {
+            item["name"] for item in inspector.get_columns("agent_task_graph_nodes")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {"output_local_key", "output_node_id"}.issubset(graph_columns)
+    assert {"result_ref_manifest", "result_ref_digest"}.issubset(node_columns)
+    assert revision == "0045_agent_task_graph_result_refs"
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0045_agent_task_graph_result_refs",
+        target_revision="0044_agent_task_graphs",
+        insert_statement="""
+            INSERT INTO agent_task_graphs (
+                graph_id, run_id, parent_invocation_id, parent_node_id,
+                decision_id, binding_id, status, manifest, graph_digest,
+                node_count, max_depth, created_at, updated_at,
+                output_local_key, output_node_id
+            ) VALUES (
+                :row_id, :run_id, :parent_invocation_id, :parent_node_id,
+                :decision_id, :binding_id, 'running', :manifest, :digest,
+                1, 1, :created_at, :created_at,
+                'result', :output_node_id
+            )
+        """,
+        parameters={
+            "row_id": "graph-stage-95-proof",
+            "run_id": "run-stage-95-proof",
+            "parent_invocation_id": "invocation-stage-95-parent",
+            "parent_node_id": "node-stage-95-parent",
+            "decision_id": "decision-stage-95-proof",
+            "binding_id": "binding-stage-95-proof",
+            "manifest": '{"nodes":["result"]}',
+            "digest": "d" * 64,
+            "output_node_id": "node-stage-95-output",
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT graph_id, output_local_key, output_node_id, graph_digest
+            FROM agent_task_graphs WHERE graph_id = :row_id
+        """,
+        cleanup_statement="DELETE FROM agent_task_graphs WHERE graph_id = :row_id",
+    )
+
+    command.downgrade(config, "0044_agent_task_graphs")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        graph_columns = {
+            item["name"] for item in inspector.get_columns("agent_task_graphs")
+        }
+        node_columns = {
+            item["name"] for item in inspector.get_columns("agent_task_graph_nodes")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert not {"output_local_key", "output_node_id"} & graph_columns
+    assert not {"result_ref_manifest", "result_ref_digest"} & node_columns
+    assert revision == "0044_agent_task_graphs"
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_96_agent_task_graph_capability_input_migration_round_trips(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-96-capability-input-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    command.downgrade(config, "0046_agent_task_graph_capability_inputs")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        columns = {
+            item["name"] for item in inspect(connection).get_columns("agent_task_graph_nodes")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {"input_manifest", "input_digest"}.issubset(columns)
+    assert revision == "0046_agent_task_graph_capability_inputs"
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0046_agent_task_graph_capability_inputs",
+        target_revision="0045_agent_task_graph_result_refs",
+        insert_statement="""
+            INSERT INTO agent_task_graph_nodes (
+                graph_id, local_key, child_node_id, binding_id, status,
+                budget_allocation, created_at, updated_at,
+                input_manifest, input_digest
+            ) VALUES (
+                :graph_id, :row_id, :child_node_id, :binding_id,
+                'waiting_child', :budget_allocation, :created_at, :created_at,
+                :input_manifest, :input_digest
+            )
+        """,
+        parameters={
+            "graph_id": "graph-stage-96-proof",
+            "row_id": "node-stage-96-proof",
+            "child_node_id": "child-node-stage-96-proof",
+            "binding_id": "binding-stage-96-proof",
+            "budget_allocation": '{"max_turns":1}',
+            "input_manifest": '{"path":"README.md"}',
+            "input_digest": "e" * 64,
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT graph_id, local_key, input_manifest, input_digest
+            FROM agent_task_graph_nodes
+            WHERE graph_id = :graph_id AND local_key = :row_id
+        """,
+        cleanup_statement="""
+            DELETE FROM agent_task_graph_nodes
+            WHERE graph_id = :graph_id AND local_key = :row_id
+        """,
+    )
+
+    command.downgrade(config, "0045_agent_task_graph_result_refs")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        columns = {
+            item["name"] for item in inspect(connection).get_columns("agent_task_graph_nodes")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert not {"input_manifest", "input_digest"} & columns
+    assert revision == "0045_agent_task_graph_result_refs"
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_97_agent_replan_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-97-agent-replan-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    command.downgrade(config, "0047_agent_replans")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        columns = {item["name"] for item in inspector.get_columns("agent_replans")}
+        indexes = {item["name"] for item in inspector.get_indexes("agent_replans")}
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {
+        "replan_id",
+        "task_id",
+        "source_run_id",
+        "source_plan_generation",
+        "source_plan_digest",
+        "target_run_id",
+        "target_plan_generation",
+        "target_plan_digest",
+        "contract_version",
+        "contract_digest",
+        "status",
+        "manifest",
+        "replan_digest",
+        "created_at",
+    } == columns
+    assert "ix_agent_replans_task" in indexes
+    assert revision == "0047_agent_replans"
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0047_agent_replans",
+        target_revision="0046_agent_task_graph_capability_inputs",
+        insert_statement="""
+            INSERT INTO agent_replans (
+                replan_id, task_id, source_run_id, source_plan_generation,
+                source_plan_digest, target_run_id, target_plan_generation,
+                target_plan_digest, contract_version, contract_digest,
+                status, manifest, replan_digest, created_at
+            ) VALUES (
+                :row_id, :task_id, :source_run_id, 1,
+                :source_digest, :target_run_id, 2,
+                :target_digest, 1, :contract_digest,
+                'activated', :manifest, :replan_digest, :created_at
+            )
+        """,
+        parameters={
+            "row_id": "replan-stage-97-proof",
+            "task_id": "task-stage-97-proof",
+            "source_run_id": "run-stage-97-source",
+            "source_digest": "f" * 64,
+            "target_run_id": "run-stage-97-target",
+            "target_digest": "0" * 64,
+            "contract_digest": "1" * 64,
+            "manifest": '{"reason":"proof"}',
+            "replan_digest": "2" * 64,
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT replan_id, source_run_id, source_plan_generation,
+                   target_run_id, target_plan_generation, replan_digest
+            FROM agent_replans WHERE replan_id = :row_id
+        """,
+        cleanup_statement="DELETE FROM agent_replans WHERE replan_id = :row_id",
+    )
+
+    command.downgrade(config, "0046_agent_task_graph_capability_inputs")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert "agent_replans" not in tables
+    assert revision == "0046_agent_task_graph_capability_inputs"
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_98_agent_test_result_kind_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-98-agent-test-result-kind.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspect(connection).get_check_constraints("workspace_agent_results")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert "python_test" in constraints["ck_workspace_agent_result_kind"]
+    assert "node_test" in constraints["ck_workspace_agent_result_kind"]
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0048_agent_test_capability_inputs")
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0048_agent_test_capability_inputs",
+        target_revision="0047_agent_replans",
+        insert_statement="""
+            INSERT INTO workspace_agent_results (
+                invocation_id, run_id, result_kind, manifest, result_digest, created_at
+            ) VALUES (
+                :row_id, :run_id, 'python_test', :manifest, :digest, :created_at
+            )
+        """,
+        parameters={
+            "row_id": "invocation-stage-98-proof",
+            "run_id": "run-stage-98-proof",
+            "manifest": '{"passed":false}',
+            "digest": "0" * 64,
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT invocation_id, run_id, result_kind, manifest, result_digest
+            FROM workspace_agent_results WHERE invocation_id = :row_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM workspace_agent_results WHERE invocation_id = :row_id"
+        ),
+    )
+
+    command.downgrade(config, "0047_agent_replans")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspect(connection).get_check_constraints("workspace_agent_results")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert "python_test" not in constraints["ck_workspace_agent_result_kind"]
+    assert "node_test" not in constraints["ck_workspace_agent_result_kind"]
+    assert revision == "0047_agent_replans"
 
     command.upgrade(config, "head")
     command.check(config)

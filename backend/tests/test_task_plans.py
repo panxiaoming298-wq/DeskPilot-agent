@@ -17,9 +17,28 @@ from deskpilot.application.plan_compiler import (
     PlanCapabilityMismatchError,
     PlanCompiler,
     PlanPrivacyConflictError,
+    knowledge_lookup_contract,
+    knowledge_lookup_draft,
+    mcp_text_metrics_contract,
+    mcp_text_metrics_draft,
     research_to_html_contract,
     research_to_html_draft,
+    workspace_agent_patch_test_contract,
+    workspace_agent_patch_test_draft,
+    workspace_directory_list_contract,
+    workspace_directory_list_draft,
+    workspace_dynamic_patch_test_contract,
+    workspace_dynamic_patch_test_draft,
+    workspace_file_read_contract,
+    workspace_file_read_draft,
+    workspace_node_test_contract,
+    workspace_node_test_draft,
+    workspace_python_test_contract,
+    workspace_python_test_draft,
+    workspace_snapshot_check_contract,
+    workspace_snapshot_check_draft,
 )
+from deskpilot.domain.agent_replanning import classify_agent_replan_continuation
 from deskpilot.domain.task_plans import DraftPlan, TurnInterpretation
 from deskpilot.domain.tool_contracts import ToolRiskLevel
 from deskpilot.infrastructure.models import TaskPlanGenerationRecord
@@ -35,6 +54,24 @@ def _compiler() -> tuple[PlanCompiler, CapabilityCatalog]:
     )
     capabilities = create_builtin_capability_catalog()
     return PlanCompiler(agents, tools, capabilities), capabilities
+
+
+@pytest.mark.parametrize(
+    ("message", "accepted"),
+    [
+        ("继续修复", True),
+        (" 重新规划并继续修复！ ", True),
+        ("continue repair", True),
+        ("继续", False),
+        ("再试一次", False),
+        ("修复", False),
+    ],
+)
+def test_patch_replan_continuation_requires_explicit_intent(
+    message: str,
+    accepted: bool,
+) -> None:
+    assert (classify_agent_replan_continuation(message) is not None) is accepted
 
 
 def _replace_node(draft: DraftPlan, key: str, **updates: Any) -> DraftPlan:
@@ -71,10 +108,199 @@ def test_research_to_html_fixture_is_sealed_deterministic_and_not_runnable() -> 
     }
     assert enabled == {
         ("artifact.html.v1", "1.1.0"),
+        ("artifact.html.v1", "1.2.0"),
         ("browser.verify.v1", "1.1.0"),
+        ("knowledge.local.v1", "1.0.0"),
+        ("mcp.text.metrics.v1", "1.0.0"),
+        ("workspace.file.read.v1", "1.0.0"),
+        ("workspace.file.replace.v1", "1.0.0"),
+        ("workspace.file.create.v1", "1.0.0"),
+        ("workspace.file.rename.v1", "1.0.0"),
+        ("workspace.patch.bundle.v1", "1.0.0"),
+        ("workspace.patch.propose.v1", "1.0.0"),
+        ("workspace.directory.read.v1", "1.0.0"),
+        ("workspace.snapshot.check.v1", "1.0.0"),
+        ("workspace.python.test.v1", "1.0.0"),
+        ("workspace.node.test.v1", "1.0.0"),
     }
     assert len(first.acceptance_coverage) == len(contract.acceptance_criteria)
     compiler.validate_manifest(first)
+
+
+@pytest.mark.parametrize(
+    ("contract_factory", "draft_factory", "node_key"),
+    (
+        (knowledge_lookup_contract, knowledge_lookup_draft, "knowledge_lookup"),
+        (mcp_text_metrics_contract, mcp_text_metrics_draft, "mcp_text_metrics"),
+        (
+            workspace_directory_list_contract,
+            workspace_directory_list_draft,
+            "workspace_directory_list",
+        ),
+        (
+            workspace_snapshot_check_contract,
+            workspace_snapshot_check_draft,
+            "workspace_snapshot_check",
+        ),
+        (
+            workspace_python_test_contract,
+            workspace_python_test_draft,
+            "workspace_python_test",
+        ),
+        (
+            workspace_node_test_contract,
+            workspace_node_test_draft,
+            "workspace_node_test",
+        ),
+    ),
+)
+def test_phase_78_direct_route_plans_are_sealed_and_runtime_enabled(
+    contract_factory: Any,
+    draft_factory: Any,
+    node_key: str,
+) -> None:
+    compiler, capabilities = _compiler()
+    task_id = f"tsk_{'8' * 32}"
+    contract = contract_factory(task_id, capabilities)
+    plan = compiler.compile(contract, draft_factory(task_id), generation=1)
+
+    assert plan.runtime_enabled is True
+    expected_nodes = {
+        node_key,
+        "final_acceptance",
+        "delivery",
+    }
+    assert {node.local_key for node in plan.nodes} == expected_nodes
+    compiler.validate_manifest(plan)
+
+
+@pytest.mark.parametrize(
+    ("contract_factory", "draft_factory", "node_key", "capability_id"),
+    (
+        (
+            workspace_file_read_contract,
+            workspace_file_read_draft,
+            "workspace_file_read",
+            "workspace.file.read.v1",
+        ),
+        (
+            workspace_directory_list_contract,
+            workspace_directory_list_draft,
+            "workspace_directory_list",
+            "workspace.directory.read.v1",
+        ),
+    ),
+)
+def test_workspace_read_plans_bind_versioned_agent_loop(
+    contract_factory: Any,
+    draft_factory: Any,
+    node_key: str,
+    capability_id: str,
+) -> None:
+    compiler, capabilities = _compiler()
+    task_id = f"tsk_{'9' * 32}"
+    plan = compiler.compile(
+        contract_factory(task_id, capabilities), draft_factory(task_id), generation=1
+    )
+    node = next(item for item in plan.nodes if item.local_key == node_key)
+
+    assert node.bound_agent is not None
+    expected_agent = (
+        "builtin.workspace_coordinator"
+        if node_key == "workspace_directory_list"
+        else "builtin.workspace_reader"
+    )
+    assert node.bound_agent.agent_id == expected_agent
+    assert node.bound_agent.version == (
+        "1.1.0" if node_key == "workspace_directory_list" else "1.2.0"
+    )
+    if node_key == "workspace_directory_list":
+        assert all(item.handoff_parent_node_id is None for item in plan.nodes)
+        assert node.capability is None
+    else:
+        assert node.capability is not None
+        assert node.capability.capability_id == capability_id
+    assert node.budget.model_calls == 2
+    assert node.budget.tool_calls == (
+        0 if node_key == "workspace_directory_list" else 1
+    )
+    assert node.budget.handoffs == (
+        4 if node_key == "workspace_directory_list" else 0
+    )
+
+
+def test_workspace_agent_patch_plan_has_proposal_only_agent_and_fixed_test_contract() -> None:
+    compiler, capabilities = _compiler()
+    task_id = f"tsk_{'a' * 32}"
+    contract = workspace_agent_patch_test_contract(
+        task_id,
+        capabilities,
+        test_kind="python",
+    )
+    plan = compiler.compile(
+        contract,
+        workspace_agent_patch_test_draft(task_id),
+        generation=1,
+    )
+    node = next(item for item in plan.nodes if item.local_key == "workspace_agent_patch_test")
+
+    assert plan.runtime_enabled is True
+    assert node.bound_agent is not None
+    assert node.bound_agent.agent_id == "builtin.workspace_patch_planner"
+    assert node.bound_agent.version == "1.0.0"
+    assert node.capability is not None
+    assert node.capability.capability_id == "workspace.patch.propose.v1"
+    assert {item.capability_id for item in contract.capabilities} == {
+        "workspace.file.read.v1",
+        "workspace.patch.propose.v1",
+        "workspace.patch.bundle.v1",
+        "workspace.python.test.v1",
+    }
+    assert "explicit_user_patch_confirmation_v1" in contract.constraints
+    compiler.validate_manifest(plan)
+
+
+def test_dynamic_patch_plan_delegates_only_inside_server_adjudicated_graph() -> None:
+    compiler, capabilities = _compiler()
+    task_id = f"tsk_{'b' * 32}"
+    contract = workspace_dynamic_patch_test_contract(
+        task_id,
+        capabilities,
+        test_kind="python",
+    )
+    plan = compiler.compile(
+        contract,
+        workspace_dynamic_patch_test_draft(task_id),
+        generation=1,
+    )
+    parent = next(item for item in plan.nodes if item.local_key == "workspace_dynamic_patch_test")
+
+    assert parent.bound_agent is not None
+    assert parent.bound_agent.agent_id == "builtin.workspace_coordinator"
+    assert parent.bound_agent.version == "1.1.0"
+    assert parent.capability is None
+    assert contract.max_risk_level is ToolRiskLevel.R1
+    assert {item.capability_id for item in contract.capabilities} == {
+        "workspace.directory.read.v1",
+        "workspace.file.read.v1",
+        "workspace.patch.propose.v1",
+        "workspace.patch.bundle.v1",
+        "workspace.python.test.v1",
+    }
+    assert "dynamic_patch_approval_node_v1" in contract.constraints
+    assert "fresh_confirmation_per_patch_node_v1" in contract.constraints
+    assert "composable_patch_approval_nodes_v1" in contract.constraints
+    assert "distinct_server_bound_patch_input_per_node_v1" in contract.constraints
+    assert "server_adjudicated_test_conditions_v1" in contract.constraints
+    assert "no_automatic_replan_after_workspace_write_v1" in contract.constraints
+    assert "maximum_three_patch_plan_generations_v1" in contract.constraints
+    assert "cross_generation_task_budget_v1" in contract.constraints
+    assert "fresh_confirmation_after_replan_v1" in contract.constraints
+    assert contract.budget.max_model_calls == 30
+    assert contract.budget.max_tool_calls == 12
+    assert contract.budget.max_cost_micros == 1_500_000
+    assert contract.budget.max_handoffs == 12
+    compiler.validate_manifest(plan)
 
 
 def test_draft_is_untrusted_and_compiler_rejects_invalid_authority_and_proofs() -> None:
@@ -207,7 +433,7 @@ def test_planning_persistence_version_chain_read_api_and_tamper_rejection(
     assert rejected.json()["code"] == "PLANNING_PROOF_REJECTED"
 
 
-def test_capability_api_is_read_only_and_only_local_phase_71_runtimes_are_enabled(
+def test_capability_api_is_read_only_and_only_registered_runtimes_are_enabled(
     client: TestClient,
 ) -> None:
     response = client.get("/api/v1/capabilities")
@@ -218,12 +444,37 @@ def test_capability_api_is_read_only_and_only_local_phase_71_runtimes_are_enable
         "research.read.v1",
         "artifact.html.v1",
         "browser.verify.v1",
+        "knowledge.local.v1",
+        "mcp.text.metrics.v1",
+        "workspace.file.read.v1",
+        "workspace.file.replace.v1",
+        "workspace.file.create.v1",
+        "workspace.file.rename.v1",
+        "workspace.patch.bundle.v1",
+        "workspace.patch.propose.v1",
+        "workspace.directory.read.v1",
+        "workspace.snapshot.check.v1",
+        "workspace.python.test.v1",
+        "workspace.node.test.v1",
     }
     assert {
         (item["capability_id"], item["version"])
         for item in response.json()["capabilities"]
         if item["runtime_enabled"]
-    } == {
-        ("artifact.html.v1", "1.1.0"),
-        ("browser.verify.v1", "1.1.0"),
+        } == {
+            ("artifact.html.v1", "1.1.0"),
+            ("artifact.html.v1", "1.2.0"),
+            ("browser.verify.v1", "1.1.0"),
+        ("knowledge.local.v1", "1.0.0"),
+        ("mcp.text.metrics.v1", "1.0.0"),
+        ("workspace.file.read.v1", "1.0.0"),
+        ("workspace.file.replace.v1", "1.0.0"),
+        ("workspace.file.create.v1", "1.0.0"),
+        ("workspace.file.rename.v1", "1.0.0"),
+        ("workspace.patch.bundle.v1", "1.0.0"),
+        ("workspace.patch.propose.v1", "1.0.0"),
+        ("workspace.directory.read.v1", "1.0.0"),
+        ("workspace.snapshot.check.v1", "1.0.0"),
+        ("workspace.python.test.v1", "1.0.0"),
+        ("workspace.node.test.v1", "1.0.0"),
     }

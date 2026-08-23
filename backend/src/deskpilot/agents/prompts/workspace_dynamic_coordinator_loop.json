@@ -1,0 +1,1 @@
+{"schema_version":"deskpilot.prompt-package.v1","package_id":"builtin.workspace_coordinator","version":"1.1.0","renderer_version":1,"instruction_file":"workspace_dynamic_coordinator_loop.txt","variables":["objective_ref","context_refs"]}

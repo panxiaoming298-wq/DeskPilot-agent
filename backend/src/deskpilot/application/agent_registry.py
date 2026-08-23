@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -17,7 +17,12 @@ from deskpilot.domain.agent_contracts import (
     AgentRegistrySnapshot,
     AgentRegistryStatus,
 )
-from deskpilot.domain.model_contracts import ModelProviderDescriptor, ToolCallingMode
+from deskpilot.domain.model_contracts import (
+    ModelLocation,
+    ModelProviderDescriptor,
+    ModelRequest,
+    ToolCallingMode,
+)
 from deskpilot.domain.tool_contracts import SEMVER_PATTERN
 
 
@@ -39,6 +44,10 @@ class AgentRegistryFrozenError(AgentRegistryError):
 
 class AgentContractInvalidError(AgentRegistryError):
     code = "AGENT_CONTRACT_INVALID"
+
+
+class AgentModelRouteNotAllowedError(AgentRegistryError):
+    code = "AGENT_MODEL_ROUTE_NOT_ALLOWED"
 
 
 class AgentPromptDigestMismatchError(AgentRegistryError):
@@ -92,6 +101,15 @@ class AgentRegistration:
     prompt_package: PromptPackage
     source: str = "builtin"
     status: AgentRegistryStatus = AgentRegistryStatus.ENABLED
+
+
+class AgentModelAdmissionPolicy(Protocol):
+    def allows(
+        self,
+        contract: AgentContract,
+        prompt_package_digest: str,
+        provider: ModelProviderDescriptor,
+    ) -> bool: ...
 
 
 _SECRET = re.compile(r"(?i)(api[_-]?key|authorization\s*:|bearer\s+|password\s*=)")
@@ -168,9 +186,13 @@ def load_prompt_package(root: Path, manifest_name: str) -> PromptPackage:
 
 
 class AgentRegistry:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        model_admissions: AgentModelAdmissionPolicy | None = None,
+    ) -> None:
         self._registrations: dict[tuple[str, str], AgentRegistration] = {}
         self._statuses: dict[tuple[str, str], tuple[AgentRegistryStatus, str | None]] = {}
+        self._model_admissions = model_admissions
         self._frozen = False
         self._snapshot: AgentRegistrySnapshot | None = None
 
@@ -196,6 +218,7 @@ class AgentRegistry:
             current_status, _ = candidate_statuses[registration.contract.key]
             if current_status is not AgentRegistryStatus.REVOKED and not any(
                 self._model_satisfies(registration.contract, descriptor)
+                and self._admission_allows(registration, descriptor)
                 for descriptor in model_descriptors
             ):
                 candidate_statuses[registration.contract.key] = (
@@ -256,6 +279,72 @@ class AgentRegistry:
         if not candidates:
             raise AgentNotRegisteredError("No enabled Agent version is registered")
         return max(candidates, key=lambda item: tuple(map(int, item.contract.version.split("."))))
+
+    def validate_model_route(
+        self,
+        agent_id: str,
+        version: str,
+        *,
+        contract_digest: str,
+        prompt_package_digest: str,
+        request: ModelRequest,
+        provider: ModelProviderDescriptor,
+    ) -> AgentRegistration:
+        """Revalidate one selected Provider against the exact bound Agent Contract."""
+
+        registration = self.resolve_exact(
+            agent_id,
+            version,
+            contract_digest=contract_digest,
+            prompt_package_digest=prompt_package_digest,
+        )
+        policy = registration.contract.model_policy
+        if request.privacy_mode not in policy.allowed_privacy_modes:
+            raise AgentModelRouteNotAllowedError(
+                "Model privacy mode is not allowed by the Agent Contract"
+            )
+        requirements = policy.requirements
+        requested = request.requirements
+        expected_identity = {
+            "agent_id": registration.contract.agent_id,
+            "agent_version": registration.contract.version,
+            "agent_contract_digest": registration.contract.digest,
+            "agent_prompt_package_digest": registration.prompt_package.digest,
+        }
+        boolean_requirements = (
+            "streaming",
+            "structured_output",
+            "strict_json_schema",
+            "tool_calling",
+            "parallel_tool_calls",
+            "vision",
+        )
+        if (
+            any(request.metadata.get(key) != value for key, value in expected_identity.items())
+            or request.messages[0].role != "system"
+            or request.messages[0].content != registration.prompt_package.instruction
+            or request.role is not policy.role
+            or any(
+                getattr(requirements, field) and not getattr(requested, field)
+                for field in boolean_requirements
+            )
+            or requested.min_context_tokens < requirements.min_context_tokens
+            or request.output_schema is None
+            or request.output_schema.json_schema != registration.contract.output_schema
+            or (requirements.strict_json_schema and not request.output_schema.strict)
+        ):
+            raise AgentModelRouteNotAllowedError(
+                "Model request does not satisfy the Agent Contract or Prompt Package"
+            )
+        if not self._model_satisfies(registration.contract, provider):
+            raise AgentModelRouteNotAllowedError(
+                "Selected Provider does not satisfy the Agent Contract"
+            )
+        if not self._admission_allows(registration, provider):
+            raise AgentModelRouteNotAllowedError(
+                "Selected Provider lacks an approved Agent model admission"
+            )
+        return registration
 
     def list_public(
         self,
@@ -370,6 +459,23 @@ class AgentRegistry:
             )
             and (not requirements.vision or capabilities.vision)
             and capabilities.max_context_tokens >= requirements.min_context_tokens
+        )
+
+    def _admission_allows(
+        self,
+        registration: AgentRegistration,
+        descriptor: ModelProviderDescriptor,
+    ) -> bool:
+        return bool(
+            descriptor.location is ModelLocation.LOCAL
+            or (
+                self._model_admissions is not None
+                and self._model_admissions.allows(
+                    registration.contract,
+                    registration.prompt_package.digest,
+                    descriptor,
+                )
+            )
         )
 
     def _descriptor(

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Workspace approval states</title>
+    <style>
+      /* finesse · component: workspace-approval · register=product
+       * states: default · hover · focus-visible · active · disabled · loading · error · success
+       * tokens: mirrored from ResearchArtifactWorkbench.vue for isolated preview */
+      :root {
+        --surface: #e7e4da; --sheet: #f0ede4; --ink: #21302c; --muted: #64706a;
+        --forest: #1f4b3f; --forest-deep: #16372f; --forest-pale: #d6dfd8;
+        --vermilion: #b6472d; --vermilion-pale: #ead5cc; --line: #898c84;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--surface); color: var(--ink); font-family: "Segoe UI", sans-serif; }
+      main { width: min(760px, calc(100% - 32px)); margin: 32px auto; }
+      h1 { margin: 0 0 20px; font-size: 24px; }
+      .state { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 12px; align-items: start; margin: 12px 0; }
+      .state > span { padding-top: 16px; color: var(--muted); font: 11px/1 monospace; }
+      .card { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--vermilion); background: var(--vermilion-pale); }
+      .card header { display: flex; justify-content: space-between; gap: 16px; }
+      .card header div { display: grid; gap: 4px; }
+      .card header span { color: var(--vermilion); font: 750 9px/1.2 monospace; }
+      .card header strong { overflow-wrap: anywhere; font-size: 13px; }
+      .card b { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--vermilion); color: var(--vermilion); font: 800 11px/1 monospace; }
+      .files { display: grid; border: 1px solid var(--line); background: var(--sheet); }
+      .files div { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; font: 11px/1.4 monospace; }
+      .files div + div { border-top: 1px solid var(--line); }
+      .files code { overflow-wrap: anywhere; }
+      .card footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .card small { color: var(--muted); }
+      button { min-height: 44px; border: 1px solid var(--vermilion); outline: 2px solid transparent; border-radius: 2px; background: var(--vermilion); color: var(--sheet); padding: 0 14px; font-weight: 750; cursor: pointer; white-space: nowrap; }
+      @media (hover: hover) { button:hover, button.is-hover { border-color: var(--forest); background: var(--forest); } }
+      button:focus-visible, button.is-focus { outline: 2px solid var(--forest-deep); outline-offset: 3px; }
+      button:active, button.is-active { transform: translateY(1px); }
+      button:disabled, button.is-disabled { opacity: .5; cursor: not-allowed; }
+      .card[data-state="loading"] { opacity: .76; }
+      .card[data-state="error"] { box-shadow: inset 3px 0 0 var(--vermilion); }
+      .card[data-state="success"] { border-color: var(--forest); background: var(--forest-pale); }
+      .card[data-state="success"] header span, .card[data-state="success"] b { border-color: var(--forest); color: var(--forest); }
+      @media (max-width: 480px) { .state { grid-template-columns: 1fr; } .state > span { padding: 0; } .card footer { align-items: stretch; flex-direction: column; } button { width: 100%; white-space: nowrap; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Workspace approval · 8 states</h1>
+      <div id="states"></div>
+    </main>
+    <script>
+      const states = [
+        ['default', '', '确认替换并保留备份'], ['hover', 'is-hover', '确认替换并保留备份'],
+        ['focus-visible', 'is-focus', '确认替换并保留备份'], ['active', 'is-active', '确认替换并保留备份'],
+        ['disabled', 'is-disabled', '等待可用'], ['loading', '', '提交中…'],
+        ['error', '', '重试确认'], ['success', '', '已提交'],
+      ]
+      document.querySelector('#states').innerHTML = states.map(([state, buttonClass, label]) => `
+        <section class="state"><span>${state}</span><article class="card" data-state="${state}">
+          <header><div><span>${state === 'success' ? '提交完成' : '等待你的确认'}</span><strong>向 2 个文件提交一组精确替换</strong></div><b>${state === 'success' ? '✓' : 'R1'}</b></header>
+          <div class="files"><div><code>README.md</code><span>old → new</span></div><div><code>src/app.py</code><span>before → after</span></div></div>
+          <footer><small>${state === 'error' ? '部分完成时会列出已写文件与备份。' : '不确认就不会写入。'}</small><button class="${buttonClass}" ${state === 'disabled' || state === 'loading' ? 'disabled' : ''}>${label}</button></footer>
+        </article></section>`).join('')
+    </script>
+  </body>
+</html>

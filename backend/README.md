@@ -46,20 +46,28 @@ POST /api/v1/tasks/{task_id}:cancel
 .\.venv\Scripts\alembic.exe check
 ```
 
-第一版 migration 可初始化空库，也能接管早期数据库而不重建原有任务。当前 head 为 `0036_artifact_exports`；阶段 76 新增只保存摘要、精确目标、幂等绑定和不可变回执的 Artifact export 记录。
+第一版 migration 可初始化空库，也能接管早期数据库而不重建原有任务。当前 head 为 `0050_agent_graph_test_conditions`；阶段 76～102 已依次加入 Artifact export、Turn Route、PDF render evidence、多轮澄清、持久 Model Loop/Input、服务端 Workbench 推进、动态 Handoff/DAG、类型化 ResultRef/CapabilityInput、不可变 Replan generation lineage、服务器绑定固定测试节点、跨代 verified ResultRef 导入、图内 Patch/Approval proof 和测试结果条件边。
 
 ## 阶段 76 Task Workbench 与精确导出 API
 
 ```text
 POST /api/v1/research-workbench/tasks
 GET  /api/v1/tasks/{task_id}/workbench
+POST /api/v1/tasks/{task_id}/workbench:replan
+GET  /api/v1/tasks/{task_id}/replans
 POST /api/v1/execution-runs/{run_id}:cancel
 POST /api/v1/deliveries/{delivery_id}/exports:prepare
 POST /api/v1/artifact-exports/{export_id}:commit
 GET  /api/v1/artifact-exports/{export_id}
 ```
 
-Workbench 投影组合精确 task 的 Conversation、Planning、Execution、Research、Verification、Workspace、Browser、Delivery 和 export 真值，并为每个用户动作给出服务器拥有的可用性。导出只接受 Contract 显式授权的绝对 `.html` 新路径：prepare 只预览，commit 需要确认摘要并使用 exclusive create，绝不覆盖已有文件。完整边界见 [`doc/76-统一研究工作台与精确Artifact导出.md`](../doc/76-统一研究工作台与精确Artifact导出.md)。
+Workbench 投影组合精确 task 的 Conversation、Planning、Execution、Research、Verification、Workspace、Browser、Delivery 和 export 真值，并为每个用户动作给出服务器拥有的可用性。导出只接受 Contract 显式授权、与所选 Artifact 媒体类型匹配的绝对 `.html`/`.md`/`.pdf` 新路径：prepare 只预览，commit 需要确认摘要并使用 exclusive create，绝不覆盖已有文件。完整边界见 [`doc/76-统一研究工作台与精确Artifact导出.md`](../doc/76-统一研究工作台与精确Artifact导出.md)、[`doc/85-同源Markdown-Artifact与精确选择导出.md`](../doc/85-同源Markdown-Artifact与精确选择导出.md)和[`doc/86-真实渲染验收PDF-Artifact.md`](../doc/86-真实渲染验收PDF-Artifact.md)。
+
+阶段 87 在同一 Turn API 中增加确定性自然语言参数绑定，例如“帮我看看 README.md”“在 backend 里运行 tests/test_api.py”和“查一下主题并整理成 PDF 报告”。它只产生既有 Route Schema 字段；写入仍需确认，自然语言导出路径仍不执行。详见 [`doc/87-确定性对话Route自然语言参数提取.md`](../doc/87-确定性对话Route自然语言参数提取.md)。
+
+阶段 88 增加多轮澄清补全：缺少一个受支持参数时先返回 `needs_clarification`，下一条短回答通过源 Task、有限规则和 resolution digest 绑定为新 Route；读取和执行都会复核该证明。详见 [`doc/88-多轮澄清参数补全与Route证明.md`](../doc/88-多轮澄清参数补全与Route证明.md)。
+
+阶段 89 将 `web_researcher@1.1.0` 升级为固定两轮的受限 Model Loop：第一轮只能请求 Handoff 已冻结的 `research.read.v1` binding，第二轮只能提交候选结果。派发、决策和脱敏观察持久化；越界 binding、无进展、预算超限和证明漂移都 fail closed。详见 [`doc/89-受限持久Agent-Model-Loop最小闭环.md`](../doc/89-受限持久Agent-Model-Loop最小闭环.md)。
 
 ## Task Contract 与 Executable Plan 只读 API
 
@@ -72,7 +80,7 @@ GET /api/v1/tasks/{task_id}/plans
 GET /api/v1/tasks/{task_id}/plans/{generation}
 ```
 
-Plan Compiler 只绑定冻结 Registry/Catalog 中的精确版本和摘要；持久化读取会复核 manifest、摘要和绑定漂移。阶段 69 的 `1.0.0` 声明保持不变；阶段 70 以 `research.read.v1@1.1.0` 显式开关启用研究，阶段 71 以 `artifact.html.v1@1.1.0` 和 `browser.verify.v1@1.1.0` 启用受控本地交付能力。
+Plan Compiler 只绑定冻结 Registry/Catalog 中的精确版本和摘要；持久化读取会复核 manifest、摘要和绑定漂移。阶段 69 的 `1.0.0` 声明保持不变；阶段 70 以 `research.read.v1@1.1.0` 显式开关启用研究，阶段 71 以 `artifact.html.v1@1.1.0` 和 `browser.verify.v1@1.1.0` 启用受控本地交付能力，阶段 86 以兼容的 `artifact.html.v1@1.2.0` 声明 HTML/Markdown/PDF 同源交付与 PDF 真实渲染操作。
 
 ## 事件可靠投递
 
@@ -228,7 +236,7 @@ GET Catalog 返回形如 `"provider-catalog-v3"` 的 ETag。所有写请求必�
 
 ## Agent Contract 与只读 Registry
 
-应用启动会严格加载四个固定 Prompt Package，并额外注册只读 `builtin.web_researcher`；所有 Agent 都会交叉校验 I/O Schema、Prompt/Tool digest、Model capability 与无环 Handoff 声明后冻结 Registry。Supervisor 不属于 Agent，Contract 也不代替 Policy/Approval/Runner 授权。
+应用启动会严格加载固定 Prompt Package，并注册只读 `builtin.web_researcher` 与 `builtin.workspace_reader`；所有 Agent 都会交叉校验 I/O Schema、Prompt/Tool digest、Model capability 与无环 Handoff 声明后冻结 Registry。Supervisor 不属于 Agent，Contract 也不代替 Policy/Approval/Runner 授权。
 
 ```text
 GET /api/v1/agents
@@ -253,6 +261,76 @@ GET /api/v1/agents/{agent_id}/versions/{version}
 阶段 75 验证：`deskpilot.multi-agent-core@1` 共 11 个隔离 trial，report 为 11/11 通过、false-success=0、unauthorized-effect=0，mutant 混淆矩阵 TA=1/TR=2/FA=0/FR=0。两个不同只读 Agent Contract 实际产生 2 个 Invocation/Handoff/Result 并通过共享 verified-edge reducer join；`research_to_html` 使用 recorded Search/Page 走完生产路径后，外部 Oracle 直接读取隔离 Workspace 复核。阶段 68～75 联合门禁 40 项通过；后端全量 `467 passed, 12 skipped, 1 warning`，耗时 1012.77 秒。Ruff 全仓、mypy 208 个生产源码、Alembic upgrade/check、`uv lock --check`、Workflow YAML、旧/新两个 baseline compare 和 diff whitespace 全部通过。
 
 阶段 76 验证：后端全量回归通过，最终 Task Workbench/精确导出/stop fencing/默认关闭专项 4 项通过，`0036` 与相邻阶段 migration 往返 4 项通过；当前收集 484 项。Ruff 全仓、mypy 211 个生产源码、Alembic 单一 `0036` head/upgrade/check 和 `uv lock --check` 通过。前端 22 个测试文件/143 项、type-check、production build、静态界面检测和 320/375/414/768/桌面浏览器验收全部通过，控制台无警告或错误。
+
+阶段 83 新增 `workspace.node.test.v1`：固定 `node.exe`、单个 `*.spec.js`/`*.test.js`、有界项目快照和断网 Windows AppContainer。真实集成测试验证快照内相对模块可执行、原项目不可读取；Vitest/npm/npx/package scripts/第三方依赖与自由 argv 均未开放。阶段 83 与相邻路由/迁移 61 项定向后端测试及 Python/AppContainer 回归 5 项通过；Ruff、mypy 220 个生产源码、Alembic check 和依赖锁检查通过。前端 22 文件/151 项、type-check、build 与静态 `p0: 0` 通过。详细边界见 [`doc/83-断网Node内置测试沙箱.md`](../doc/83-断网Node内置测试沙箱.md)。
+
+阶段 84 新增 `workspace.file.create.v1` 与 `workspace.file.rename.v1`：统一路径操作预览绑定任务、路径、父目录/源版本和内容摘要，一次显式确认后才以 Windows 同卷原子 rename 提交。创建使用任务专属 staged bytes 与持久化意图清单，原子边界后可恢复同一回执；重命名要求结果版本与源文件身份完全一致。目标存在、版本漂移、缺失父目录、不安全路径和错误确认全部 fail closed，不支持目录、覆盖、删除或跨工作区 move。详细边界见 [`doc/84-可恢复工作区新建与重命名.md`](../doc/84-可恢复工作区新建与重命名.md)。
+
+阶段 85 将研究 Builder 扩展为同源 `index.html` + `report.md`：两份文件分别拥有 immutable ArtifactRevision/PatchReceipt，HTML 仍是 DeliveryManifest 与隔离 Browser Verifier 的主 revision。`PrepareArtifactExport` 可选绑定同一已交付 Workspace 中的精确 `artifact_id`，并强制媒体类型与 `.html`/`.md` 目标后缀一致；省略时仍默认主 HTML。详细边界见 [`doc/85-同源Markdown-Artifact与精确选择导出.md`](../doc/85-同源Markdown-Artifact与精确选择导出.md)。
+
+阶段 85 验证：WorkBench/Plan/verified delivery/发布门禁四组 36 项后端用例与 24 项 migration 用例通过；Ruff 全仓、mypy 220 个生产源码、Alembic 单一 `0037` head/autogenerate check 和 `uv lock --check` 通过。前端 22 文件/152 项、Vue type-check、production build 与工作台源组件静态检测 `p0: 0` 通过。本阶段没有自行打开页面做视觉断言。
+
+阶段 86 新增 `report.pdf`：同一 verified HTML 由隔离 Chromium 打印，Poppler 使用 144 DPI 栅格化全部页面，页数、A4 尺寸、PNG 尺寸和逐页摘要形成绑定 PDF revision 的 render evidence。`.pdf` 精确导出继续使用 prepare/commit、exclusive create 和不覆盖策略，读取或导出时缺失/漂移的 PDF 证明均 fail closed。实际 1 页 A4 样张已用 `pdfinfo`/`pdftoppm` 渲染并人工查看；migration 25 项、前端 22 文件/152 项、Ruff、mypy 222 个生产源码、依赖锁、type-check、build 和静态 `p0: 0` 通过。Codex 嵌套沙箱内既有 Edge GPU sandbox 用例仍不能安全运行，产品代码未加入 `--no-sandbox`。详细边界见 [`doc/86-真实渲染验收PDF-Artifact.md`](../doc/86-真实渲染验收PDF-Artifact.md)。
+
+阶段 87 将 Turn classifier 升级为兼容旧 v1 摘要的 rules v2，并以完整匹配规则提取普通中文里的文件路径、引号正文、项目/单测试文件和研究主题。没有新增 Route、migration、前端协议或依赖；模糊批量测试与自然语言直接导出继续拒绝。Workspace/测试 Runtime 与 Workbench 合跑 42 项、migration 25 项、Ruff、mypy 222 个生产源码和依赖锁均通过。详细边界见 [`doc/87-确定性对话Route自然语言参数提取.md`](../doc/87-确定性对话Route自然语言参数提取.md)。
+
+阶段 88 为文件、测试、知识库、MCP 文本和研究主题增加一次确定性追问补全，并通过 `0039_turn_route_resolutions` 固化源 Route、补全规则和 resolution digest。前端 Route Receipt 会显示补全证明；完整请求仍优先作为新任务，高风险确认和原执行边界不变。详细边界见 [`doc/88-多轮澄清参数补全与Route证明.md`](../doc/88-多轮澄清参数补全与Route证明.md)。
+
+阶段 88 验证：Workspace Runtime 与 Workbench 组合 45 项、migration 26 项通过；Ruff 全仓、mypy 223 个生产源码、Python 依赖一致性和 diff whitespace 通过。前端 22 文件/152 项、type-check 和 production build 通过。
+
+阶段 89 验证：研究 Runtime 12 项及 Registry/Plan/Context/Artifact/Workbench/Phase75/Migration 跨阶段回归通过；错误 Route binding 在 Search 前被拒绝，Observation 篡改读取 fail closed。阶段 75 报告仍为 11/11、false-success=0、unauthorized-effect=0，不可变 v2 baseline compare 通过。Ruff 全仓、mypy 224 个生产源码、依赖锁/环境检查、前端 22 文件/152 项、type-check 和 production build 通过。
+
+阶段 90 新增 `builtin.workspace_reader@1.0.0` 和 `0041_agent_input_requests`。完整文件路径走 `request_route → WorkspaceFileRuntime → Observation → submit_result`；缺路径走持久 `needs_user_input`，Run 暂停后由用户回答建立新的不可变 Task，并以 `agent_workspace_file_path` proof 续接。模型只能请求 Handoff 中精确的只读 binding，文件正文始终是不受信数据；输入请求、Decision、Observation 与 resolution proof 在读取时都会重验。详细边界见 [`doc/90-Workspace-Reader-Agent与持久输入续接.md`](../doc/90-Workspace-Reader-Agent与持久输入续接.md)。
+
+阶段 90 验证：Workspace Reader 完整路径、缺参暂停/续接、输入与 Route 证明篡改、Registry 和 `0041 → 0040 → 0041` migration 专项通过；Ruff、严格 mypy、前端 22 文件/152 项、type-check 和 production build 通过。阶段 75 对抗报告保持 11/11、false-success=0、unauthorized-effect=0，不可变 v3 baseline compare 通过。
+
+阶段 91 增加默认启用的持久 Workbench 推进器。新 Task 的安全自动动作会写入 `workbench_runtime_items`，由 API 后台以有界并发、TTL/heartbeat/fence、指数退避和死信语义推进；窗口关闭后任务仍继续，暂停输入和用户写入授权边界不变。前端已改为只读观察服务器投影，手动 `workbench:advance` 仍保留。详见 [`doc/91-服务端持久Workbench推进器.md`](../doc/91-服务端持久Workbench推进器.md)。
+
+阶段 92 新增 `builtin.workspace_reader@1.1.0`，把 `workspace.directory.read.v1` 迁入与文件读取相同的两轮持久 Agent Model Loop；旧 `1.0.0` Contract/Prompt 保持不可变。新目录 Plan 绑定精确 Agent/Capability/预算，服务端决定实际 Route，目录 entry 只作为不可信观察数据；错误 binding、Observation no-progress 和证明篡改全部 fail closed。Phase75 使用带 v3 前序摘要的不可变 v4 baseline。详见 [`doc/92-通用Workspace-Read-Agent与目录循环.md`](../doc/92-通用Workspace-Read-Agent与目录循环.md)。
+
+阶段 93 新增 `builtin.workspace_coordinator@1.0.0`、严格 `propose_handoff` 和 `0043_agent_delegations`。新目录 Plan 预编译唯一 Reader Child slot；服务端验证双向 Registry edge、精确版本/Prompt、Plan、隐私、深度/循环、Tool scope 与预算后才激活。Parent 以 `waiting_children` 持久等待，Child verified Result 形成 Handoff Observation 后续接同一 Parent Invocation/attempt；停止、重启、fence、证明重验和 Workbench 任务树均覆盖父子血缘。Phase75 使用链向 v4 的不可变 v5 baseline。详见 [`doc/93-服务器裁决Agent-Handoff与父子续接.md`](../doc/93-服务器裁决Agent-Handoff与父子续接.md)。
+
+阶段 94 新增 `builtin.workspace_coordinator@1.1.0`、`workspace_reader@1.2.0`、严格 `propose_task_graph` 和 `0044_agent_task_graphs`。模型可在当次 offer 内选择完整 DAG 拓扑；Supervisor 原子绑定精确 Agent/Capability/Context/预算，Scheduler 按 ready wave 并行推进，只有全部 Child verified 的 graph Observation 能唤醒原 Parent Invocation。停止、失败收敛、重启续接、DAG/血缘/结果证明重验和 Workbench 动态图投影已接通。Phase75 使用链向 v5 approval digest 的不可变 v6 baseline。详见 [`doc/94-服务器裁决动态Agent任务图与并行Join.md`](../doc/94-服务器裁决动态Agent任务图与并行Join.md)。
+
+阶段 95～97 又加入确定性输出节点和类型化 ResultRef、服务器绑定 CapabilityInput 的异构目录/文件图，以及失败快照驱动且不改写旧代的最小 Replan generation。对应 schema/migration 从 `0045` 演进到 `0047`，所有下游领取、Handoff、Parent join 和 Workbench 读取都会重新验证血缘与摘要。详见 [`doc/95-类型化ResultRef数据流与动态任务图输出节点.md`](../doc/95-类型化ResultRef数据流与动态任务图输出节点.md)、[`doc/96-服务器绑定Capability输入与异构Agent任务图.md`](../doc/96-服务器绑定Capability输入与异构Agent任务图.md)和[`doc/97-失败快照与受控Agent重规划代.md`](../doc/97-失败快照与受控Agent重规划代.md)。
+
+阶段 98 新增冻结 `builtin.workspace_tester@1.0.0` 和 v2 `AgentTaskGraphCapabilityInput`，允许动态图选择 `workspace.python.test.v1` / `workspace.node.test.v1` 及对应 Route 命名槽。Runtime 只调用既有固定测试沙箱：模型不能提交 executable、argv、环境变量、安装命令或网络权限。`0048_agent_test_capability_inputs` 扩展类型化测试 ResultRef；测试证据、Workspace manifest、runtime digest 和 Workbench 投影均会重验。详见 [`doc/98-服务器绑定固定测试Agent任务图.md`](../doc/98-服务器绑定固定测试Agent任务图.md)。
+
+阶段 99 把 Replan manifest 升级为兼容的 v2：服务器从失败快照和旧失败图派生 grants 始终为空的 Repair Advice，并公布最多 7 个可重新验证的 ResultRef source key。新 generation 的模型只能选择这些 key；Supervisor 将精确旧 ResultRef 封入 v5 graph，Runtime 在每次消费前重验 source/target Plan、Run、graph、node、Invocation、Capability、Workspace 与 Route 血缘。没有新增表或列，Alembic head 仍为 `0048`。详见 [`doc/99-无授权Repair建议与跨代ResultRef导入.md`](../doc/99-无授权Repair建议与跨代ResultRef导入.md)。
+
+阶段 100 新增 `workspace_agent_patch_test@1`：本地 Patch Planner 以两轮持久 Model Loop 读取一个服务器绑定文件并提交一次无授权精确替换建议；隔离 staging 后暂停等待用户确认，确认时重验 Handoff/Turn/Decision/Observation/manifest，随后原子提交、备份并运行服务器固定 Python/Node 测试。`WorkspacePatchTestRead` 同时绑定 PatchReceipt 与测试证明；失败不自动 Replan。本阶段无 migration，head 继续是 `0048`。详见 [`doc/100-批准式Agent补丁与固定测试闭环.md`](../doc/100-批准式Agent补丁与固定测试闭环.md)。
+
+阶段 101 新增 `workspace_dynamic_patch_test@1`、graph v6 和 `route_patch_test_spec` CapabilityInput v3。Coordinator 可在服务器 offer 内生成包含 Patch Planner 的动态图；隔离 preview 与确认摘要持久绑定当前 graph/node，Scheduler 在 `waiting_user` 暂停。用户确认后才原子写入并运行固定测试，组合结果形成类型化 `patch_test` ResultRef 续接下游。`0049_agent_graph_patch_approvals` 增加节点审批 proof 字段和新结果种类；旧图、旧输入和阶段 100 直连 Route 保持兼容。详见 [`doc/101-动态任务图Patch-Approval节点与验证续接.md`](../doc/101-动态任务图Patch-Approval节点与验证续接.md)。
+
+阶段 102 新增 graph v7 的固定 `test_passed` 条件和 `server_condition` execution edge。Supervisor 强制固定 Python/Node Tester 与图内 Patch/Test 的下游边携带服务器绑定条件；Runtime 以真实结果状态和 exact ResultRef digest 封存 decision，只有 matched decision 才能解锁 join。failed/error 会收敛 graph/Run/Route 并 fencing sibling，条件遗漏、普通边夹带条件状态或 proof 篡改都会 fail closed。`0050_agent_graph_test_conditions` 持久 condition/decision manifest 与 digest，旧 graph v1～v6 摘要保持兼容。详见 [`doc/102-服务器裁决测试结果条件边.md`](../doc/102-服务器裁决测试结果条件边.md)。
+
+阶段 103 新增条件失败驱动、且只由用户请求的一次 Patch Replan。图内 Patch/Test 的失败结果会先形成 `patch_test(test_failed|test_error)` ResultRef 和 false condition decision，再安全收敛；Workbench 不会自动执行换代。用户请求后，Replan v3 绑定 failure snapshot v2、精确 decision digest 和无授权 Repair Advice，generation 2 重新读取当前 Workspace 并生成新的内容寻址 staging/confirmation。旧确认、失败 `patch_test` source、Repair Advice 和旧 approval 均不能写入；两代可恢复备份使用不同 manifest identity。本阶段无 migration，head 继续为 `0050`。详见 [`doc/103-测试失败驱动新计划代与逐补丁再批准.md`](../doc/103-测试失败驱动新计划代与逐补丁再批准.md)。
+
+阶段 104 新增确定性的 Patch failure continuation intent。当前动态 Patch condition failure 且 `replan_failed_execution` enabled 时，对话“继续修复”和 Workbench 按钮都会持久化精确 user message，并以 Replan v4 绑定 message ID/digest、intent code 和入口来源；Replan 创建、读取和跨代 import 时重新验证消息状态、角色、Task、正文摘要与分类结果。模糊短语不会授权换代，删除或篡改消息会 fail closed。旧 Replan v1～v3 保持兼容，本阶段无 migration，head 继续为 `0050`。详见 [`doc/104-对话续修意图与Replan用户消息证明.md`](../doc/104-对话续修意图与Replan用户消息证明.md)。
+
+阶段 105 将动态 Patch failure 扩展为最多三代、共享一个 TaskBudget 的修复循环。新 Contract 预先声明 generation 1～3 总额度；Planning 在换代前累计旧 Run 和目标 Plan 的 allocation，Supervisor 在封新图前累计同一 Task 所有代节点，避免每次编译隐式重置预算。Replan v5 增加可重算的 cross-generation budget proof，Workbench 投影当前/最大代数、剩余换代和预算计量。每代仍需新的 false decision、active user message、Workspace manifest 与 confirmation；第三代失败后按钮和对话均在保存消息前拒绝。旧 Replan v1～v4 保持兼容，本阶段无 migration，head 继续为 `0050`。详见 [`doc/105-总预算守恒的三代修复循环.md`](../doc/105-总预算守恒的三代修复循环.md)。
+
+阶段 106 新增 CapabilityInput v4 和 graph v8 approval binding。Router rules v5 将最多两个精确目标规范化为 `patch_slot_n`，Supervisor 强制每个槽位被一个 Patch 节点精确消费，并将 graph/node/input digest、fresh confirmation 与 content-addressed Workspace manifest 策略封存到节点证明。每个节点独立暂停、确认、写入和固定测试；重复/遗漏槽位、旧 confirmation 和语义篡改均 fail closed。双 Patch 失败换代仍受 Replan v5、三代上限和总 TaskBudget 约束。旧 graph/input 兼容，本阶段无 migration，head 继续为 `0050`。详见 [`doc/106-可组合动态图Patch-Approval节点.md`](../doc/106-可组合动态图Patch-Approval节点.md)。
+
+阶段 106 最终验证：后端 81 个测试文件 / 597 项，`585 passed + 12 skipped`；Ruff 全仓、严格 mypy 240 个生产源码通过。Phase75 11/11、false-success=0、unauthorized-effect=0，不可变 v15 baseline compare 通过；前端 22 个测试文件 / 154 项、type-check/build 通过。Alembic 当前且唯一 head 仍为 `0050_agent_graph_test_conditions`，无待生成迁移；SQLite `integrity_check=ok`，`pip check` 和 diff whitespace 通过。
+
+阶段 107 新增默认零网络的 live-model/Judge-human 校准门禁。生产 Runtime 与 calibration 共用 Coordinator/Patch Planner 的纯 `ModelRequest` 构造器；冻结 4 case × 2 repeat 的候选 cohort，并把 suite/harness/build、Provider/model、Prompt、Schema、逐 trial 输出绑定成不可变 artifact。盲审包隐藏候选 Provider、case ID 和 expected answer；不同 Provider/model snapshot 的独立 Judge 只能产生辅助判定，每个 sample 仍要求两名真人主审，分歧时必须由第三名独立仲裁者裁决，评审最长有效 90 天。确定性 guard、用户确认和服务器 verified edge 始终优先，Judge 或真人 accept 均不授予写权限。live capture 必须显式设置 `DESKPILOT_PHASE107_LIVE_ALLOW=1`，CI/Fake Provider/不合格 Schema 能力均拒绝。当前只完成设施与离线固定测试，尚未执行真实 live capture、真人评审或签发 baseline。详见 [`doc/107-Live-Model与Judge-Human校准门禁.md`](../doc/107-Live-Model与Judge-Human校准门禁.md)。
+
+阶段 107 最终验证：后端 82 个测试文件 / 602 项，`590 passed + 12 skipped`、统一退出 0；Ruff 全仓、严格 mypy 244 个生产源码通过。Phase75 11/11、false-success=0、unauthorized-effect=0，v15 baseline compare 通过；前端 22 个测试文件 / 154 项、type-check/build 通过。Alembic 当前且唯一 head 仍为 `0050_agent_graph_test_conditions`，无待生成迁移；SQLite `integrity_check=ok`，`pip check`、`uv lock --check` 和 diff whitespace 通过。
+
+阶段 108 为公共 `AgentModelLoopRuntime` 增加逐 Turn model-route admission。冻结 Agent/版本/Contract/Prompt 会统一渲染实际 system instruction，并在 Context 前后校验 request identity、role、privacy、strict output Schema、Provider location/capabilities/snapshot 和节点 output/timeout/retry/cost 上限。Model Gateway 的候选选择不再隐含 Agent 权限；LOCAL-only Agent 遇到 cloud 默认 Provider、Prompt/role/privacy 漂移或 Context 后预算扩大时，会在 Provider 零调用前 fail closed，已 prepared 的第二阶段拒绝会留下 `AGENT_MODEL_ROUTE_REJECTED` 审计。Phase 107 capture 共用同一 Prompt/Contract 绑定器；没有真实批准 baseline 时不启用 cloud Agent 版本。详见 [`doc/108-每Turn-Agent模型路由裁决.md`](../doc/108-每Turn-Agent模型路由裁决.md)。
+
+阶段 108 最终验证：后端 82 个测试文件 / 606 项，`594 passed + 12 skipped`、统一首轮退出 0；Ruff 全仓、严格 mypy 244 个生产源码通过。Phase75 11/11、false-success=0、unauthorized-effect=0，v15 baseline compare 通过；前端 22 个测试文件 / 154 项、type-check/build 通过。Alembic 当前且唯一 head 仍为 `0050_agent_graph_test_conditions`，无待生成迁移；SQLite `integrity_check=ok`，`pip check`、`uv lock --check` 和 diff whitespace 通过。
+
+阶段 109 新增默认关闭的 cloud Agent admission bundle。显式启动配置必须携带并完整重放 Phase 107 suite、candidate run、blind packet、独立 Judge、真人 review、report 与 baseline；每条 admission 再精确绑定 Agent/版本/Contract/Prompt、完整 Provider snapshot、build、request Schema、批准人及最多 90 天有效期。allow/path 双开关、CI、Fake protocol、过期、duplicate JSON key、symlink 和任一 proof 漂移均 fail closed。Registry freeze 与逐 Turn route 现在都要求 cloud Provider 同时满足 Contract 和 admission；现有 LOCAL-only Agent 不会被证据 artifact 扩权。默认 admission Registry 为空，仓库没有生产 bundle。详见 [`doc/109-真实校准证据与Provider-Admission.md`](../doc/109-真实校准证据与Provider-Admission.md)。
+
+阶段 109 最终验证：后端 83 个测试文件 / 610 项，`598 passed + 12 skipped`、统一首轮退出 0；Ruff 全仓、严格 mypy 246 个生产源码通过。Phase75 11/11、false-success=0、unauthorized-effect=0，v15 baseline compare 通过；前端 22 个测试文件 / 154 项、type-check/build 通过。Alembic 当前且唯一 head 仍为 `0050_agent_graph_test_conditions`，无待生成迁移；SQLite `integrity_check=ok`，`pip check`、`uv lock --check` 和 diff whitespace 通过。
+
+阶段 110 将 Phase 107 run/report/baseline 升级为显式候选 Agent identity v2。capture 通过 CLI 精确选择 Coordinator/Patch 版本，并绑定 Agent ID/version/Contract/Prompt/output Schema；回放会从受信 Registry 解析同一版本、重建 exact ModelRequest，Phase 109 Admission 只消费完整校准 cohort 中的身份。未知或 Schema 不兼容版本在 Provider 零调用前拒绝，identity 漂移在 admission 前失败。旧 v1 工件维持原摘要材料，固定测试已走通 v1 Judge-human grade、baseline compare 与 Admission。当前没有真实 cohort、生产 bundle 或新增 cloud Contract，既有 LOCAL-only 权限不变。详见 [`doc/110-候选Agent身份绑定与校准工件v2.md`](../doc/110-候选Agent身份绑定与校准工件v2.md)。
+
+阶段 110 checkpoint 最终验证：后端 83 个测试文件 / 615 项，`603 passed + 12 skipped`、统一退出 0，耗时 2328.01 秒；Ruff 全仓、严格 mypy 249 个源码、frozen `uv` 同步、`pip check` 和 wheel Prompt 22/22 打包检查通过。Phase75 v15 为 11/11、false-success=0、unauthorized-effect=0，16 份不可变 baseline 的 SHA-256 比较前后完全一致；前端 22 个测试文件 / 154 项、type-check 和 production build 通过。Alembic current 且唯一 head 为 `0050_agent_graph_test_conditions`，default/fresh SQLite upgrade/check、`integrity_check=ok`、foreign-key 零违规。真实 PostgreSQL 11 项（专用 `deskpilot_test`，含固定容器重启）和临时 RabbitMQ 1 项通过，环境已恢复；Workflow YAML 与 diff whitespace 通过。
+
+下一实现方向改为阶段 111“模型驱动的通用任务提案 + 服务器 Capability Offer”。模型只输出无权限 proposal 和 offer key，服务端继续冻结 exact Agent/Contract/Prompt/Provider、Capability、预算、Workspace 与输出 Schema；现有确定性 Turn Router 保留为安全回退与回归基准。之后依次推进通用持久任务循环、安全编码 Profile、三任务/托盘后台、三角色 Calibration v3，以及独立 Edge Profile + Windows 记事本纵切。详见根目录 [`项目进度.md`](../项目进度.md)与 [`doc/111-116-通用多Agent与Edge记事本实施路线.md`](../doc/111-116-通用多Agent与Edge记事本实施路线.md)。
 
 ## 测试
 

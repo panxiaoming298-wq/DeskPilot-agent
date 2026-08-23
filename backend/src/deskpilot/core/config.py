@@ -1,5 +1,7 @@
 """Application settings."""
 
+import os
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -25,7 +27,10 @@ class Settings(BaseSettings):
     artifact_workspace_root: str = Field(
         default="./data/task-workspaces", min_length=1, max_length=32_767
     )
+    conversation_workspace_root: str | None = Field(default=None, max_length=32_767)
     browser_executable_path: str | None = Field(default=None, max_length=32_767)
+    pdfinfo_executable_path: str | None = Field(default=None, max_length=32_767)
+    pdftoppm_executable_path: str | None = Field(default=None, max_length=32_767)
     fake_step_delay_seconds: float = 0.15
     graph_lease_ttl_seconds: float = Field(default=15, ge=1, le=3_600)
     effect_dag_global_concurrency: int = Field(default=8, ge=1, le=1_024)
@@ -94,6 +99,13 @@ class Settings(BaseSettings):
     telemetry_local_span_capacity: int = Field(default=5_000, ge=100, le=100_000)
     research_runtime_enabled: bool = False
     research_search_base_url: str | None = None
+    workbench_runtime_enabled: bool = True
+    workbench_runtime_poll_interval_seconds: float = Field(default=0.05, gt=0, le=60)
+    workbench_runtime_claim_ttl_seconds: float = Field(default=30, ge=1, le=3_600)
+    workbench_runtime_concurrency: int = Field(default=4, ge=1, le=32)
+    workbench_runtime_max_failures: int = Field(default=5, ge=1, le=100)
+    workbench_runtime_retry_base_seconds: float = Field(default=0.1, ge=0, le=60)
+    workbench_runtime_retry_max_seconds: float = Field(default=5, ge=0, le=3_600)
     runner_heartbeat_interval_seconds: float = Field(default=0.5, ge=0.1, le=60)
     runner_heartbeat_timeout_seconds: float = Field(default=3.0, gt=0.1, le=300)
     runner_startup_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
@@ -110,6 +122,14 @@ class Settings(BaseSettings):
         min_length=1,
         max_length=32_767,
     )
+    node_test_runtime_root: str = Field(
+        default_factory=lambda: str(
+            Path(os.environ.get("LOCALAPPDATA", "./data")) / "DeskPilot" / "node-test-runtime"
+        ),
+        min_length=1,
+        max_length=32_767,
+    )
+    node_test_executable_path: str | None = Field(default=None, max_length=32_767)
     runner_appcontainer_profile_journal_path: str = Field(
         default="./data/runner/appcontainer-profiles.json",
         min_length=1,
@@ -135,6 +155,8 @@ class Settings(BaseSettings):
     fake_model_delay_seconds: float = Field(default=0, ge=0, le=60)
     model_providers: tuple[ProviderConfig, ...] = Field(default=(), max_length=32)
     model_request_timeout_seconds: float = Field(default=10, gt=0, le=600)
+    model_admission_allow: bool = False
+    model_admission_bundle_path: str | None = Field(default=None, max_length=32_767)
     model_gateway_policy: ModelGatewayPolicy = Field(default_factory=_default_model_gateway_policy)
     model_health_cache_ttl_seconds: float = Field(default=15, gt=0, le=300)
     model_health_max_concurrency: int = Field(default=4, ge=1, le=16)
@@ -189,4 +211,16 @@ class Settings(BaseSettings):
         )
         if invalid_search_url:
             raise ValueError("research_search_base_url must use HTTP(S)")
+        if self.model_admission_allow != (self.model_admission_bundle_path is not None):
+            raise ValueError(
+                "model_admission_allow and model_admission_bundle_path must be set together"
+            )
+        if (
+            self.workbench_runtime_retry_max_seconds
+            < self.workbench_runtime_retry_base_seconds
+        ):
+            raise ValueError(
+                "workbench_runtime_retry_max_seconds must be at least "
+                "workbench_runtime_retry_base_seconds"
+            )
         return self

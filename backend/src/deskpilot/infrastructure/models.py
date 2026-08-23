@@ -246,6 +246,65 @@ class ConversationMessageRecord(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class TurnRouteRecord(Base):
+    __tablename__ = "turn_routes"
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('routed', 'needs_clarification', 'unsupported')",
+            name="ck_turn_route_decision",
+        ),
+        CheckConstraint(
+            "status IN ('ready', 'running', 'needs_user_action', 'succeeded', "
+            "'failed', 'not_applicable', 'waiting_user_input')",
+            name="ck_turn_route_status",
+        ),
+        CheckConstraint("revision >= 1", name="ck_turn_route_revision"),
+        CheckConstraint(
+            "(resolved_from_task_id IS NULL AND resolution_rule IS NULL AND "
+            "resolution_digest IS NULL) OR "
+            "(resolved_from_task_id IS NOT NULL AND resolution_rule IS NOT NULL AND "
+            "resolution_digest IS NOT NULL AND resolved_from_task_id <> task_id)",
+            name="ck_turn_route_resolution",
+        ),
+        Index("ix_turn_routes_conversation", "conversation_id", "created_at"),
+    )
+
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), primary_key=True
+    )
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.conversation_id", ondelete="CASCADE")
+    )
+    user_message_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="CASCADE"), unique=True
+    )
+    decision: Mapped[str] = mapped_column(String(32))
+    route_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    route_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    route_manifest_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    candidate_digest: Mapped[str] = mapped_column(String(64))
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON)
+    parameter_digest: Mapped[str] = mapped_column(String(64))
+    resolved_from_task_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "turn_routes.task_id",
+            name="fk_turn_routes_resolved_from",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    resolution_rule: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resolution_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason_code: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(32))
+    result_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    result_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class WorkingMemoryItemRecord(Base):
     __tablename__ = "working_memory_items"
     __table_args__ = (
@@ -613,13 +672,52 @@ class TaskExecutionRunRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class AgentReplanRecord(Base):
+    """Immutable proof linking a terminal Run to one replacement generation."""
+
+    __tablename__ = "agent_replans"
+    __table_args__ = (
+        CheckConstraint(
+            "source_plan_generation >= 1 AND target_plan_generation = source_plan_generation + 1",
+            name="ck_agent_replan_generation",
+        ),
+        CheckConstraint("status IN ('activated')", name="ck_agent_replan_status"),
+        UniqueConstraint("source_run_id", name="uq_agent_replan_source_run"),
+        UniqueConstraint("target_run_id", name="uq_agent_replan_target_run"),
+        UniqueConstraint(
+            "task_id", "target_plan_generation", name="uq_agent_replan_target_generation"
+        ),
+        Index("ix_agent_replans_task", "task_id", "target_plan_generation"),
+    )
+
+    replan_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
+    source_run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="RESTRICT")
+    )
+    source_plan_generation: Mapped[int] = mapped_column(Integer)
+    source_plan_digest: Mapped[str] = mapped_column(String(64))
+    target_run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="RESTRICT")
+    )
+    target_plan_generation: Mapped[int] = mapped_column(Integer)
+    target_plan_digest: Mapped[str] = mapped_column(String(64))
+    contract_version: Mapped[int] = mapped_column(Integer)
+    contract_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    replan_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class TaskExecutionNodeRecord(Base):
     __tablename__ = "task_execution_nodes"
     __table_args__ = (
         CheckConstraint("revision >= 1 AND attempt_count >= 0", name="ck_execution_node"),
         CheckConstraint(
             "status IN ('pending', 'ready', 'claimed', 'running', "
-            "'awaiting_verification', 'verified', 'cancelled', 'failed')",
+            "'awaiting_verification', 'verified', 'cancelled', 'failed', 'waiting_user', "
+            "'waiting_children')",
             name="ck_execution_node_status",
         ),
         UniqueConstraint("run_id", "local_key", name="uq_execution_node_key"),
@@ -635,6 +733,9 @@ class TaskExecutionNodeRecord(Base):
     node_kind: Mapped[str] = mapped_column(String(32))
     node_spec_digest: Mapped[str] = mapped_column(String(64))
     depends_on: Mapped[list[str]] = mapped_column(JSON, default=list)
+    handoff_parent_node_id: Mapped[str | None] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="RESTRICT"), nullable=True
+    )
     bound_agent: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     capability: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     acceptance_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -662,7 +763,7 @@ class TaskExecutionEdgeRecord(Base):
     __tablename__ = "task_execution_edges"
     __table_args__ = (
         CheckConstraint(
-            "requirement IN ('verified')",
+            "requirement IN ('verified', 'server_condition')",
             name="ck_execution_edge_requirement",
         ),
     )
@@ -677,6 +778,10 @@ class TaskExecutionEdgeRecord(Base):
         ForeignKey("task_execution_nodes.node_id", ondelete="CASCADE"), primary_key=True
     )
     requirement: Mapped[str] = mapped_column(String(32), default="verified")
+    condition_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    condition_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decision_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    decision_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class AgentHandoffRecord(Base):
@@ -700,7 +805,8 @@ class AgentInvocationRecord(Base):
         CheckConstraint("attempt >= 1", name="ck_agent_invocation_attempt"),
         CheckConstraint(
             "execution_status IN ('created', 'running', 'result_submitted', "
-            "'failed_retryable', 'failed_terminal', 'cancelled', 'expired')",
+            "'failed_retryable', 'failed_terminal', 'cancelled', 'expired', 'waiting_user', "
+            "'waiting_children')",
             name="ck_agent_invocation_execution_status",
         ),
         CheckConstraint(
@@ -721,6 +827,11 @@ class AgentInvocationRecord(Base):
     attempt: Mapped[int] = mapped_column(Integer)
     handoff_id: Mapped[str] = mapped_column(
         ForeignKey("agent_handoffs.handoff_id", ondelete="RESTRICT"), unique=True
+    )
+    parent_invocation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
     )
     agent_id: Mapped[str] = mapped_column(String(100))
     agent_version: Mapped[str] = mapped_column(String(32))
@@ -764,6 +875,323 @@ class AgentModelTurnRecord(Base):
     claim_fencing_token: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ModelDispatchAttemptRecord(Base):
+    __tablename__ = "model_dispatch_attempts"
+    __table_args__ = (
+        CheckConstraint("attempt_no >= 1", name="ck_model_dispatch_attempt_no"),
+        CheckConstraint(
+            "status IN ('prepared', 'dispatching', 'succeeded', 'failed', 'outcome_unknown')",
+            name="ck_model_dispatch_attempt_status",
+        ),
+        UniqueConstraint("turn_id", "attempt_no", name="uq_model_dispatch_attempt"),
+    )
+
+    dispatch_attempt_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    turn_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_model_turns.turn_id", ondelete="CASCADE"), index=True
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    provider_id: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(200))
+    request_digest: Mapped[str] = mapped_column(String(64))
+    response_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_micros: Mapped[int] = mapped_column(Integer, default=0)
+    stable_error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    claim_owner_id: Mapped[str] = mapped_column(String(128))
+    claim_fencing_token: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentDecisionRecord(Base):
+    __tablename__ = "agent_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('request_route', 'submit_result', 'needs_user_input', "
+            "'propose_handoff', 'propose_task_graph')",
+            name="ck_agent_decision_kind",
+        ),
+    )
+
+    decision_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    turn_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_model_turns.turn_id", ondelete="CASCADE"), unique=True
+    )
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32))
+    binding_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    decision_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentObservationRecord(Base):
+    __tablename__ = "agent_observations"
+    __table_args__ = (
+        CheckConstraint(
+            "source_kind IN ('route', 'handoff') AND status IN ('succeeded', 'failed')",
+            name="ck_agent_observation_state",
+        ),
+    )
+
+    observation_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="CASCADE"), index=True
+    )
+    decision_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_decisions.decision_id", ondelete="CASCADE"), unique=True
+    )
+    source_kind: Mapped[str] = mapped_column(String(16))
+    binding_id: Mapped[str] = mapped_column(String(68))
+    status: Mapped[str] = mapped_column(String(16))
+    result_ref: Mapped[str] = mapped_column(String(100))
+    projection: Mapped[dict[str, Any]] = mapped_column(JSON)
+    observation_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentDelegationRecord(Base):
+    __tablename__ = "agent_delegations"
+    __table_args__ = (
+        CheckConstraint("depth >= 1 AND depth <= 10", name="ck_agent_delegation_depth"),
+        CheckConstraint(
+            "status IN ('waiting_child', 'child_verified', 'consumed', 'cancelled', 'failed')",
+            name="ck_agent_delegation_status",
+        ),
+        UniqueConstraint("run_id", "child_node_id", name="uq_agent_delegation_child_node"),
+        Index("ix_agent_delegations_parent", "parent_invocation_id", "status"),
+    )
+
+    delegation_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="CASCADE")
+    )
+    parent_invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="CASCADE")
+    )
+    child_invocation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+    )
+    parent_node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="CASCADE")
+    )
+    child_node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="CASCADE")
+    )
+    decision_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_decisions.decision_id", ondelete="CASCADE"), unique=True
+    )
+    binding_id: Mapped[str] = mapped_column(String(68), unique=True)
+    status: Mapped[str] = mapped_column(String(24))
+    depth: Mapped[int] = mapped_column(Integer)
+    proposal_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    proposal_digest: Mapped[str] = mapped_column(String(64))
+    budget_allocation: Mapped[dict[str, Any]] = mapped_column(JSON)
+    child_result_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    observation_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentTaskGraphRecord(Base):
+    __tablename__ = "agent_task_graphs"
+    __table_args__ = (
+        CheckConstraint("node_count >= 1 AND node_count <= 8", name="ck_agent_task_graph_nodes"),
+        CheckConstraint("max_depth >= 1 AND max_depth <= 8", name="ck_agent_task_graph_depth"),
+        CheckConstraint(
+            "status IN ('running', 'verified', 'consumed', 'cancelled', 'failed')",
+            name="ck_agent_task_graph_status",
+        ),
+        Index("ix_agent_task_graphs_run", "run_id", "status"),
+    )
+
+    graph_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="CASCADE")
+    )
+    parent_invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="CASCADE"), unique=True
+    )
+    parent_node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="CASCADE")
+    )
+    decision_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_decisions.decision_id", ondelete="CASCADE"), unique=True
+    )
+    binding_id: Mapped[str] = mapped_column(String(68), unique=True)
+    status: Mapped[str] = mapped_column(String(16))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    graph_digest: Mapped[str] = mapped_column(String(64))
+    node_count: Mapped[int] = mapped_column(Integer)
+    max_depth: Mapped[int] = mapped_column(Integer)
+    output_local_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    output_node_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    observation_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentTaskGraphNodeRecord(Base):
+    __tablename__ = "agent_task_graph_nodes"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('waiting_child', 'child_verified', 'consumed', 'cancelled', 'failed')",
+            name="ck_agent_task_graph_node_status",
+        ),
+        UniqueConstraint("child_node_id", name="uq_agent_task_graph_child_node"),
+        Index("ix_agent_task_graph_nodes_status", "graph_id", "status"),
+    )
+
+    graph_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_task_graphs.graph_id", ondelete="CASCADE"), primary_key=True
+    )
+    local_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    child_node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="CASCADE")
+    )
+    child_invocation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+    )
+    binding_id: Mapped[str] = mapped_column(String(68), unique=True)
+    status: Mapped[str] = mapped_column(String(24))
+    budget_allocation: Mapped[dict[str, Any]] = mapped_column(JSON)
+    input_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    input_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    approval_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    approval_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    child_result_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    result_ref_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    result_ref_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WorkspaceAgentResultRecord(Base):
+    __tablename__ = "workspace_agent_results"
+    __table_args__ = (
+        CheckConstraint(
+            "result_kind IN ('file', 'directory', 'python_test', 'node_test', 'patch_test')",
+            name="ck_workspace_agent_result_kind",
+        ),
+        Index("ix_workspace_agent_results_run", "run_id", "created_at"),
+    )
+
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="CASCADE"), primary_key=True
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="CASCADE")
+    )
+    result_kind: Mapped[str] = mapped_column(String(16))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentInputRequestRecord(Base):
+    __tablename__ = "agent_input_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'resolved', 'cancelled')",
+            name="ck_agent_input_request_status",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND resolved_task_id IS NULL AND answer_digest IS NULL "
+            "AND resolved_at IS NULL) OR "
+            "(status <> 'pending' AND resolved_at IS NOT NULL)",
+            name="ck_agent_input_request_resolution",
+        ),
+    )
+
+    input_request_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="CASCADE"), index=True
+    )
+    decision_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_decisions.decision_id", ondelete="CASCADE"), unique=True
+    )
+    question_code: Mapped[str] = mapped_column(String(100))
+    question: Mapped[str] = mapped_column(String(300))
+    blocking_fields: Mapped[list[str]] = mapped_column(JSON)
+    answer_schema: Mapped[str] = mapped_column(String(100))
+    request_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16))
+    resolved_task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="RESTRICT"), nullable=True
+    )
+    answer_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkbenchRuntimeItemRecord(Base):
+    """Durable, fence-bound request to advance one Workbench task."""
+
+    __tablename__ = "workbench_runtime_items"
+    __table_args__ = (
+        CheckConstraint("action = 'advance'", name="ck_workbench_runtime_item_action"),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'applied', 'cancelled', 'dead_letter')",
+            name="ck_workbench_runtime_item_status",
+        ),
+        CheckConstraint(
+            "revision >= 1 AND attempt_count >= 0 AND consecutive_failure_count >= 0 "
+            "AND claim_fencing_token >= 0",
+            name="ck_workbench_runtime_item_counters",
+        ),
+        UniqueConstraint("task_id", "action", name="uq_workbench_runtime_item_task_action"),
+        Index(
+            "ix_workbench_runtime_items_ready",
+            "status",
+            "available_at",
+            "created_at",
+        ),
+        Index(
+            "ix_workbench_runtime_items_lease",
+            "status",
+            "claim_expires_at",
+        ),
+    )
+
+    work_item_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24))
+    revision: Mapped[int] = mapped_column(Integer)
+    attempt_count: Mapped[int] = mapped_column(Integer)
+    consecutive_failure_count: Mapped[int] = mapped_column(Integer)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    observed_projection_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claim_owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    claim_fencing_token: Mapped[int] = mapped_column(Integer)
+    claim_acquired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    claim_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    last_error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AgentResultRecord(Base):
@@ -982,6 +1410,8 @@ class ArtifactRevisionRecord(Base):
     byte_count: Mapped[int] = mapped_column(Integer)
     blob_name: Mapped[str] = mapped_column(String(128))
     patch_receipt_id: Mapped[str] = mapped_column(String(68), unique=True)
+    render_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    render_evidence_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 

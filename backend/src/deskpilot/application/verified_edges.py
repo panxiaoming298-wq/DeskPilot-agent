@@ -1,9 +1,15 @@
-"""Single trusted reducer for the runtime's verified-edge unlock rule."""
+"""Trusted reducers for verified and server-adjudicated conditional edges."""
 
-from sqlalchemy import func, select
+from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from deskpilot.domain.agent_runtime import ExecutionNodeStatus, ExecutionRunStatus
+from deskpilot.domain.agent_runtime import (
+    AgentTaskGraphConditionDecision,
+    BoundAgentTaskGraphCondition,
+    ExecutionNodeStatus,
+    ExecutionRunStatus,
+)
 from deskpilot.infrastructure.models import (
     TaskExecutionEdgeRecord,
     TaskExecutionNodeRecord,
@@ -16,12 +22,78 @@ class VerifiedEdgeProofError(RuntimeError):
     code = "VERIFIED_EDGE_PROOF_REJECTED"
 
 
+async def unlock_if_ready(
+    session: AsyncSession,
+    run: TaskExecutionRunRecord,
+    target: TaskExecutionNodeRecord,
+) -> bool:
+    """Unlock one target only after every verified/conditional edge proves true."""
+
+    if target.status != ExecutionNodeStatus.PENDING.value:
+        return False
+    incoming = tuple(
+        (
+            await session.scalars(
+                select(TaskExecutionEdgeRecord).where(
+                    TaskExecutionEdgeRecord.run_id == run.run_id,
+                    TaskExecutionEdgeRecord.to_node_id == target.node_id,
+                )
+            )
+        ).all()
+    )
+    if not incoming:
+        return False
+    for edge in incoming:
+        source = await session.get(TaskExecutionNodeRecord, edge.from_node_id)
+        if source is None or source.status != ExecutionNodeStatus.VERIFIED.value:
+            return False
+        condition_fields = (
+            edge.condition_manifest,
+            edge.condition_digest,
+            edge.decision_manifest,
+            edge.decision_digest,
+        )
+        if edge.requirement == "verified":
+            if any(item is not None for item in condition_fields):
+                raise VerifiedEdgeProofError("Verified edge contains condition state")
+            continue
+        if edge.requirement != "server_condition":
+            raise VerifiedEdgeProofError("Unsupported edge requirement")
+        if edge.condition_manifest is None or edge.condition_digest is None:
+            raise VerifiedEdgeProofError("Conditional edge binding is incomplete")
+        if (edge.decision_manifest is None) != (edge.decision_digest is None):
+            raise VerifiedEdgeProofError("Conditional edge decision is incomplete")
+        if edge.decision_manifest is None:
+            return False
+        try:
+            condition = BoundAgentTaskGraphCondition.model_validate(edge.condition_manifest)
+            decision = AgentTaskGraphConditionDecision.model_validate(edge.decision_manifest)
+        except ValidationError as error:
+            raise VerifiedEdgeProofError("Conditional edge proof is invalid") from error
+        if (
+            edge.condition_digest != condition.condition_digest
+            or edge.decision_digest != decision.decision_digest
+            or condition.source_node_id != edge.from_node_id
+            or decision.source_node_id != edge.from_node_id
+            or decision.target_node_id != edge.to_node_id
+            or decision.predicate != condition.predicate
+        ):
+            raise VerifiedEdgeProofError("Conditional edge binding changed")
+        if not decision.matched:
+            return False
+    now = utc_now()
+    target.status = ExecutionNodeStatus.READY.value
+    target.revision += 1
+    target.updated_at = now
+    return True
+
+
 async def mark_verified_and_unlock(
     session: AsyncSession,
     run: TaskExecutionRunRecord,
     node: TaskExecutionNodeRecord,
 ) -> None:
-    """Verify one node and unlock targets only when every incoming edge is verified."""
+    """Verify one node and unlock targets only when every incoming edge is satisfied."""
 
     now = utc_now()
     node.status = ExecutionNodeStatus.VERIFIED.value
@@ -38,39 +110,14 @@ async def mark_verified_and_unlock(
         ).all()
     )
     for edge in outgoing:
-        if edge.requirement != "verified":
-            raise VerifiedEdgeProofError("Unsupported edge requirement")
         target = await session.scalar(
             select(TaskExecutionNodeRecord)
             .where(TaskExecutionNodeRecord.node_id == edge.to_node_id)
             .with_for_update()
         )
-        if target is None or target.status != ExecutionNodeStatus.PENDING.value:
+        if target is None:
             continue
-        source_ids = tuple(
-            item.from_node_id
-            for item in (
-                await session.scalars(
-                    select(TaskExecutionEdgeRecord).where(
-                        TaskExecutionEdgeRecord.run_id == run.run_id,
-                        TaskExecutionEdgeRecord.to_node_id == target.node_id,
-                        TaskExecutionEdgeRecord.requirement == "verified",
-                    )
-                )
-            ).all()
-        )
-        verified_count = await session.scalar(
-            select(func.count())
-            .select_from(TaskExecutionNodeRecord)
-            .where(
-                TaskExecutionNodeRecord.node_id.in_(source_ids),
-                TaskExecutionNodeRecord.status == ExecutionNodeStatus.VERIFIED.value,
-            )
-        )
-        if source_ids and int(verified_count or 0) == len(source_ids):
-            target.status = ExecutionNodeStatus.READY.value
-            target.revision += 1
-            target.updated_at = now
+        await unlock_if_ready(session, run, target)
     run.status = ExecutionRunStatus.ACTIVE.value
     run.revision += 1
     run.updated_at = now

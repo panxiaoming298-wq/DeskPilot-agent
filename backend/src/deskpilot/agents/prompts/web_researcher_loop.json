@@ -1,0 +1,1 @@
+{"schema_version":"deskpilot.prompt-package.v1","package_id":"builtin.web_researcher","version":"1.1.0","renderer_version":1,"instruction_file":"web_researcher_loop.txt","variables":["objective_ref","context_refs"]}

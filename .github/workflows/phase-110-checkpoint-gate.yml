@@ -1,0 +1,259 @@
+name: Phase 110 checkpoint gate
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-checkpoint-gate:
+    runs-on: windows-latest
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          python-version: "3.12.13"
+          working-directory: backend
+          enable-cache: true
+      - name: Verify and install frozen Python dependencies
+        run: |
+          uv lock --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv sync --frozen --all-extras
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv pip check --python .venv\Scripts\python.exe
+      - name: Run Python static checks
+        run: |
+          uv run ruff check src tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run mypy
+      - name: Verify the single Alembic head and schema drift
+        run: |
+          New-Item -ItemType Directory -Force data | Out-Null
+          uv run python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; heads=ScriptDirectory.from_config(Config('alembic.ini')).get_heads(); assert heads == ['0050_agent_graph_test_conditions'], f'expected the single 0050 head, got {heads}'; print(f'Alembic head: {heads[0]}')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run alembic upgrade head
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run alembic current
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run alembic check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run python -c "import sqlite3; connection=sqlite3.connect('file:data/deskpilot.db?mode=ro', uri=True); integrity=connection.execute('PRAGMA integrity_check').fetchone(); foreign_keys=connection.execute('PRAGMA foreign_key_check').fetchall(); version=connection.execute('SELECT version_num FROM alembic_version').fetchone(); connection.close(); assert integrity == ('ok',), integrity; assert not foreign_keys, foreign_keys; assert version == ('0050_agent_graph_test_conditions',), version; print('SQLite integrity and foreign-key checks passed')"
+      - name: Compare immutable evaluation baselines
+        run: |
+          $baselineBefore = @(
+            Get-ChildItem tests\baselines\evaluations -File |
+              Sort-Object Name |
+              ForEach-Object {
+                "{0}|{1}" -f $_.Name, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+              }
+          )
+          $requiredBaselines = @("golden-resilience-v2.baseline.json") + @(
+            1..15 | ForEach-Object { "multi-agent-core-v$_.baseline.json" }
+          )
+          $baselineNames = @(
+            Get-ChildItem tests\baselines\evaluations -File | ForEach-Object Name
+          )
+          $missingBaselines = @($requiredBaselines | Where-Object { $_ -notin $baselineNames })
+          if ($missingBaselines.Count -ne 0) {
+            $missingBaselines | Write-Error
+            throw "The stage-110 immutable baseline set is incomplete"
+          }
+
+          uv run python -m deskpilot.evaluation_gate compare
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run python -m deskpilot.phase75_gate compare
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $baselineAfter = @(
+            Get-ChildItem tests\baselines\evaluations -File |
+              Sort-Object Name |
+              ForEach-Object {
+                "{0}|{1}" -f $_.Name, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+              }
+          )
+          if ($baselineBefore.Count -lt 16 -or $baselineAfter.Count -lt 16) {
+            throw "The stage-110 immutable evaluation baseline floor is incomplete"
+          }
+          $baselineChanges = @(Compare-Object $baselineBefore $baselineAfter)
+          if ($baselineChanges.Count -ne 0) {
+            $baselineChanges | Format-Table | Out-String | Write-Error
+            throw "Evaluation compare rewrote baseline files"
+          }
+
+          git diff --exit-code -- tests/baselines/evaluations
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $untrackedBaselines = @(git ls-files --others --exclude-standard -- tests/baselines/evaluations)
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          if ($untrackedBaselines.Count -ne 0) {
+            $untrackedBaselines | Write-Error
+            throw "Evaluation compare created untracked baseline files"
+          }
+      - name: Build wheel and verify every Agent Prompt resource
+        run: |
+          uv build --wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run python -c "from pathlib import Path; import zipfile; source=Path('src/deskpilot/agents/prompts'); expected={f'deskpilot/agents/prompts/{path.name}' for path in source.iterdir() if path.is_file() and path.suffix in {'.json', '.txt'}}; stems={'computer_observer','knowledge_researcher','task_synthesizer','web_researcher','web_researcher_loop','workspace_coordinator_loop','workspace_dynamic_coordinator_loop','workspace_patch_planner_loop','workspace_reader_loop','workspace_reader_loop_v2','workspace_tester_loop'}; required={f'deskpilot/agents/prompts/{stem}.{suffix}' for stem in stems for suffix in ('json','txt')}; absent=sorted(required - expected); assert not absent, f'stage-110 Agent Prompt set is incomplete: {absent}'; wheels=sorted(Path('dist').glob('*.whl'), key=lambda path: path.stat().st_mtime_ns); assert wheels, 'wheel was not built'; names=set(zipfile.ZipFile(wheels[-1]).namelist()); missing=sorted(expected - names); assert not missing, f'missing Agent Prompt resources: {missing}'; print(f'verified {len(expected)} Agent Prompt resources in {wheels[-1].name}')"
+      - name: Run the default backend suite
+        # Dedicated PostgreSQL and RabbitMQ tests require explicit local test services and
+        # opt-in environment variables. The default suite reports them as skipped here;
+        # this hosted job does not claim that either external gate ran.
+        run: |
+          uv run pytest --junitxml=pytest-default.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          uv run pytest -m postgresql_integration --junitxml=pytest-postgresql-integration.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          uv run pytest -m rabbitmq_integration --junitxml=pytest-rabbitmq-integration.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $skipValidator = @'
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+
+          def local_name(tag: str) -> str:
+              return tag.rsplit("}", 1)[-1]
+
+
+          def junit_cases(path: str) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+              root = ElementTree.parse(Path(path)).getroot()
+              all_cases: set[tuple[str, str]] = set()
+              skipped_cases: set[tuple[str, str]] = set()
+              for case in root.iter():
+                  if local_name(case.tag) != "testcase":
+                      continue
+                  identity = (case.attrib.get("classname", ""), case.attrib.get("name", ""))
+                  if not all(identity):
+                      raise AssertionError(f"JUnit testcase has no stable identity in {path}: {identity!r}")
+                  if identity in all_cases:
+                      raise AssertionError(f"Duplicate JUnit testcase identity in {path}: {identity!r}")
+                  all_cases.add(identity)
+                  if any(local_name(child.tag) == "skipped" for child in case):
+                      skipped_cases.add(identity)
+              return all_cases, skipped_cases
+
+
+          default_cases, default_skips = junit_cases("pytest-default.xml")
+          postgresql_cases, postgresql_skips = junit_cases(
+              "pytest-postgresql-integration.xml"
+          )
+          rabbitmq_cases, rabbitmq_skips = junit_cases("pytest-rabbitmq-integration.xml")
+
+          assert len(default_cases) >= 615, (
+              f"default suite dropped below the stage-110 floor of 615 tests; "
+              f"got {len(default_cases)}"
+          )
+          assert len(default_skips) == 12, (
+              f"default suite must contain exactly 12 known external-service skips; "
+              f"got {len(default_skips)}: {sorted(default_skips)!r}"
+          )
+          assert len(postgresql_cases) == len(postgresql_skips) == 11, (
+              "postgresql_integration must select exactly 11 tests and every selected test "
+              f"must skip without opt-in services; cases={sorted(postgresql_cases)!r}, "
+              f"skips={sorted(postgresql_skips)!r}"
+          )
+          assert len(rabbitmq_cases) == len(rabbitmq_skips) == 1, (
+              "rabbitmq_integration must select exactly one test and it must skip without "
+              f"opt-in services; cases={sorted(rabbitmq_cases)!r}, "
+              f"skips={sorted(rabbitmq_skips)!r}"
+          )
+          expected_skips = postgresql_skips | rabbitmq_skips
+          assert postgresql_skips.isdisjoint(rabbitmq_skips), (
+              "PostgreSQL and RabbitMQ marker selections overlap"
+          )
+          assert default_skips == expected_skips, (
+              "default suite skips differ from the exact marker-derived allowlist; "
+              f"unexpected={sorted(default_skips - expected_skips)!r}, "
+              f"missing={sorted(expected_skips - default_skips)!r}"
+          )
+          assert expected_skips.issubset(default_cases), (
+              "marker-derived skip allowlist is not present in the default suite"
+          )
+          print("Verified exactly 11 PostgreSQL and 1 RabbitMQ integration skips")
+          '@
+          $skipValidator | uv run python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify committed and working-tree diff whitespace
+        working-directory: .
+        run: |
+          $pullRequestBase = "${{ github.event.pull_request.base.sha }}"
+          $pushBefore = "${{ github.event.before }}"
+          if ("${{ github.event_name }}" -eq "pull_request" -and $pullRequestBase) {
+            git diff --check "$pullRequestBase...HEAD"
+          } elseif (
+            "${{ github.event_name }}" -eq "push" -and
+            $pushBefore -and
+            $pushBefore -notmatch '^0+$'
+          ) {
+            git diff --check "$pushBefore...HEAD"
+          } else {
+            git show --check --format= HEAD
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --check
+
+  frontend-checkpoint-gate:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/setup@v2
+        with:
+          version: 11.19.0
+          runtime: node@24.19.0
+          cache: true
+          cache-dependency-path: frontend/pnpm-lock.yaml
+          package-json-file: frontend/package.json
+          install: false
+      - name: Install frozen frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Run frontend tests
+        run: |
+          $reportPath = Join-Path $env:RUNNER_TEMP "deskpilot-vitest-results.json"
+          pnpm exec vitest run --reporter=json --outputFile=$reportPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          $fileCount = @($report.testResults).Count
+          if ($fileCount -lt 22 -or [int]$report.numTotalTests -lt 154) {
+            throw (
+              "Frontend suite dropped below the stage-110 floor: " +
+              "files=$fileCount tests=$($report.numTotalTests)"
+            )
+          }
+          if (
+            [int]$report.numFailedTestSuites -ne 0 -or
+            [int]$report.numFailedTests -ne 0 -or
+            [int]$report.numPassedTests -ne [int]$report.numTotalTests
+          ) {
+            throw "Frontend Vitest JSON report contains failed or non-passing tests"
+          }
+          Write-Output (
+            "Verified frontend floor: files=$fileCount tests=$($report.numTotalTests)"
+          )
+      - name: Run frontend type check
+        run: pnpm type-check
+      - name: Build frontend production bundle
+        run: pnpm build

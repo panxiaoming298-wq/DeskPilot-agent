@@ -76,6 +76,8 @@ function initWorkspaceMotion(): void {
         duration: 0.58,
       }, '-=0.5')
 
+    if (activeView.value !== 'tasks') return
+
     gsap.fromTo('.composer', {
       autoAlpha: 0.28,
       y: 30,
@@ -119,6 +121,7 @@ function initWorkspaceMotion(): void {
 }
 
 function finishCoverTransition(): void {
+  activeView.value = 'research'
   coverVisible.value = false
   transitioning.value = false
   document.body.classList.remove('cover-open')
@@ -371,7 +374,7 @@ const pageHeading = computed(() =>
   activeView.value === 'tasks'
     ? '让任务过程成为可验证的数据'
     : activeView.value === 'research'
-      ? '从 Claim 到 HTML，每一步都由证据解锁'
+      ? '用对话交付目标，让证据解释每一步'
     : activeView.value === 'memory'
       ? '让每条长期记忆都有来源、版本与去向'
     : activeView.value === 'knowledge'
@@ -389,7 +392,7 @@ const pageHeading = computed(() =>
 
 const pageEyebrow = computed(() => ({
   tasks: 'WINDOWS MULTI-AGENT SYSTEM',
-  research: 'VERIFIED RESEARCH DELIVERY',
+  research: 'CONVERSATION-FIRST LOCAL AGENT',
   memory: 'PROTECTED MEMORY EVIDENCE LEDGER',
   knowledge: 'CONTENT-ADDRESSED LOCAL MEMORY',
   mcp: 'CONTROLLED MODEL CONTEXT PROTOCOL',
@@ -401,7 +404,7 @@ const pageEyebrow = computed(() => ({
 
 const stageTitle = computed(() => ({
   tasks: '阶段 2 · 可控任务',
-  research: '阶段 76 · 研究交付台',
+  research: '阶段 78 · 通用 Agent 路由',
   memory: '阶段 73 · 长期记忆',
   knowledge: '阶段 3 · 本地知识',
   mcp: '阶段 3 · 受控 MCP',
@@ -413,7 +416,7 @@ const stageTitle = computed(() => ({
 
 const stageDescription = computed(() => ({
   tasks: '通过检查点、实时事件和控制命令验证执行闭环。',
-  research: '统一查看 Claim、Citation、Artifact、PatchReceipt、浏览器验收与精确导出。',
+  research: '一个对话入口路由公开研究、本地知识与受控 MCP；不确定时先追问。',
   memory: '确认提案、处理冲突，并核对每次真实 Context 使用记录。',
   knowledge: '导入只读文本来源，以内容寻址分块和来源版本证明检索结果。',
   mcp: '固定 Server 命令、能力和 Schema，默认禁用并记录脱敏审计。',
@@ -597,13 +600,13 @@ function handleOpenHistoricalTask(snapshot: Task): void {
       </div>
 
       <nav aria-label="工作区导航">
-        <button class="nav-item" :class="{ active: activeView === 'tasks' }" type="button" @click="switchView('tasks')">
-          <span>任务工作台</span>
-          <span class="nav-count">TASK</span>
-        </button>
         <button class="nav-item" :class="{ active: activeView === 'research' }" type="button" @click="switchView('research')">
-          <span>研究交付台</span>
-          <span class="nav-count">P76</span>
+          <span>Agent 会话</span>
+          <span class="nav-count">ASK</span>
+        </button>
+        <button class="nav-item" :class="{ active: activeView === 'tasks' }" type="button" @click="switchView('tasks')">
+          <span>执行详情</span>
+          <span class="nav-count">RUN</span>
         </button>
         <button class="nav-item" :class="{ active: activeView === 'knowledge' }" type="button" @click="switchView('knowledge')">
           <span>知识库</span>

@@ -1,5 +1,7 @@
 """Pure deterministic compiler from an untrusted DraftPlan to a sealed plan."""
 
+from typing import Literal
+
 from deskpilot.application.agent_registry import AgentRegistry, AgentRegistryError
 from deskpilot.application.capability_catalog import CapabilityCatalog, CapabilityCatalogError
 from deskpilot.application.plan_binder import AgentPlanBinder, AgentPlanBindingError
@@ -188,9 +190,7 @@ class PlanCompiler:
         except (AgentRegistryError, CapabilityCatalogError) as error:
             raise PlanManifestDriftError("Executable Plan binding changed") from error
 
-    def _validate_contract_capabilities(
-        self, contract: TaskContract
-    ) -> dict[str, CapabilityRef]:
+    def _validate_contract_capabilities(self, contract: TaskContract) -> dict[str, CapabilityRef]:
         result: dict[str, CapabilityRef] = {}
         for reference in contract.capabilities:
             if reference.capability_id in result:
@@ -426,7 +426,7 @@ def research_to_html_contract(
         task_id=task_id,
         version=1,
         goal_ref=f"artifact://task-input/{task_id}",
-        normalized_objective="研究公开主题并制作带来源的静态 HTML 页面",
+        normalized_objective="研究公开主题并制作带来源的静态 HTML、Markdown 与 PDF 交付物",
         acceptance_criteria=(
             AcceptanceCriterion(
                 criterion_id="ac_citations",
@@ -438,7 +438,10 @@ def research_to_html_contract(
             AcceptanceCriterion(
                 criterion_id="ac_html",
                 kind=AcceptanceKind.ARTIFACT_REQUIREMENT,
-                description="产生受控工作区中的静态 HTML revision。",
+                description=(
+                    "产生受控工作区中的 HTML 主 revision、Markdown 与经过真实渲染验收的 "
+                    "PDF 伴生 revision。"
+                ),
                 verification_requirement=VerificationRequirement.ARTIFACT,
                 origin="trusted_template",
             ),
@@ -490,15 +493,13 @@ def research_to_html_contract(
         ),
         workspace=TaskWorkspaceContract(
             workspace_ref=f"workspace://task/{suffix}",
-            allowed_extensions=(".html", ".css"),
+            allowed_extensions=(".html", ".css", ".md", ".pdf"),
             max_total_bytes=1_048_576,
             max_files=10,
             retention_days=30,
             allow_user_path_export=allow_user_path_export,
         ),
-        browser_verify=BrowserVerifyContract(
-            profile_id="deskpilot.browser-static-html.v1"
-        ),
+        browser_verify=BrowserVerifyContract(profile_id="deskpilot.browser-static-html.v1"),
         created_by="trusted_template",
     )
 
@@ -517,9 +518,7 @@ def research_to_html_draft(task_id: str, contract_version: int = 1) -> DraftPlan
     return DraftPlan(
         task_id=task_id,
         contract_version=contract_version,
-        producer=PlanProducer(
-            kind="trusted_template", producer_ref="research_to_html.v1"
-        ),
+        producer=PlanProducer(kind="trusted_template", producer_ref="research_to_html.v1"),
         nodes=(
             DraftPlanNode(
                 local_key="research",
@@ -543,7 +542,10 @@ def research_to_html_draft(task_id: str, contract_version: int = 1) -> DraftPlan
             DraftPlanNode(
                 local_key="build_html",
                 kind=DraftNodeKind.CAPABILITY,
-                objective="只使用已验证 Claim 在 Task Workspace 生成静态 HTML。",
+                objective=(
+                    "只使用已验证 Claim 在 Task Workspace 生成静态 HTML 主交付、"
+                    "Markdown 伴生交付和经过真实渲染验收的 PDF 伴生交付。"
+                ),
                 capability_selector="artifact.html.v1",
                 depends_on=("research",),
                 acceptance_refs=("ac_html",),
@@ -582,6 +584,836 @@ def research_to_html_draft(task_id: str, contract_version: int = 1) -> DraftPlan
                 local_key="delivery",
                 kind=DraftNodeKind.DELIVERY,
                 objective="只基于已验证视图形成交付清单。",
+                depends_on=("final_acceptance",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+        ),
+    )
+
+
+def knowledge_lookup_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="knowledge.local.v1",
+        objective="查询本地知识库并返回带来源行号的结果",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_knowledge_citations",
+            kind=AcceptanceKind.CITATION_REQUIREMENT,
+            description="回答只引用来源版本和检索证明均有效的本地知识片段。",
+            verification_requirement=VerificationRequirement.CITATION,
+            origin="trusted_template",
+        ),
+        output=OutputContract(
+            media_type="text/markdown",
+            language="zh-CN",
+            require_citations=True,
+        ),
+    )
+
+
+def knowledge_lookup_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="knowledge_lookup.v1",
+        local_key="knowledge_lookup",
+        capability_id="knowledge.local.v1",
+        objective="检索并复核本地知识 Citation。",
+        acceptance_ref="ac_knowledge_citations",
+        verification_profile=VerificationProfile.CITATION,
+    )
+
+
+def mcp_text_metrics_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="mcp.text.metrics.v1",
+        objective="使用固定内置 MCP Server 计算文本指标",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_text_metrics",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description="结果通过固定 MCP bundle、Schema 与审计链复核。",
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(
+            media_type="application/json",
+            language="zh-CN",
+        ),
+    )
+
+
+def mcp_text_metrics_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="mcp_text_metrics.v1",
+        local_key="mcp_text_metrics",
+        capability_id="mcp.text.metrics.v1",
+        objective="在短生命周期本地 MCP 进程中计算文本指标。",
+        acceptance_ref="ac_text_metrics",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
+def workspace_file_read_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.file.read.v1",
+        objective="读取已配置工作区内一个受限 UTF-8 文本文件",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_file_read",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description="结果绑定规范化相对路径、稳定文件版本与内容摘要。",
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="text/markdown", language="zh-CN"),
+        model_calls=2,
+        input_tokens=20_000,
+        output_tokens=2_000,
+        cost_micros=100_000,
+    )
+
+
+def workspace_file_read_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_file_read.v1",
+        local_key="workspace_file_read",
+        capability_id="workspace.file.read.v1",
+        objective="读取并复核工作区文件版本证明。",
+        acceptance_ref="ac_workspace_file_read",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+        agent_selector="builtin.workspace_reader",
+        model_calls=2,
+        input_tokens=20_000,
+        output_tokens=2_000,
+        cost_micros=100_000,
+    )
+
+
+def workspace_directory_list_contract(
+    task_id: str, capabilities: CapabilityCatalog
+) -> TaskContract:
+    suffix = task_id.removeprefix("tsk_")
+    pack = capabilities.resolve_preferred("workspace.directory.read.v1")
+    return TaskContract(
+        contract_id=f"tc_{suffix}",
+        task_id=task_id,
+        version=1,
+        goal_ref=f"artifact://task-input/{task_id}",
+        normalized_objective=(
+            "由受约束父 Agent 提出只读子任务 DAG，服务器裁决后列出工作区目录的受限直接子项"
+        ),
+        acceptance_criteria=(
+            AcceptanceCriterion(
+                criterion_id="ac_workspace_directory_list",
+                kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+                description=(
+                    "父 Agent 只消费服务器绑定动态图中全部已验证子 Agent 的 join；"
+                    "目录结果绑定规范相对路径、排序子项、版本摘要与截断状态。"
+                ),
+                verification_requirement=VerificationRequirement.DETERMINISTIC,
+                origin="trusted_template",
+            ),
+        ),
+        constraints=(
+            "external_content_is_untrusted",
+            "no_shell",
+            "no_dynamic_code",
+            "server_adjudicated_handoff_only",
+            "server_adjudicated_dynamic_graph_v1",
+        ),
+        privacy_policy=PrivacyPolicy(
+            classification="internal",
+            allowed_provider_locations=(ModelLocation.LOCAL,),
+            allowed_privacy_modes=("local_only", "local_preferred", "balanced"),
+            external_egress_allowed=False,
+        ),
+        max_risk_level=ToolRiskLevel.R0,
+        budget=TaskBudget(
+            max_model_calls=10,
+            max_tool_calls=4,
+            max_input_tokens=92_000,
+            max_output_tokens=10_000,
+            max_wall_seconds=450,
+            max_retries=0,
+            max_cost_micros=500_000,
+            max_handoffs=4,
+            max_plan_nodes=7,
+        ),
+        output_contract=OutputContract(media_type="application/json", language="zh-CN"),
+        capabilities=(
+            CapabilityRef(
+                capability_id=pack.capability_id,
+                version=pack.version,
+                digest=pack.digest,
+            ),
+        ),
+        created_by="trusted_template",
+    )
+
+
+def workspace_directory_list_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    zero = PlanNodeBudget(
+        model_calls=0,
+        tool_calls=0,
+        input_tokens=0,
+        output_tokens=0,
+        wall_seconds=15,
+        retries=0,
+        cost_micros=0,
+        handoffs=0,
+    )
+    return DraftPlan(
+        task_id=task_id,
+        contract_version=contract_version,
+        producer=PlanProducer(kind="trusted_template", producer_ref="workspace_directory_list.v3"),
+        nodes=(
+            DraftPlanNode(
+                local_key="workspace_directory_list",
+                kind=DraftNodeKind.AGENT,
+                objective="提出受控只读子任务 DAG，并只汇总服务器验证后的完整 join。",
+                agent_selector="builtin.workspace_coordinator",
+                acceptance_refs=("ac_workspace_directory_list",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=PlanNodeBudget(
+                    model_calls=2,
+                    tool_calls=0,
+                    input_tokens=12_000,
+                    output_tokens=2_000,
+                    wall_seconds=60,
+                    retries=0,
+                    cost_micros=100_000,
+                    handoffs=4,
+                ),
+            ),
+            DraftPlanNode(
+                local_key="final_acceptance",
+                kind=DraftNodeKind.FINAL_ACCEPTANCE,
+                objective="确定性复核父 Agent、动态子图及 verified join 的绑定。",
+                depends_on=("workspace_directory_list",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+            DraftPlanNode(
+                local_key="delivery",
+                kind=DraftNodeKind.DELIVERY,
+                objective="只基于已验证父结果形成对话交付。",
+                depends_on=("final_acceptance",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+        ),
+    )
+
+
+def workspace_directory_analyze_contract(
+    task_id: str, capabilities: CapabilityCatalog
+) -> TaskContract:
+    base = workspace_directory_list_contract(task_id, capabilities)
+    material = base.model_dump(mode="json")
+    directory = capabilities.resolve_preferred("workspace.directory.read.v1")
+    file = capabilities.resolve_preferred("workspace.file.read.v1")
+    python_test = capabilities.resolve_preferred("workspace.python.test.v1")
+    node_test = capabilities.resolve_preferred("workspace.node.test.v1")
+    material["normalized_objective"] = (
+        "由受约束父 Agent 生成异构只读 DAG，读取显式路径并按服务器固定协议运行测试"
+    )
+    material["constraints"] = [
+        *base.constraints,
+        "server_bound_capability_inputs_v1",
+        "server_bound_fixed_test_inputs_v1",
+        "server_adjudicated_test_conditions_v1",
+        "fixed_executable_and_argv_v1",
+    ]
+    material["capabilities"] = [
+        CapabilityRef(
+            capability_id=directory.capability_id,
+            version=directory.version,
+            digest=directory.digest,
+        ).model_dump(mode="json"),
+        CapabilityRef(
+            capability_id=file.capability_id,
+            version=file.version,
+            digest=file.digest,
+        ).model_dump(mode="json"),
+        CapabilityRef(
+            capability_id=python_test.capability_id,
+            version=python_test.version,
+            digest=python_test.digest,
+        ).model_dump(mode="json"),
+        CapabilityRef(
+            capability_id=node_test.capability_id,
+            version=node_test.version,
+            digest=node_test.digest,
+        ).model_dump(mode="json"),
+    ]
+    return TaskContract.model_validate(material)
+
+
+def workspace_directory_analyze_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    base = workspace_directory_list_draft(task_id, contract_version)
+    material = base.model_dump(mode="json")
+    material["producer"] = {
+        "kind": "trusted_template",
+        "producer_ref": "workspace_directory_analyze.v1",
+    }
+    nodes = material["nodes"]
+    assert isinstance(nodes, list)
+    for node in nodes:
+        assert isinstance(node, dict)
+        if node["local_key"] == "workspace_directory_list":
+            node["local_key"] = "workspace_directory_analyze"
+            node["objective"] = (
+                "提出服务器绑定读取/固定测试输入的异构 DAG，并汇总完整 verified join。"
+            )
+        if node.get("depends_on") == ["workspace_directory_list"]:
+            node["depends_on"] = ["workspace_directory_analyze"]
+    return DraftPlan.model_validate(material)
+
+
+def workspace_snapshot_check_contract(
+    task_id: str, capabilities: CapabilityCatalog
+) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.snapshot.check.v1",
+        objective="在断网隔离进程中检查工作区文本快照",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_snapshot_check",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description="结果绑定固定 profile、完整有界快照、解析问题与隔离证明。",
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="application/json", language="zh-CN"),
+    )
+
+
+def workspace_snapshot_check_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_snapshot_check.v1",
+        local_key="workspace_snapshot_check",
+        capability_id="workspace.snapshot.check.v1",
+        objective="对只读文件快照运行固定语法解析检查。",
+        acceptance_ref="ac_workspace_snapshot_check",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
+def workspace_python_test_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.python.test.v1",
+        objective="在断网隔离进程中运行项目的一个显式 Python 测试文件",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_python_test",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description=("结果绑定完整有界快照、内容寻址运行时、pytest 输出与隔离证明。"),
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="application/json", language="zh-CN"),
+    )
+
+
+def workspace_python_test_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_python_test.v1",
+        local_key="workspace_python_test",
+        capability_id="workspace.python.test.v1",
+        objective="从只读项目快照运行固定 pytest 文件协议。",
+        acceptance_ref="ac_workspace_python_test",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
+def workspace_node_test_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.node.test.v1",
+        objective="在断网隔离进程中运行项目的一个显式 Node 测试文件",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_node_test",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description=("结果绑定完整有界快照、内容寻址 Node 运行时、node:test 输出与隔离证明。"),
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="application/json", language="zh-CN"),
+    )
+
+
+def workspace_node_test_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_node_test.v1",
+        local_key="workspace_node_test",
+        capability_id="workspace.node.test.v1",
+        objective="从有界项目快照运行固定 Node node:test 文件协议。",
+        acceptance_ref="ac_workspace_node_test",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
+def workspace_file_replace_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.file.replace.v1",
+        objective="经用户确认后精确替换工作区文件中的单个文本片段",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_file_replace",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description="提交绑定预览摘要、原版本、结果版本、安全备份与不可变回执。",
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="application/json", language="zh-CN"),
+        max_risk_level=ToolRiskLevel.R1,
+    )
+
+
+def workspace_file_replace_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_file_replace.v1",
+        local_key="workspace_file_replace",
+        capability_id="workspace.file.replace.v1",
+        objective="提交已确认的单次文本替换并核验安全备份。",
+        acceptance_ref="ac_workspace_file_replace",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
+def workspace_file_create_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.file.create.v1",
+        objective="经用户确认后创建一个不存在的工作区文本文件",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_file_create",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description="提交绑定目标目录版本、拟写内容、持久化恢复清单与不可变回执。",
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="application/json", language="zh-CN"),
+        max_risk_level=ToolRiskLevel.R1,
+    )
+
+
+def workspace_file_create_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_file_create.v1",
+        local_key="workspace_file_create",
+        capability_id="workspace.file.create.v1",
+        objective="提交已确认的新建文件并核验恢复证明。",
+        acceptance_ref="ac_workspace_file_create",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
+def workspace_file_rename_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.file.rename.v1",
+        objective="经用户确认后原子重命名一个工作区文本文件",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_file_rename",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description="提交绑定源文件版本、目标目录版本、内容恒等证明与不可变回执。",
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="application/json", language="zh-CN"),
+        max_risk_level=ToolRiskLevel.R1,
+    )
+
+
+def workspace_file_rename_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_file_rename.v1",
+        local_key="workspace_file_rename",
+        capability_id="workspace.file.rename.v1",
+        objective="提交已确认的文件重命名并核验内容身份。",
+        acceptance_ref="ac_workspace_file_rename",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
+def workspace_patch_bundle_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.patch.bundle.v1",
+        objective="经用户一次确认后提交隔离预演的多文件精确替换补丁",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_patch_bundle",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description="提交绑定全部原版本、隔离副本、逐项备份及完整或部分完成回执。",
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="application/json", language="zh-CN"),
+        max_risk_level=ToolRiskLevel.R1,
+    )
+
+
+def workspace_patch_bundle_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_patch_bundle.v1",
+        local_key="workspace_patch_bundle",
+        capability_id="workspace.patch.bundle.v1",
+        objective="核验隔离补丁清单并按序提交全部精确替换。",
+        acceptance_ref="ac_workspace_patch_bundle",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
+def workspace_agent_patch_test_contract(
+    task_id: str,
+    capabilities: CapabilityCatalog,
+    *,
+    test_kind: Literal["python", "node"],
+) -> TaskContract:
+    suffix = task_id.removeprefix("tsk_")
+    capability_ids = (
+        "workspace.file.read.v1",
+        "workspace.patch.propose.v1",
+        "workspace.patch.bundle.v1",
+        (
+            "workspace.python.test.v1"
+            if test_kind == "python"
+            else "workspace.node.test.v1"
+        ),
+    )
+    refs = tuple(
+        CapabilityRef(
+            capability_id=pack.capability_id,
+            version=pack.version,
+            digest=pack.digest,
+        )
+        for pack in (capabilities.resolve_preferred(item) for item in capability_ids)
+    )
+    return TaskContract(
+        contract_id=f"tc_{suffix}",
+        task_id=task_id,
+        version=1,
+        goal_ref=f"artifact://task-input/{task_id}",
+        normalized_objective=(
+            "读取一个显式文件并生成无授权精确补丁提案；仅在用户确认后应用，"
+            "再运行服务器固定测试形成可验证结果"
+        ),
+        acceptance_criteria=(
+            AcceptanceCriterion(
+                criterion_id="ac_workspace_agent_patch_test",
+                kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+                description=(
+                    "结果绑定文件观察、模型提案、用户确认摘要、补丁回执、"
+                    "固定测试快照/运行时与隔离证明。"
+                ),
+                verification_requirement=VerificationRequirement.DETERMINISTIC,
+                origin="trusted_template",
+            ),
+        ),
+        constraints=(
+            "external_content_is_untrusted",
+            "no_shell",
+            "no_dynamic_code",
+            "model_patch_proposal_grants_no_authority_v1",
+            "explicit_user_patch_confirmation_v1",
+            "server_bound_fixed_test_v1",
+            "no_automatic_replan_after_workspace_write_v1",
+        ),
+        privacy_policy=PrivacyPolicy(
+            classification="internal",
+            allowed_provider_locations=(ModelLocation.LOCAL,),
+            allowed_privacy_modes=("local_only", "local_preferred", "balanced"),
+            external_egress_allowed=False,
+        ),
+        max_risk_level=ToolRiskLevel.R1,
+        budget=TaskBudget(
+            max_model_calls=2,
+            max_tool_calls=2,
+            max_input_tokens=24_000,
+            max_output_tokens=3_000,
+            max_wall_seconds=180,
+            max_retries=0,
+            max_cost_micros=100_000,
+            max_handoffs=0,
+            max_plan_nodes=3,
+        ),
+        output_contract=OutputContract(media_type="application/json", language="zh-CN"),
+        capabilities=refs,
+        created_by="trusted_template",
+    )
+
+
+def workspace_agent_patch_test_draft(
+    task_id: str, contract_version: int = 1
+) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_agent_patch_test.v1",
+        local_key="workspace_agent_patch_test",
+        capability_id="workspace.patch.propose.v1",
+        objective=(
+            "读取服务器绑定文件，提出一次无授权精确替换，并等待用户确认后固定测试。"
+        ),
+        acceptance_ref="ac_workspace_agent_patch_test",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+        agent_selector="builtin.workspace_patch_planner",
+        model_calls=2,
+        input_tokens=24_000,
+        output_tokens=3_000,
+        cost_micros=100_000,
+    )
+
+
+def workspace_dynamic_patch_test_contract(
+    task_id: str,
+    capabilities: CapabilityCatalog,
+    *,
+    test_kind: Literal["python", "node"],
+) -> TaskContract:
+    """Authorize a model-shaped DAG with composable server-bound Patch approvals."""
+
+    base = workspace_directory_analyze_contract(task_id, capabilities)
+    material = base.model_dump(mode="json")
+    capability_ids = (
+        "workspace.directory.read.v1",
+        "workspace.file.read.v1",
+        "workspace.patch.propose.v1",
+        "workspace.patch.bundle.v1",
+        (
+            "workspace.python.test.v1"
+            if test_kind == "python"
+            else "workspace.node.test.v1"
+        ),
+    )
+    material["normalized_objective"] = (
+        "由受约束父 Agent 生成动态修复 DAG；每个 Patch 节点只能消费"
+        "一个服务器签发的目标绑定，只提交无授权建议，并分别等待用户"
+        "确认当前内容寻址 manifest 后写入并运行服务器固定测试"
+    )
+    material["acceptance_criteria"] = [
+        AcceptanceCriterion(
+            criterion_id="ac_workspace_dynamic_patch_test",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description=(
+                "最终目录输出依赖节点级审批证明、补丁回执、固定测试结果及"
+                "全部上游类型化 ResultRef；未确认建议不能形成写入。"
+            ),
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ).model_dump(mode="json")
+    ]
+    material["constraints"] = [
+        *base.constraints,
+        "model_patch_proposal_grants_no_authority_v1",
+        "dynamic_patch_approval_node_v1",
+        "fresh_confirmation_per_patch_node_v1",
+        "composable_patch_approval_nodes_v1",
+        "distinct_server_bound_patch_input_per_node_v1",
+        "no_automatic_replan_after_workspace_write_v1",
+        "maximum_three_patch_plan_generations_v1",
+        "cross_generation_task_budget_v1",
+        "fresh_confirmation_after_replan_v1",
+    ]
+    base_budget = base.budget
+    material["budget"] = TaskBudget(
+        max_model_calls=base_budget.max_model_calls * 3,
+        max_tool_calls=base_budget.max_tool_calls * 3,
+        max_input_tokens=base_budget.max_input_tokens * 3,
+        max_output_tokens=base_budget.max_output_tokens * 3,
+        max_wall_seconds=base_budget.max_wall_seconds * 3,
+        max_retries=base_budget.max_retries * 3,
+        max_cost_micros=base_budget.max_cost_micros * 3,
+        max_handoffs=base_budget.max_handoffs * 3,
+        # This field remains the per-generation structural graph ceiling.
+        max_plan_nodes=base_budget.max_plan_nodes,
+    ).model_dump(mode="json")
+    material["max_risk_level"] = ToolRiskLevel.R1.value
+    material["capabilities"] = [
+        CapabilityRef(
+            capability_id=pack.capability_id,
+            version=pack.version,
+            digest=pack.digest,
+        ).model_dump(mode="json")
+        for pack in (capabilities.resolve_preferred(item) for item in capability_ids)
+    ]
+    return TaskContract.model_validate(material)
+
+
+def workspace_dynamic_patch_test_draft(
+    task_id: str, contract_version: int = 1
+) -> DraftPlan:
+    base = workspace_directory_analyze_draft(task_id, contract_version)
+    material = base.model_dump(mode="json")
+    material["producer"] = {
+        "kind": "trusted_template",
+        "producer_ref": "workspace_dynamic_patch_test.v1",
+    }
+    nodes = material["nodes"]
+    assert isinstance(nodes, list)
+    for node in nodes:
+        assert isinstance(node, dict)
+        if node["local_key"] == "workspace_directory_analyze":
+            node["local_key"] = "workspace_dynamic_patch_test"
+            node["objective"] = (
+                "提出含节点级 Patch/Approval 的服务器裁决 DAG，并只汇总 verified join。"
+            )
+            node["acceptance_refs"] = ["ac_workspace_dynamic_patch_test"]
+        if node.get("depends_on") == ["workspace_directory_analyze"]:
+            node["depends_on"] = ["workspace_dynamic_patch_test"]
+    return DraftPlan.model_validate(material)
+
+
+def _direct_capability_contract(
+    task_id: str,
+    capabilities: CapabilityCatalog,
+    *,
+    capability_id: str,
+    objective: str,
+    criterion: AcceptanceCriterion,
+    output: OutputContract,
+    max_risk_level: ToolRiskLevel = ToolRiskLevel.R0,
+    model_calls: int = 0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cost_micros: int = 0,
+) -> TaskContract:
+    suffix = task_id.removeprefix("tsk_")
+    pack = capabilities.resolve_preferred(capability_id)
+    return TaskContract(
+        contract_id=f"tc_{suffix}",
+        task_id=task_id,
+        version=1,
+        goal_ref=f"artifact://task-input/{task_id}",
+        normalized_objective=objective,
+        acceptance_criteria=(criterion,),
+        constraints=("external_content_is_untrusted", "no_shell", "no_dynamic_code"),
+        privacy_policy=PrivacyPolicy(
+            classification="internal",
+            allowed_provider_locations=(ModelLocation.LOCAL,),
+            allowed_privacy_modes=("local_only", "local_preferred", "balanced"),
+            external_egress_allowed=False,
+        ),
+        max_risk_level=max_risk_level,
+        budget=TaskBudget(
+            max_model_calls=model_calls,
+            max_tool_calls=1,
+            max_input_tokens=input_tokens,
+            max_output_tokens=output_tokens,
+            max_wall_seconds=90,
+            max_retries=0,
+            max_cost_micros=cost_micros,
+            max_handoffs=0,
+            max_plan_nodes=3,
+        ),
+        output_contract=output,
+        capabilities=(
+            CapabilityRef(
+                capability_id=pack.capability_id,
+                version=pack.version,
+                digest=pack.digest,
+            ),
+        ),
+        created_by="trusted_template",
+    )
+
+
+def _direct_capability_draft(
+    task_id: str,
+    contract_version: int,
+    *,
+    producer_ref: str,
+    local_key: str,
+    capability_id: str,
+    objective: str,
+    acceptance_ref: str,
+    verification_profile: VerificationProfile,
+    agent_selector: str | None = None,
+    model_calls: int = 0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cost_micros: int = 0,
+) -> DraftPlan:
+    zero = PlanNodeBudget(
+        model_calls=0,
+        tool_calls=0,
+        input_tokens=0,
+        output_tokens=0,
+        wall_seconds=15,
+        retries=0,
+        cost_micros=0,
+        handoffs=0,
+    )
+    return DraftPlan(
+        task_id=task_id,
+        contract_version=contract_version,
+        producer=PlanProducer(kind="trusted_template", producer_ref=producer_ref),
+        nodes=(
+            DraftPlanNode(
+                local_key=local_key,
+                kind=(
+                    DraftNodeKind.AGENT if agent_selector is not None else DraftNodeKind.CAPABILITY
+                ),
+                objective=objective,
+                agent_selector=agent_selector,
+                capability_selector=(capability_id if agent_selector is None else None),
+                capability_requirements=((capability_id,) if agent_selector is not None else ()),
+                acceptance_refs=(acceptance_ref,),
+                verification_profile=verification_profile,
+                budget=PlanNodeBudget(
+                    model_calls=model_calls,
+                    tool_calls=1,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    wall_seconds=60,
+                    retries=0,
+                    cost_micros=cost_micros,
+                    handoffs=0,
+                ),
+            ),
+            DraftPlanNode(
+                local_key="final_acceptance",
+                kind=DraftNodeKind.FINAL_ACCEPTANCE,
+                objective="确定性复核绑定结果与证据摘要。",
+                depends_on=(local_key,),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+            DraftPlanNode(
+                local_key="delivery",
+                kind=DraftNodeKind.DELIVERY,
+                objective="只基于已验证结果形成对话交付。",
                 depends_on=("final_acceptance",),
                 verification_profile=VerificationProfile.DETERMINISTIC,
                 budget=zero,

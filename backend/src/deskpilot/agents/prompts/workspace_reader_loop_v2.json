@@ -1,0 +1,1 @@
+{"schema_version":"deskpilot.prompt-package.v1","package_id":"builtin.workspace_reader","version":"1.1.0","renderer_version":1,"instruction_file":"workspace_reader_loop_v2.txt","variables":["objective_ref","context_refs"]}

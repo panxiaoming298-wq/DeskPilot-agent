@@ -40,6 +40,9 @@ from deskpilot.api.routes import (
 )
 from deskpilot.api.security_middleware import LocalApiSecurityMiddleware
 from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
+from deskpilot.application.agent_model_admission import load_agent_model_admissions
+from deskpilot.application.agent_model_loop import AgentModelLoopRuntime
+from deskpilot.application.agent_supervisor_runtime import AgentSupervisorRuntime
 from deskpilot.application.artifact_delivery_runtime import ArtifactDeliveryRuntime
 from deskpilot.application.artifact_export_runtime import ArtifactExportRuntime
 from deskpilot.application.browser_verifier import (
@@ -69,6 +72,10 @@ from deskpilot.application.model_gateway import (
     ModelProvider,
 )
 from deskpilot.application.outbox_publisher import DeliveryPublisher, OutboxPublisher
+from deskpilot.application.pdf_artifact_renderer import (
+    IsolatedPdfArtifactRenderer,
+    PdfArtifactRenderer,
+)
 from deskpilot.application.plan_compilation_service import PlanCompilationService
 from deskpilot.application.plan_compiler import PlanCompiler
 from deskpilot.application.policy_engine import BuiltinPolicyEngine, PolicyEngine
@@ -86,11 +93,25 @@ from deskpilot.application.runner_supervisor import RunnerSupervisor
 from deskpilot.application.task_checkpoint_codec import TaskCheckpointCodec
 from deskpilot.application.task_service import TaskService
 from deskpilot.application.task_workbench_service import TaskWorkbenchService
+from deskpilot.application.turn_router import (
+    TurnRouter,
+    WorkspaceCheckPort,
+    WorkspaceNodeTestPort,
+    WorkspacePythonTestPort,
+)
 from deskpilot.application.web_research import (
     SafePageReader,
     SearchProvider,
     SearxngSearchProvider,
 )
+from deskpilot.application.workbench_runtime_coordinator import (
+    WorkbenchRuntimeCoordinator,
+)
+from deskpilot.application.workspace_agent_runtime import WorkspaceAgentRuntime
+from deskpilot.application.workspace_check_runtime import WorkspaceCheckRuntime
+from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
+from deskpilot.application.workspace_node_test_runtime import WorkspaceNodeTestRuntime
+from deskpilot.application.workspace_python_test_runtime import WorkspacePythonTestRuntime
 from deskpilot.core.config import Settings
 from deskpilot.core.security import LocalSessionSecurity
 from deskpilot.domain.provider_management import (
@@ -134,6 +155,10 @@ def create_app(
     search_provider: SearchProvider | None = None,
     page_reader: SafePageReader | None = None,
     browser_verifier: BrowserVerifier | None = None,
+    pdf_artifact_renderer: PdfArtifactRenderer | None = None,
+    workspace_check_runtime: WorkspaceCheckPort | None = None,
+    workspace_python_test_runtime: WorkspacePythonTestPort | None = None,
+    workspace_node_test_runtime: WorkspaceNodeTestPort | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings()
     instance_id = f"api_{uuid4().hex}"
@@ -273,9 +298,18 @@ def create_app(
         mcp_control_plane = McpControlPlane(database, telemetry=telemetry_facade)
         evaluation_service = EvaluationService(database, telemetry=telemetry_facade)
         registry = create_builtin_registry()
+        agent_model_admissions = load_agent_model_admissions(
+            (
+                Path(resolved_settings.model_admission_bundle_path)
+                if resolved_settings.model_admission_bundle_path is not None
+                else None
+            ),
+            explicitly_allowed=resolved_settings.model_admission_allow,
+        )
         agent_registry = create_builtin_agent_registry(
             registry,
             model_gateway.descriptors(),
+            agent_model_admissions,
         )
         capability_catalog = create_builtin_capability_catalog(
             research_runtime_enabled=(
@@ -308,11 +342,71 @@ def create_app(
             database,
             model_gateway,
             browser_verifier or IsolatedChromiumVerifier(resolved_settings.browser_executable_path),
+            pdf_artifact_renderer
+            or IsolatedPdfArtifactRenderer(
+                resolved_settings.browser_executable_path,
+                resolved_settings.pdfinfo_executable_path,
+                resolved_settings.pdftoppm_executable_path,
+            ),
             resolved_settings.artifact_workspace_root,
         )
         artifact_export_runtime = ArtifactExportRuntime(
             database,
             resolved_settings.artifact_workspace_root,
+        )
+        workspace_file_runtime = WorkspaceFileRuntime(
+            resolved_settings.conversation_workspace_root,
+            resolved_settings.artifact_workspace_root,
+        )
+        agent_model_loop_runtime = AgentModelLoopRuntime(
+            database,
+            agent_execution_runtime,
+            agent_registry,
+            model_gateway,
+            context_memory_runtime,
+        )
+        agent_supervisor_runtime = AgentSupervisorRuntime(
+            database,
+            agent_registry,
+            capability_catalog,
+        )
+        resolved_workspace_check_runtime = workspace_check_runtime or WorkspaceCheckRuntime(
+            resolved_settings.runner_worker_runtime_root,
+            resolved_settings.runner_appcontainer_profile_journal_path,
+        )
+        resolved_workspace_python_test_runtime = (
+            workspace_python_test_runtime
+            or WorkspacePythonTestRuntime(
+                resolved_settings.runner_worker_runtime_root,
+                resolved_settings.runner_appcontainer_profile_journal_path,
+            )
+        )
+        resolved_workspace_node_test_runtime = (
+            workspace_node_test_runtime
+            or WorkspaceNodeTestRuntime(
+                resolved_settings.node_test_runtime_root,
+                resolved_settings.runner_appcontainer_profile_journal_path,
+                resolved_settings.node_test_executable_path,
+            )
+        )
+        workspace_agent_runtime = WorkspaceAgentRuntime(
+            database,
+            agent_execution_runtime,
+            agent_model_loop_runtime,
+            workspace_file_runtime,
+            agent_registry,
+            agent_supervisor_runtime,
+            resolved_workspace_python_test_runtime,
+            resolved_workspace_node_test_runtime,
+        )
+        turn_router = TurnRouter(
+            database,
+            knowledge_base,
+            mcp_control_plane,
+            workspace_file_runtime,
+            resolved_workspace_check_runtime,
+            resolved_workspace_python_test_runtime,
+            resolved_workspace_node_test_runtime,
         )
         task_workbench_service = TaskWorkbenchService(
             database,
@@ -321,9 +415,38 @@ def create_app(
             plan_compilation_service,
             capability_catalog,
             agent_execution_runtime,
+            research_runtime,
+            workspace_agent_runtime,
+            long_term_memory_runtime,
             artifact_delivery_runtime,
             artifact_export_runtime,
+            turn_router,
         )
+        workbench_runtime = (
+            WorkbenchRuntimeCoordinator(
+                database,
+                task_workbench_service,
+                instance_id=instance_id,
+                poll_interval_seconds=(
+                    resolved_settings.workbench_runtime_poll_interval_seconds
+                ),
+                claim_ttl_seconds=(
+                    resolved_settings.workbench_runtime_claim_ttl_seconds
+                ),
+                concurrency=resolved_settings.workbench_runtime_concurrency,
+                max_failures=resolved_settings.workbench_runtime_max_failures,
+                retry_base_seconds=(
+                    resolved_settings.workbench_runtime_retry_base_seconds
+                ),
+                retry_max_seconds=(
+                    resolved_settings.workbench_runtime_retry_max_seconds
+                ),
+            )
+            if resolved_settings.workbench_runtime_enabled
+            else None
+        )
+        if workbench_runtime is not None:
+            task_workbench_service.bind_auto_advance(workbench_runtime)
         resolved_policy_engine = policy_engine or BuiltinPolicyEngine(
             allowed_capabilities=(
                 "filesystem.metadata.read",
@@ -409,15 +532,24 @@ def create_app(
         app.state.effect_runtime_operations = effect_runtime_operations
         app.state.task_service = task_service
         app.state.agent_registry = agent_registry
+        app.state.agent_model_admissions = agent_model_admissions
         app.state.capability_catalog = capability_catalog
         app.state.plan_compilation_service = plan_compilation_service
         app.state.agent_execution_runtime = agent_execution_runtime
+        app.state.agent_supervisor_runtime = agent_supervisor_runtime
         app.state.context_memory_runtime = context_memory_runtime
         app.state.long_term_memory_runtime = long_term_memory_runtime
         app.state.research_runtime = research_runtime
         app.state.artifact_delivery_runtime = artifact_delivery_runtime
         app.state.artifact_export_runtime = artifact_export_runtime
         app.state.task_workbench_service = task_workbench_service
+        app.state.workbench_runtime = workbench_runtime
+        app.state.turn_router = turn_router
+        app.state.workspace_file_runtime = workspace_file_runtime
+        app.state.workspace_agent_runtime = workspace_agent_runtime
+        app.state.workspace_check_runtime = resolved_workspace_check_runtime
+        app.state.workspace_python_test_runtime = resolved_workspace_python_test_runtime
+        app.state.workspace_node_test_runtime = resolved_workspace_node_test_runtime
         app.state.knowledge_base = knowledge_base
         app.state.mcp_control_plane = mcp_control_plane
         app.state.evaluation_service = evaluation_service
@@ -455,9 +587,13 @@ def create_app(
             outbox_publisher.start()
             effect_runtime_operations.start()
             effect_graph_control_router.start()
+            if workbench_runtime is not None:
+                workbench_runtime.start()
             processor.activate_durable_recovery()
             yield
         finally:
+            if workbench_runtime is not None:
+                await workbench_runtime.shutdown()
             await provider_catalog.shutdown()
             await effect_runtime_operations.shutdown()
             await effect_graph_control_router.shutdown()

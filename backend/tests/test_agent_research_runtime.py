@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from deskpilot.application.agent_execution_runtime import AgentLeaseRejectedError
 from deskpilot.application.plan_compiler import (
@@ -17,6 +18,7 @@ from deskpilot.application.plan_compiler import (
 from deskpilot.application.web_research import PageReadRejectedError, SafePageReader
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.core.config import Settings
+from deskpilot.domain.model_contracts import ModelRequest, ModelResponse
 from deskpilot.domain.model_routing import ModelGatewayPolicy, ModelProviderPricing
 from deskpilot.domain.research import (
     PageSnapshot,
@@ -25,12 +27,19 @@ from deskpilot.domain.research import (
     SearchRequest,
 )
 from deskpilot.infrastructure.models import (
+    AgentDecisionRecord,
+    AgentInvocationRecord,
     AgentModelTurnRecord,
+    AgentObservationRecord,
     AgentResultRecord,
+    ModelDispatchAttemptRecord,
     ResearchSearchCallRecord,
+    TaskExecutionNodeRecord,
+    TaskExecutionRunRecord,
     TaskRecord,
 )
 from deskpilot.main import create_app
+from deskpilot.model_providers.fake import FakeModelProvider
 
 TEST_ORIGIN = "http://127.0.0.1:5173"
 TEST_TOKEN = "stage-70-session-token-with-at-least-32-chars"
@@ -46,9 +55,7 @@ def _hit(rank: int, hostname: str) -> SearchHit:
         "snippet": "Public research snippet.",
         "origin": "external_untrusted",
     }
-    return SearchHit.model_validate(
-        {**material, "hit_digest": sha256_digest(material)}
-    )
+    return SearchHit.model_validate({**material, "hit_digest": sha256_digest(material)})
 
 
 class FakeSearchProvider:
@@ -59,6 +66,22 @@ class FakeSearchProvider:
         return SearchProviderResult(
             provider_id=self.provider_id,
             hits=(_hit(1, "one.example"), _hit(2, "two.example")),
+        )
+
+
+class WrongBindingModelProvider(FakeModelProvider):
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        response = await super().complete(request)
+        if request.metadata.get("agent_loop_phase") != "request_route":
+            return response
+        assert response.structured_output is not None
+        return response.model_copy(
+            update={
+                "structured_output": {
+                    **response.structured_output,
+                    "route_binding_id": f"rbn_{'0' * 64}",
+                }
+            }
         )
 
 
@@ -96,9 +119,7 @@ class FakePageReader(SafePageReader):
             "origin": "external_untrusted",
             "fetched_at": fetched_at,
         }
-        return PageSnapshot.model_validate(
-            {**material, "snapshot_digest": sha256_digest(material)}
-        )
+        return PageSnapshot.model_validate({**material, "snapshot_digest": sha256_digest(material)})
 
 
 @pytest.fixture
@@ -175,20 +196,14 @@ def test_research_front_half_persists_candidates_and_stops_at_verification(
     assert nodes["research"]["runtime_enabled"] is True
     assert nodes["build_html"]["status"] == "pending"
 
-    researched = research_client.post(
-        f"/api/v1/execution-runs/{run_id}/research:run"
-    )
+    researched = research_client.post(f"/api/v1/execution-runs/{run_id}/research:run")
     assert researched.status_code == 200, researched.text
     body = researched.json()
     assert body["status"] == "awaiting_verification"
     assert len(body["page_snapshots"]) == 2
     assert body["claims"] and body["citations"]
-    assert {item["status"] for item in body["claims"]} == {
-        "awaiting_verification"
-    }
-    assert {item["status"] for item in body["citations"]} == {
-        "awaiting_verification"
-    }
+    assert {item["status"] for item in body["claims"]} == {"awaiting_verification"}
+    assert {item["status"] for item in body["citations"]} == {"awaiting_verification"}
 
     run = research_client.get(f"/api/v1/execution-runs/{run_id}").json()
     current = {item["local_key"]: item for item in run["nodes"]}
@@ -196,34 +211,74 @@ def test_research_front_half_persists_candidates_and_stops_at_verification(
     assert current["research"]["status"] == "awaiting_verification"
     assert current["build_html"]["status"] == "pending"
 
-    async def inspect_truth() -> tuple[str, str, str, str]:
+    async def inspect_truth() -> tuple[str, tuple[str, ...], tuple[str, ...], str, str]:
         async with app.state.database.session() as session:
             task = await session.get(TaskRecord, task_id)
-            turn = await session.scalar(select(AgentModelTurnRecord))
+            turns = tuple(
+                (
+                    await session.scalars(
+                        select(AgentModelTurnRecord).order_by(AgentModelTurnRecord.turn_no)
+                    )
+                ).all()
+            )
+            decisions = tuple(
+                (
+                    await session.scalars(
+                        select(AgentDecisionRecord).order_by(AgentDecisionRecord.created_at)
+                    )
+                ).all()
+            )
+            attempts = tuple((await session.scalars(select(ModelDispatchAttemptRecord))).all())
+            observation = await session.scalar(select(AgentObservationRecord))
             result = await session.scalar(select(AgentResultRecord))
             search = await session.scalar(select(ResearchSearchCallRecord))
             assert task is not None
-            assert turn is not None
+            assert len(turns) == 2
+            assert len(attempts) == 2
+            assert observation is not None
             assert result is not None
             assert search is not None
             return (
                 task.status,
-                turn.status,
+                tuple(item.status for item in turns),
+                tuple(item.kind for item in decisions),
+                observation.observation_digest,
                 result.manifest["disposition"],
-                search.query_digest,
             )
 
-    task_status, turn_status, disposition, query_digest = research_client.portal.call(
-        inspect_truth
+    task_status, turn_statuses, decision_kinds, observation_digest, disposition = (
+        research_client.portal.call(inspect_truth)
     )
     assert task_status == "submitted"
-    assert turn_status == "succeeded"
+    assert turn_statuses == ("succeeded", "succeeded")
+    assert decision_kinds == ("request_route", "submit_result")
+    assert len(observation_digest) == 64
     assert disposition == "candidate"
-    assert query_digest != sha256_digest({"query": ""})
+
+    projected = research_client.get(f"/api/v1/execution-runs/{run_id}")
+    assert projected.status_code == 200, projected.text
+    model_turns = projected.json()["model_turns"]
+    assert [item["decision_kind"] for item in model_turns] == [
+        "request_route",
+        "submit_result",
+    ]
+    assert model_turns[0]["observation_digest"] == observation_digest
+
+    async def tamper_observation() -> None:
+        async with app.state.database.session() as session, session.begin():
+            observation = await session.scalar(select(AgentObservationRecord))
+            assert observation is not None
+            observation.projection = {"page_snapshots": []}
+
+    research_client.portal.call(tamper_observation)
+    rejected = research_client.get(f"/api/v1/execution-runs/{run_id}")
+    assert rejected.status_code == 409
+    assert rejected.json()["code"] == "AGENT_RUNTIME_PROOF_REJECTED"
 
 
 def test_stale_fencing_token_cannot_start_invocation(
     research_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = cast(FastAPI, research_client.app)
     task_id = _activate_research_task(research_client, "8")
@@ -235,6 +290,21 @@ def test_stale_fencing_token_cannot_start_invocation(
         "worker-a",
     )
     assert claimed is not None
+    locked_entities: list[str] = []
+    original_scalar = AsyncSession.scalar
+
+    async def record_locked_entity(
+        session: AsyncSession, statement: object, *args: object, **kwargs: object
+    ) -> object:
+        if getattr(statement, "_for_update_arg", None) is not None:
+            descriptions = getattr(statement, "column_descriptions", ())
+            if descriptions:
+                entity = descriptions[0].get("entity")
+                if entity is not None:
+                    locked_entities.append(str(entity.__name__))
+        return await original_scalar(session, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "scalar", record_locked_entity)
     with pytest.raises(AgentLeaseRejectedError):
         research_client.portal.call(
             app.state.agent_execution_runtime.start_invocation,
@@ -242,6 +312,92 @@ def test_stale_fencing_token_cannot_start_invocation(
             "worker-a",
             claimed.claim_fencing_token + 1,
         )
+    assert locked_entities == [
+        "TaskExecutionRunRecord",
+        "TaskExecutionNodeRecord",
+        "AgentInvocationRecord",
+    ]
+
+    async def expire_and_retry() -> tuple[object, ...]:
+        async with app.state.database.session() as session, session.begin():
+            node = await session.get(TaskExecutionNodeRecord, claimed.invocation.node_id)
+            assert node is not None
+            assert node.budget["retries"] == 2
+            node.claim_expires_at = datetime(2000, 1, 1, tzinfo=UTC)
+        retried = await app.state.agent_execution_runtime.claim_next(
+            run.run_id, "worker-b"
+        )
+        assert retried is not None
+        async with app.state.database.session() as session:
+            first = await session.get(
+                AgentInvocationRecord, claimed.invocation.invocation_id
+            )
+            current_run = await session.get(TaskExecutionRunRecord, run.run_id)
+            assert first is not None and current_run is not None
+            return (
+                first.execution_status,
+                first.finished_at is not None,
+                first.revision,
+                retried.invocation.attempt,
+                retried.claim_fencing_token,
+                current_run.status,
+            )
+
+    assert research_client.portal.call(expire_and_retry) == (
+        "failed_retryable",
+        True,
+        2,
+        2,
+        claimed.claim_fencing_token + 1,
+        "active",
+    )
+
+
+def test_model_cannot_escape_frozen_research_route_binding(tmp_path: Path) -> None:
+    settings = Settings(
+        database_url=f"sqlite+aiosqlite:///{(tmp_path / 'wrong-binding.db').as_posix()}",
+        fake_step_delay_seconds=0.001,
+        session_token=SecretStr(TEST_TOKEN),
+        cors_origins=[TEST_ORIGIN],
+        runner_commit_receipt_database_path=str(tmp_path / "receipts.db"),
+        research_runtime_enabled=True,
+        model_gateway_policy=ModelGatewayPolicy(
+            provider_pricing=(ModelProviderPricing(provider_id="fake-local"),),
+        ),
+    )
+    headers = {
+        "Authorization": f"Bearer {TEST_TOKEN}",
+        "Origin": TEST_ORIGIN,
+        "X-DeskPilot-Client": "deskpilot-web-v1",
+    }
+    app = create_app(
+        settings,
+        model_provider=WrongBindingModelProvider(),
+        search_provider=FakeSearchProvider(),
+        page_reader=FakePageReader(),
+    )
+    with TestClient(app, headers=headers) as client:
+        task_id = _activate_research_task(client, "6")
+        started = client.post(f"/api/v1/tasks/{task_id}/execution-runs")
+        run_id = started.json()["run_id"]
+        rejected = client.post(f"/api/v1/execution-runs/{run_id}/research:run")
+
+        assert rejected.status_code == 409
+        assert rejected.json()["code"] == "AGENT_ROUTE_BINDING_REJECTED"
+
+        async def inspect_attempt() -> tuple[str, str, int]:
+            async with app.state.database.session() as session:
+                turn = await session.scalar(select(AgentModelTurnRecord))
+                attempt = await session.scalar(select(ModelDispatchAttemptRecord))
+                search_count = len(
+                    tuple((await session.scalars(select(ResearchSearchCallRecord))).all())
+                )
+                assert turn is not None
+                assert attempt is not None
+                return turn.status, attempt.status, search_count
+
+        assert client.portal is not None
+        assert client.portal.call(inspect_attempt) == ("failed", "failed", 0)
 
 
 @pytest.mark.parametrize(
@@ -304,23 +460,17 @@ def test_page_reader_revalidates_redirect_target(
 
     monkeypatch.setattr(web_research, "_PinnedHTTPConnection", RedirectConnection)
     reader = SafePageReader(
-        resolver=lambda host, port: (
-            ["93.184.216.34"] if host == "public.example" else ["127.0.0.1"]
-        )
+        resolver=lambda host, port: ["93.184.216.34"] if host == "public.example" else ["127.0.0.1"]
     )
     with pytest.raises(PageReadRejectedError):
         reader._read_sync(
             f"tsk_{'9' * 32}",
             f"rsr_{'a' * 64}",
-            _hit(1, "public.example").model_copy(
-                update={"url": "http://public.example/start"}
-            ),
+            _hit(1, "public.example").model_copy(update={"url": "http://public.example/start"}),
         )
 
 
 def test_page_reader_rejects_mixed_public_private_dns_answer() -> None:
-    reader = SafePageReader(
-        resolver=lambda host, port: ["93.184.216.34", "10.0.0.2"]
-    )
+    reader = SafePageReader(resolver=lambda host, port: ["93.184.216.34", "10.0.0.2"])
     with pytest.raises(PageReadRejectedError):
         reader._validated_target("https://mixed.example/")

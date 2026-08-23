@@ -5,9 +5,27 @@ import json
 import math
 import time
 from collections.abc import AsyncIterator
+from typing import Literal, cast
 
 from pydantic import JsonValue
 
+from deskpilot.domain.agent_loop import (
+    AgentNeedsUserInputDecision,
+    AgentProposeHandoffDecision,
+    AgentProposeTaskGraphDecision,
+    AgentTaskGraphConditionProposal,
+    AgentTaskGraphNodeProposal,
+    CoordinatorLoopDecision,
+    CoordinatorSubmitResultDecision,
+    DynamicCoordinatorLoopDecision,
+    DynamicCoordinatorSubmitResultDecision,
+    WorkspaceLoopDecision,
+    WorkspacePatchChangeProposal,
+    WorkspacePatchLoopDecision,
+    WorkspacePatchSubmitProposalDecision,
+    WorkspaceRouteRequestDecision,
+    WorkspaceSubmitResultDecision,
+)
 from deskpilot.domain.artifact_runtime import (
     CitationJudgment,
     CitationVerificationDecision,
@@ -34,12 +52,24 @@ from deskpilot.domain.planning import (
     TaskIntent,
     TaskPlan,
 )
-from deskpilot.domain.research import ResearchAgentDecision, ResearchClaimProposal
+from deskpilot.domain.research import (
+    ResearchAgentDecision,
+    ResearchClaimProposal,
+    ResearchLoopDecision,
+    ResearchRouteRequestDecision,
+    ResearchSubmitResultDecision,
+)
+from deskpilot.domain.task_plans import PlanNodeBudget
 from deskpilot.domain.tool_contracts import ToolRiskLevel
 
 TASK_CLASSIFICATION_SCHEMA = "task_classification"
 TASK_PLAN_SCHEMA = "task_plan"
 RESEARCH_AGENT_DECISION_SCHEMA = "research_agent_decision"
+RESEARCH_AGENT_LOOP_DECISION_SCHEMA = "research_agent_loop_decision"
+WORKSPACE_AGENT_LOOP_DECISION_SCHEMA = "workspace_agent_loop_decision"
+WORKSPACE_PATCH_PLANNER_LOOP_DECISION_SCHEMA = "workspace_patch_planner_loop_decision"
+WORKSPACE_COORDINATOR_LOOP_DECISION_SCHEMA = "workspace_coordinator_loop_decision"
+WORKSPACE_DYNAMIC_COORDINATOR_LOOP_DECISION_SCHEMA = "workspace_dynamic_coordinator_loop_decision"
 CITATION_VERIFICATION_DECISION_SCHEMA = "citation_verification_decision"
 
 
@@ -222,6 +252,421 @@ class FakeModelProvider:
                     ),
                 ),
             ).model_dump(mode="json")
+        if request.output_schema.name == RESEARCH_AGENT_LOOP_DECISION_SCHEMA:
+            phase = request.metadata.get("agent_loop_phase")
+            if phase == "request_route":
+                binding_id = request.metadata.get("route_binding_id")
+                query = request.metadata.get("research_query")
+                if not isinstance(binding_id, str) or not isinstance(query, str):
+                    raise ValueError("Fake research loop fixture requires a bound Route")
+                return cast(
+                    dict[str, JsonValue],
+                    ResearchLoopDecision(
+                        root=ResearchRouteRequestDecision(
+                            route_binding_id=binding_id,
+                            query=query,
+                            decision_summary="请求受控公开来源取证。",
+                        )
+                    ).model_dump(mode="json"),
+                )
+            raw_ids = request.metadata.get("page_snapshot_ids", [])
+            snapshot_ids = tuple(str(item) for item in raw_ids) if isinstance(raw_ids, list) else ()
+            if phase != "submit_result" or not snapshot_ids:
+                raise ValueError("Fake research loop fixture requires Route observations")
+            return cast(
+                dict[str, JsonValue],
+                ResearchLoopDecision(
+                    root=ResearchSubmitResultDecision(
+                        claims=(
+                            ResearchClaimProposal(
+                                statement="受控页面快照包含与研究目标直接相关的公开信息。",
+                                page_snapshot_ids=snapshot_ids[:2],
+                            ),
+                        ),
+                        decision_summary="基于受控快照提交待验证候选事实。",
+                    )
+                ).model_dump(mode="json"),
+            )
+        if request.output_schema.name == WORKSPACE_AGENT_LOOP_DECISION_SCHEMA:
+            phase = request.metadata.get("agent_loop_phase")
+            binding_id = request.metadata.get("route_binding_id")
+            path = request.metadata.get("workspace_path")
+            test_path = request.metadata.get("workspace_test_path")
+            read_kind = request.metadata.get("workspace_read_kind")
+            if phase == "request_route":
+                if (
+                    not isinstance(binding_id, str)
+                    or not isinstance(path, str)
+                    or read_kind not in {"file", "directory", "python_test", "node_test"}
+                    or (
+                        read_kind in {"python_test", "node_test"} and not isinstance(test_path, str)
+                    )
+                ):
+                    raise ValueError("Fake workspace loop fixture requires a bound Route")
+                if not path:
+                    if read_kind != "file":
+                        raise ValueError("Fake directory loop fixture requires an exact path")
+                    decision: AgentNeedsUserInputDecision | WorkspaceRouteRequestDecision = (
+                        AgentNeedsUserInputDecision(
+                            question_code="WORKSPACE_FILE_PATH_REQUIRED",
+                            question="请告诉我要读取的工作区相对文件路径。",
+                            blocking_fields=("path",),
+                            answer_schema="workspace_relative_file_path.v1",
+                            insufficient_context="当前任务没有提供文件路径。",
+                            pending_actions=("读取并复核一个工作区文本文件",),
+                            decision_summary="缺少只读 Route 的必需路径。",
+                        )
+                    )
+                else:
+                    decision = WorkspaceRouteRequestDecision(
+                        route_binding_id=binding_id,
+                        path=path,
+                        test_path=(test_path if isinstance(test_path, str) else None),
+                        decision_summary=(
+                            "请求读取受控工作区文本文件。"
+                            if read_kind == "file"
+                            else (
+                                "请求列出受控工作区直接子目录项。"
+                                if read_kind == "directory"
+                                else "请求运行服务器绑定的固定测试文件。"
+                            )
+                        ),
+                    )
+                return cast(
+                    dict[str, JsonValue],
+                    WorkspaceLoopDecision(root=decision).model_dump(mode="json"),
+                )
+            observation_digest = request.metadata.get("observation_digest")
+            if phase != "submit_result" or not isinstance(observation_digest, str):
+                raise ValueError("Fake workspace loop fixture requires a Route observation")
+            return cast(
+                dict[str, JsonValue],
+                WorkspaceLoopDecision(
+                    root=WorkspaceSubmitResultDecision(
+                        observation_digest=observation_digest,
+                        decision_summary=(
+                            "提交绑定文件版本证明的只读结果。"
+                            if read_kind == "file"
+                            else (
+                                "提交绑定目录观察证明的只读结果。"
+                                if read_kind == "directory"
+                                else "提交绑定快照、运行时与隔离证明的固定测试结果。"
+                            )
+                        ),
+                    )
+                ).model_dump(mode="json"),
+            )
+        if request.output_schema.name == WORKSPACE_PATCH_PLANNER_LOOP_DECISION_SCHEMA:
+            phase = request.metadata.get("agent_loop_phase")
+            route_binding_id = request.metadata.get("route_binding_id")
+            patch_binding_id = request.metadata.get("workspace_patch_binding_id")
+            path = request.metadata.get("workspace_path")
+            if phase == "request_route":
+                if not isinstance(route_binding_id, str) or not isinstance(path, str) or not path:
+                    raise ValueError("Fake patch planner fixture requires a bound file Route")
+                return cast(
+                    dict[str, JsonValue],
+                    WorkspacePatchLoopDecision(
+                        root=WorkspaceRouteRequestDecision(
+                            route_binding_id=route_binding_id,
+                            path=path,
+                            decision_summary="请求读取服务器绑定的单个补丁目标文件。",
+                        )
+                    ).model_dump(mode="json"),
+                )
+            observation_digest = request.metadata.get("observation_digest")
+            source_text = request.metadata.get("workspace_patch_source_text")
+            if (
+                phase != "propose_patch"
+                or not isinstance(patch_binding_id, str)
+                or not isinstance(observation_digest, str)
+                or not isinstance(path, str)
+                or not isinstance(source_text, str)
+            ):
+                raise ValueError("Fake patch planner fixture requires a bound observation")
+            old_text = next((line for line in source_text.splitlines() if line), "")
+            if not old_text or len(old_text) > 4_096:
+                raise ValueError("Fake patch planner fixture requires one bounded non-empty line")
+            suffix = "  # DeskPilot proposal" if path.endswith(".py") else "  // DeskPilot proposal"
+            return cast(
+                dict[str, JsonValue],
+                WorkspacePatchLoopDecision(
+                    root=WorkspacePatchSubmitProposalDecision(
+                        patch_binding_id=patch_binding_id,
+                        observation_digest=observation_digest,
+                        changes=(
+                            WorkspacePatchChangeProposal(
+                                path=path,
+                                old_text=old_text,
+                                new_text=f"{old_text}{suffix}",
+                                rationale="生成一个等待用户确认的单点、精确替换候选补丁。",
+                            ),
+                        ),
+                        decision_summary="提交无写权限的精确补丁建议。",
+                    )
+                ).model_dump(mode="json"),
+            )
+        if request.output_schema.name == WORKSPACE_COORDINATOR_LOOP_DECISION_SCHEMA:
+            phase = request.metadata.get("agent_loop_phase")
+            if phase == "propose_handoff":
+                binding_id = request.metadata.get("handoff_binding_id")
+                capability_id = request.metadata.get("target_capability_id")
+                objective_ref = request.metadata.get("child_objective_ref")
+                context_refs = request.metadata.get("handoff_context_refs")
+                budget_slice = request.metadata.get("child_budget_slice")
+                if (
+                    not isinstance(binding_id, str)
+                    or capability_id != "workspace.directory.read.v1"
+                    or not isinstance(objective_ref, str)
+                    or not isinstance(context_refs, list)
+                    or not isinstance(budget_slice, dict)
+                ):
+                    raise ValueError("Fake coordinator fixture requires a bound child slot")
+                return cast(
+                    dict[str, JsonValue],
+                    CoordinatorLoopDecision(
+                        root=AgentProposeHandoffDecision(
+                            handoff_binding_id=binding_id,
+                            target_capability_id="workspace.directory.read.v1",
+                            objective_ref=objective_ref,
+                            context_refs=tuple(str(item) for item in context_refs),
+                            budget_slice=PlanNodeBudget.model_validate(budget_slice),
+                            decision_summary="提议激活服务器预编译的只读目录 Reader 子任务。",
+                        )
+                    ).model_dump(mode="json"),
+                )
+            observation_digest = request.metadata.get("child_observation_digest")
+            if phase != "submit_result" or not isinstance(observation_digest, str):
+                raise ValueError("Fake coordinator fixture requires a verified child result")
+            return cast(
+                dict[str, JsonValue],
+                CoordinatorLoopDecision(
+                    root=CoordinatorSubmitResultDecision(
+                        child_observation_digest=observation_digest,
+                        decision_summary="只基于已验证的子 Agent 结果提交父任务结果。",
+                    )
+                ).model_dump(mode="json"),
+            )
+        if request.output_schema.name == WORKSPACE_DYNAMIC_COORDINATOR_LOOP_DECISION_SCHEMA:
+            phase = request.metadata.get("agent_loop_phase")
+            if phase == "propose_task_graph":
+                capabilities = request.metadata.get("task_graph_allowed_capabilities")
+                context_refs = request.metadata.get("task_graph_context_refs")
+                max_nodes = request.metadata.get("task_graph_max_nodes")
+                if (
+                    not isinstance(capabilities, list)
+                    or not capabilities
+                    or not isinstance(capabilities[0], dict)
+                    or not isinstance(capabilities[0].get("capability_id"), str)
+                    or not isinstance(capabilities[0].get("budget"), dict)
+                    or not isinstance(capabilities[0].get("input_sources"), list)
+                    or not capabilities[0]["input_sources"]
+                    or not isinstance(context_refs, list)
+                    or not context_refs
+                    or not isinstance(max_nodes, int)
+                    or max_nodes < 1
+                ):
+                    raise ValueError(
+                        "Fake dynamic coordinator fixture requires a server graph offer"
+                    )
+                offered = {
+                    str(item["capability_id"]): item
+                    for item in capabilities
+                    if isinstance(item, dict)
+                    and isinstance(item.get("capability_id"), str)
+                    and isinstance(item.get("budget"), dict)
+                    and isinstance(item.get("input_sources"), list)
+                    and item["input_sources"]
+                }
+                patch_capability = offered.get("workspace.patch.propose.v1")
+                directory_capability = offered.get("workspace.directory.read.v1")
+                if patch_capability is not None:
+                    raw_input_bindings = patch_capability.get("input_bindings")
+                    input_bindings = (
+                        raw_input_bindings
+                        if isinstance(raw_input_bindings, list)
+                        else []
+                    )
+                    if (
+                        directory_capability is None
+                        or (
+                            raw_input_bindings is not None
+                            and not isinstance(raw_input_bindings, list)
+                        )
+                        or len(input_bindings) > 2
+                        or any(
+                            not isinstance(item, dict)
+                            or not isinstance(item.get("binding_key"), str)
+                            for item in input_bindings
+                        )
+                        or max_nodes < max(1, len(input_bindings)) + 2
+                    ):
+                        raise ValueError(
+                            "Fake dynamic Patch fixture requires bounded approval bindings"
+                        )
+                    binding_keys: list[str | None] = (
+                        [
+                            str(item["binding_key"])
+                            for item in input_bindings
+                            if isinstance(item, dict)
+                        ]
+                        if input_bindings
+                        else [None]
+                    )
+                    directory_source = cast(
+                        list[JsonValue], directory_capability["input_sources"]
+                    )[0]
+                    patch_source = cast(list[JsonValue], patch_capability["input_sources"])[0]
+                    shared_context = (str(context_refs[0]),)
+                    graph_nodes: list[AgentTaskGraphNodeProposal] = [
+                        AgentTaskGraphNodeProposal(
+                            local_key="directory_context",
+                            target_capability_id="workspace.directory.read.v1",
+                            objective="读取修复前的受限目录上下文。",
+                            context_refs=shared_context,
+                            input_source=cast(
+                                Literal[
+                                    "route_directory_path",
+                                    "route_explicit_file_path",
+                                    "route_python_test_spec",
+                                    "route_node_test_spec",
+                                    "route_patch_test_spec",
+                                ],
+                                directory_source,
+                            ),
+                            budget_slice=PlanNodeBudget.model_validate(
+                                directory_capability["budget"]
+                            ),
+                        )
+                    ]
+                    previous_key = "directory_context"
+                    for index, binding_key in enumerate(binding_keys, start=1):
+                        local_key = (
+                            "patch_approval"
+                            if len(binding_keys) == 1
+                            else f"patch_approval_{index}"
+                        )
+                        depends_on = (previous_key,)
+                        conditions = (
+                            (
+                                AgentTaskGraphConditionProposal(
+                                    source_local_key=previous_key
+                                ),
+                            )
+                            if previous_key.startswith("patch_approval")
+                            else ()
+                        )
+                        graph_nodes.append(
+                            AgentTaskGraphNodeProposal(
+                                local_key=local_key,
+                                target_capability_id="workspace.patch.propose.v1",
+                                objective=(
+                                    "消费一个服务器签发的节点绑定，提出补丁并"
+                                    "独立等待确认。"
+                                ),
+                                context_refs=shared_context,
+                                input_source=cast(
+                                    Literal[
+                                        "route_directory_path",
+                                        "route_explicit_file_path",
+                                        "route_python_test_spec",
+                                        "route_node_test_spec",
+                                        "route_patch_test_spec",
+                                    ],
+                                    patch_source,
+                                ),
+                                input_binding_key=binding_key,
+                                depends_on=depends_on,
+                                conditions=conditions,
+                                budget_slice=PlanNodeBudget.model_validate(
+                                    patch_capability["budget"]
+                                ),
+                            )
+                        )
+                        previous_key = local_key
+                    graph_nodes.append(
+                        AgentTaskGraphNodeProposal(
+                            local_key="directory_output",
+                            target_capability_id="workspace.directory.read.v1",
+                            objective="在所有补丁均通过固定测试后重新读取目录。",
+                            context_refs=shared_context,
+                            input_source=cast(
+                                Literal[
+                                    "route_directory_path",
+                                    "route_explicit_file_path",
+                                    "route_python_test_spec",
+                                    "route_node_test_spec",
+                                    "route_patch_test_spec",
+                                ],
+                                directory_source,
+                            ),
+                            depends_on=(previous_key,),
+                            conditions=(
+                                AgentTaskGraphConditionProposal(
+                                    source_local_key=previous_key
+                                ),
+                            ),
+                            budget_slice=PlanNodeBudget.model_validate(
+                                directory_capability["budget"]
+                            ),
+                        )
+                    )
+                    return cast(
+                        dict[str, JsonValue],
+                        DynamicCoordinatorLoopDecision(
+                            root=AgentProposeTaskGraphDecision(
+                                nodes=tuple(graph_nodes),
+                                output_node_key="directory_output",
+                                decision_summary=(
+                                    "提出可组合节点级 Patch/Approval 与验证后"
+                                    "目录输出的受控 DAG。"
+                                ),
+                            )
+                        ).model_dump(mode="json"),
+                    )
+                capability = capabilities[0]
+                return cast(
+                    dict[str, JsonValue],
+                    DynamicCoordinatorLoopDecision(
+                        root=AgentProposeTaskGraphDecision(
+                            nodes=(
+                                AgentTaskGraphNodeProposal(
+                                    local_key="directory_reader",
+                                    target_capability_id=str(capability["capability_id"]),
+                                    objective="列出并复核工作区目录快照。",
+                                    context_refs=(str(context_refs[0]),),
+                                    input_source=cast(
+                                        Literal[
+                                            "route_directory_path",
+                                            "route_explicit_file_path",
+                                            "route_python_test_spec",
+                                            "route_node_test_spec",
+                                            "route_patch_test_spec",
+                                        ],
+                                        cast(list[JsonValue], capability["input_sources"])[0],
+                                    ),
+                                    budget_slice=PlanNodeBudget.model_validate(
+                                        capability["budget"]
+                                    ),
+                                ),
+                            ),
+                            output_node_key="directory_reader",
+                            decision_summary=("提出一个服务器裁决、预算守恒的只读目录子任务图。"),
+                        )
+                    ).model_dump(mode="json"),
+                )
+            observation_digest = request.metadata.get("task_graph_observation_digest")
+            if phase != "submit_result" or not isinstance(observation_digest, str):
+                raise ValueError("Fake dynamic coordinator fixture requires a verified graph join")
+            return cast(
+                dict[str, JsonValue],
+                DynamicCoordinatorLoopDecision(
+                    root=DynamicCoordinatorSubmitResultDecision(
+                        task_graph_observation_digest=observation_digest,
+                        decision_summary=("只基于服务器验证后的完整子任务图 join 提交父任务结果。"),
+                    )
+                ).model_dump(mode="json"),
+            )
         if request.output_schema.name == CITATION_VERIFICATION_DECISION_SCHEMA:
             raw_ids = request.metadata.get("claim_ids", [])
             claim_ids = tuple(str(item) for item in raw_ids) if isinstance(raw_ids, list) else ()

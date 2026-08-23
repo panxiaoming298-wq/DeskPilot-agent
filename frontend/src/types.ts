@@ -969,6 +969,10 @@ export type WorkbenchStage =
   | 'ready_to_deliver'
   | 'delivered'
   | 'exported'
+  | 'executing'
+  | 'needs_clarification'
+  | 'needs_user_action'
+  | 'unsupported'
   | 'blocked'
 
 export type WorkbenchAction =
@@ -979,6 +983,11 @@ export type WorkbenchAction =
   | 'build_artifact'
   | 'verify_browser'
   | 'finalize_delivery'
+  | 'execute_route'
+  | 'replan_failed_execution'
+  | 'commit_workspace_edit'
+  | 'commit_workspace_patch'
+  | 'commit_workspace_path_operation'
   | 'prepare_export'
   | 'stop_execution'
 
@@ -997,6 +1006,168 @@ export interface WorkbenchActionState {
   effect_class: 'read_only' | 'workspace_write' | 'user_path_write' | 'execution_control'
 }
 
+export interface AgentReplanFailureSnapshot {
+  schema_version:
+    | 'deskpilot.agent-replan-failure-snapshot.v1'
+    | 'deskpilot.agent-replan-failure-snapshot.v2'
+  task_id: string
+  source_run_id: string
+  source_plan_generation: number
+  source_plan_digest: string
+  contract_version: number
+  contract_digest: string
+  route_id: 'workspace_directory_analyze' | 'workspace_dynamic_patch_test'
+  route_parameter_digest: string
+  route_revision: number
+  stable_error_code:
+    | 'AGENT_TASK_GRAPH_REJECTED'
+    | 'AGENT_ROUTE_BINDING_REJECTED'
+    | 'AGENT_LOOP_NO_PROGRESS'
+    | 'AGENT_GRAPH_TEST_CONDITION_NOT_MET'
+  failed_node_ids: string[]
+  failed_invocation_ids: string[]
+  failed_model_turn_ids: string[]
+  condition_decision_digests?: string[]
+  snapshot_digest: string
+}
+
+export interface AgentTaskGraphResultRef {
+  schema_version: 'deskpilot.agent-task-graph-result-ref.v1'
+  graph_id: string
+  producer_local_key: string
+  producer_node_id: string
+  producer_invocation_id: string
+  producer_result_id: string
+  capability: { capability_id: string; version: string; digest: string }
+  result_kind: 'file' | 'directory' | 'python_test' | 'node_test' | 'patch_test'
+  agent_result_digest: string
+  workspace_result_digest: string
+  result_ref_digest: string
+}
+
+export interface AgentTaskGraphCondition {
+  schema_version: 'deskpilot.agent-task-graph-condition.v1'
+  source_local_key: string
+  source_node_id: string
+  predicate: 'test_passed'
+  condition_digest: string
+}
+
+export interface AgentTaskGraphConditionDecision {
+  schema_version: 'deskpilot.agent-task-graph-condition-decision.v1'
+  graph_id: string
+  source_local_key: string
+  source_node_id: string
+  target_local_key: string
+  target_node_id: string
+  predicate: 'test_passed'
+  actual_status: 'passed' | 'failed' | 'error' | 'verified' | 'test_failed' | 'test_error'
+  result_ref_digest: string
+  matched: boolean
+  decision_digest: string
+}
+
+export interface AgentReplanRepairAdvice {
+  schema_version:
+    | 'deskpilot.agent-replan-repair-advice.v1'
+    | 'deskpilot.agent-replan-repair-advice.v2'
+  failure_snapshot_digest: string
+  stable_error_code: AgentReplanFailureSnapshot['stable_error_code']
+  strategy_code:
+    | 'rebuild_graph_from_current_offer'
+    | 'reuse_verified_evidence_and_rebind_route'
+    | 'simplify_graph_and_consume_verified_evidence'
+    | 'propose_fresh_patch_after_failed_test'
+  objective: string
+  granted_capability_ids: string[]
+  result_sources: Array<{
+    schema_version: 'deskpilot.agent-replan-result-source.v1'
+    source_key: string
+    source_run_id: string
+    source_plan_generation: number
+    source_plan_digest: string
+    source_graph_digest: string
+    result_ref: AgentTaskGraphResultRef
+    source_digest: string
+  }>
+  advice_digest: string
+}
+
+export interface AgentReplan {
+  schema_version:
+    | 'deskpilot.agent-replan.v1'
+    | 'deskpilot.agent-replan.v2'
+    | 'deskpilot.agent-replan.v3'
+    | 'deskpilot.agent-replan.v4'
+    | 'deskpilot.agent-replan.v5'
+  replan_id: string
+  task_id: string
+  source_run_id: string
+  source_plan_generation: number
+  source_plan_digest: string
+  target_run_id: string
+  target_plan_generation: number
+  target_plan_digest: string
+  contract_version: number
+  contract_digest: string
+  failure_snapshot: AgentReplanFailureSnapshot
+  repair_advice: AgentReplanRepairAdvice | null
+  continuation_intent?: {
+    schema_version: 'deskpilot.agent-replan-continuation-intent.v1'
+    task_id: string
+    message_id: string
+    message_digest: string
+    intent_code: 'continue_failed_patch_repair'
+    requested_via: 'conversation_turn' | 'workbench_action'
+    intent_digest: string
+  }
+  budget_proof?: {
+    schema_version: 'deskpilot.agent-replan-budget-proof.v1'
+    contract_digest: string
+    maximum_plan_generations: number
+    source_plan_generation: number
+    target_plan_generation: number
+    budget_limit: AgentReplanBudgetTotals
+    allocated_before: AgentReplanBudgetTotals
+    target_plan_allocation: AgentReplanBudgetTotals
+    allocated_after_activation: AgentReplanBudgetTotals
+    remaining_after_activation: AgentReplanBudgetTotals
+    budget_digest: string
+  }
+  status: 'activated'
+  created_at: string
+  replan_digest: string
+}
+
+export interface AgentReplanBudgetTotals {
+  model_calls: number
+  tool_calls: number
+  input_tokens: number
+  output_tokens: number
+  wall_seconds: number
+  retries: number
+  cost_micros: number
+  handoffs: number
+}
+
+export interface AgentRepairLoopStatus {
+  schema_version: 'deskpilot.agent-repair-loop-status.v1'
+  task_id: string
+  current_plan_generation: number
+  maximum_plan_generations: number
+  remaining_replans: number
+  budget_limit: AgentReplanBudgetTotals
+  budget_allocated: AgentReplanBudgetTotals
+  budget_remaining: AgentReplanBudgetTotals
+  next_plan_allocation: AgentReplanBudgetTotals
+  next_replan_available: boolean
+  reason_code:
+    | 'AVAILABLE'
+    | 'GENERATION_LIMIT_REACHED'
+    | 'CROSS_GENERATION_BUDGET_EXHAUSTED'
+  status_digest: string
+}
+
 export interface WorkbenchNode {
   node_id: string
   local_key: string
@@ -1007,6 +1178,18 @@ export interface WorkbenchNode {
   claim_fencing_token: number
   claim_expires_at: string | null
   bound_agent: { agent_id: string } | null
+  depends_on?: string[]
+  handoff_parent_node_id?: string | null
+  budget?: {
+    model_calls: number
+    tool_calls: number
+    input_tokens: number
+    output_tokens: number
+    wall_seconds: number
+    retries: number
+    cost_micros: number
+    handoffs: number
+  }
   runtime_enabled: boolean
 }
 
@@ -1016,7 +1199,128 @@ export interface WorkbenchRun {
   status: string
   revision: number
   nodes: WorkbenchNode[]
-  invocations: Array<{ invocation_id: string; execution_status: string; verification_status: string }>
+  invocations: Array<{
+    invocation_id: string
+    parent_invocation_id?: string | null
+    execution_status: string
+    verification_status: string
+    result_id?: string | null
+  }>
+  model_turns: Array<{
+    turn_id: string
+    invocation_id?: string
+    turn_no: number
+    status: string
+    decision_kind: 'request_route' | 'submit_result' | 'needs_user_input' | 'propose_handoff' | 'propose_task_graph' | null
+    decision_digest: string | null
+    binding_id: string | null
+    observation_digest: string | null
+  }>
+  input_requests?: Array<{
+    input_request_id: string
+    question_code: string
+    question: string
+    blocking_fields: string[]
+    answer_schema: string
+    request_digest: string
+    status: 'pending' | 'resolved' | 'cancelled'
+    resolved_task_id: string | null
+    answer_digest: string | null
+  }>
+  delegations?: Array<{
+    delegation_id: string
+    parent_invocation_id: string
+    child_invocation_id: string | null
+    parent_node_id: string
+    child_node_id: string
+    decision_id: string
+    binding_id: string
+    status: 'waiting_child' | 'child_verified' | 'consumed' | 'cancelled' | 'failed'
+    depth: number
+    child_result_id: string | null
+    observation_id: string | null
+    budget_allocation: NonNullable<WorkbenchNode['budget']>
+  }>
+  task_graphs?: Array<{
+    schema_version:
+      | 'deskpilot.agent-task-graph.v1'
+      | 'deskpilot.agent-task-graph.v2'
+      | 'deskpilot.agent-task-graph.v3'
+      | 'deskpilot.agent-task-graph.v4'
+      | 'deskpilot.agent-task-graph.v5'
+      | 'deskpilot.agent-task-graph.v6'
+      | 'deskpilot.agent-task-graph.v7'
+      | 'deskpilot.agent-task-graph.v8'
+    graph_id: string
+    binding_id: string
+    parent_invocation_id: string
+    parent_node_id: string
+    decision_id: string
+    status: 'running' | 'verified' | 'consumed' | 'cancelled' | 'failed'
+    node_count: number
+    max_depth: number
+    graph_digest: string
+    output_local_key: string | null
+    output_node_id: string | null
+    observation_id: string | null
+    nodes: Array<{
+      local_key: string
+      node_id: string
+      binding_id: string
+      status: 'waiting_child' | 'child_verified' | 'consumed' | 'cancelled' | 'failed'
+      depends_on: string[]
+      target_agent: { agent_id: string; version: string }
+      capability: { capability_id: string; version: string; digest: string }
+      capability_input: {
+        schema_version:
+          | 'deskpilot.agent-task-graph-capability-input.v1'
+          | 'deskpilot.agent-task-graph-capability-input.v2'
+          | 'deskpilot.agent-task-graph-capability-input.v3'
+          | 'deskpilot.agent-task-graph-capability-input.v4'
+        source_key:
+          | 'route_directory_path'
+          | 'route_explicit_file_path'
+          | 'route_python_test_spec'
+          | 'route_node_test_spec'
+          | 'route_patch_test_spec'
+        source_ref: string
+        read_kind: 'file' | 'directory' | 'python_test' | 'node_test' | 'patch_test'
+        path: string
+        test_path: string | null
+        target_path: string | null
+        test_kind: 'python' | 'node' | null
+        objective: string | null
+        binding_key?: string | null
+        route_parameter_digest: string
+        input_digest: string
+      } | null
+      conditions?: AgentTaskGraphCondition[]
+      condition_decisions?: AgentTaskGraphConditionDecision[]
+      import_sources?: string[]
+      imported_result_refs?: AgentTaskGraphResultRef[]
+      approval_binding?: {
+        schema_version: 'deskpilot.agent-task-graph-approval-binding.v1'
+        approval_binding_id: string
+        approval_kind: 'workspace_patch'
+        graph_id: string
+        local_key: string
+        node_id: string
+        capability_input_digest: string
+        confirmation_policy: 'fresh_user_confirmation_per_node_v1'
+        manifest_policy: 'content_addressed_workspace_manifest_v1'
+        approval_binding_digest: string
+      } | null
+      budget_allocation: NonNullable<WorkbenchNode['budget']>
+      child_invocation_id: string | null
+      child_result_id: string | null
+      result_ref: AgentTaskGraphResultRef | null
+      test_result: WorkspacePythonTestRead | WorkspaceNodeTestRead | null
+      approval: WorkspacePatchPreview | null
+      patch_result: WorkspacePatchTestRead | null
+    }>
+    created_at: string
+    updated_at: string
+  }>
   created_at: string
   updated_at: string
 }
@@ -1033,6 +1337,45 @@ export interface WorkbenchCitation {
   claim_id: string
   locator_text: string
   status: string
+}
+
+export interface TurnRoute {
+  schema_version: 'deskpilot.turn-route.v1'
+  task_id: string
+  conversation_id: string
+  user_message_id: string
+  decision: 'routed' | 'needs_clarification' | 'unsupported'
+  route_id:
+    | 'research_to_html'
+    | 'knowledge_lookup'
+    | 'mcp_text_metrics'
+    | 'workspace_file_read'
+    | 'workspace_file_replace'
+    | 'workspace_patch_bundle'
+    | 'workspace_agent_patch_test'
+    | 'workspace_dynamic_patch_test'
+    | 'workspace_file_create'
+    | 'workspace_file_rename'
+    | 'workspace_directory_list'
+    | 'workspace_directory_analyze'
+    | 'workspace_snapshot_check'
+    | 'workspace_python_test'
+    | 'workspace_node_test'
+    | null
+  route_version: '1' | null
+  route_manifest_digest: string | null
+  candidate_digest: string
+  parameter_digest: string
+  resolved_from_task_id: string | null
+  resolution_rule: string | null
+  resolution_digest: string | null
+  reason_code: string
+  status: 'ready' | 'running' | 'needs_user_action' | 'succeeded' | 'failed' | 'not_applicable'
+  result_digest: string | null
+  error_code: string | null
+  revision: number
+  created_at: string
+  updated_at: string
 }
 
 export interface ArtifactExport {
@@ -1054,6 +1397,200 @@ export interface ArtifactExport {
   committed_at: string | null
 }
 
+export interface WorkspaceFileRead {
+  schema_version: 'deskpilot.workspace-file-read.v1'
+  relative_path: string
+  byte_count: number
+  content_digest: string
+  version_digest: string
+  content: string
+  result_digest: string
+}
+
+export interface WorkspaceDirectoryEntry {
+  name: string
+  relative_path: string
+  kind: 'directory' | 'file'
+  byte_count: number | null
+  version_digest: string
+}
+
+export interface WorkspaceDirectoryRead {
+  schema_version: 'deskpilot.workspace-directory-read.v1'
+  relative_path: string
+  entries: WorkspaceDirectoryEntry[]
+  truncated: boolean
+  result_digest: string
+}
+
+export interface WorkspaceCheckIssue {
+  relative_path: string
+  line: number
+  column: number
+  code: 'JSON_INVALID' | 'PYTHON_SYNTAX_INVALID'
+  message: string
+}
+
+export interface WorkspaceCheckRead {
+  schema_version: 'deskpilot.workspace-check.v1'
+  profile: 'json-parse' | 'python-syntax'
+  relative_path: string
+  snapshot_digest: string
+  status: 'failed' | 'passed'
+  checked_file_count: number
+  issues: WorkspaceCheckIssue[]
+  isolation_mode: 'windows_appcontainer'
+  network_access: false
+  output_truncated: boolean
+  result_digest: string
+}
+
+export interface WorkspacePythonTestRead {
+  schema_version: 'deskpilot.workspace-python-test.v1'
+  profile: 'pytest-file'
+  project_path: string
+  test_path: string
+  snapshot_digest: string
+  runtime_digest: string
+  status: 'error' | 'failed' | 'passed'
+  exit_code: number
+  passed_count: number
+  failed_count: number
+  skipped_count: number
+  error_count: number
+  duration_ms: number
+  output: string
+  output_truncated: boolean
+  isolation_mode: 'windows_appcontainer'
+  network_access: false
+  process_limit: 1
+  result_digest: string
+}
+
+export interface WorkspaceNodeTestRead {
+  schema_version: 'deskpilot.workspace-node-test.v1'
+  profile: 'node-test-file'
+  project_path: string
+  test_path: string
+  snapshot_digest: string
+  runtime_digest: string
+  status: 'error' | 'failed' | 'passed'
+  exit_code: number
+  passed_count: number
+  failed_count: number
+  skipped_count: number
+  error_count: number
+  duration_ms: number
+  output: string
+  output_truncated: boolean
+  isolation_mode: 'windows_appcontainer'
+  network_access: false
+  process_limit: 1
+  result_digest: string
+}
+
+export interface WorkspaceEditPreview {
+  schema_version: 'deskpilot.workspace-edit-preview.v1'
+  task_id: string
+  relative_path: string
+  expected_version_digest: string
+  proposed_content_digest: string
+  replacement_count: 1
+  byte_count: number
+  old_text: string
+  new_text: string
+  confirmation_digest: string
+}
+
+export interface WorkspaceEditReceipt {
+  schema_version: 'deskpilot.workspace-edit-receipt.v1'
+  task_id: string
+  relative_path: string
+  confirmation_digest: string
+  previous_version_digest: string
+  version_digest: string
+  content_digest: string
+  backup_relative_path: string
+  byte_count: number
+  committed_at: string
+  receipt_digest: string
+}
+
+export interface WorkspacePatchChangePreview {
+  index: number
+  relative_path: string
+  expected_version_digest: string
+  original_content_digest: string
+  proposed_content_digest: string
+  byte_count: number
+  old_text: string
+  new_text: string
+  change_digest: string
+}
+
+export interface WorkspacePatchPreview {
+  schema_version: 'deskpilot.workspace-patch-preview.v1'
+  task_id: string
+  changes: WorkspacePatchChangePreview[]
+  staging_workspace_ref: string
+  manifest_digest: string
+  total_byte_count: number
+  confirmation_digest: string
+}
+
+export interface WorkspacePatchReceipt {
+  schema_version: 'deskpilot.workspace-patch-receipt.v1'
+  task_id: string
+  status: 'committed' | 'partial'
+  confirmation_digest: string
+  change_receipts: WorkspaceEditReceipt[]
+  failed_path: string | null
+  error_code: string | null
+  committed_at: string
+  receipt_digest: string
+}
+
+export interface WorkspacePatchTestRead {
+  schema_version: 'deskpilot.workspace-patch-test.v1'
+  task_id: string
+  status: 'verified' | 'test_failed' | 'test_error'
+  test_kind: 'python' | 'node'
+  confirmation_digest: string
+  patch_receipt: WorkspacePatchReceipt
+  python_test: WorkspacePythonTestRead | null
+  node_test: WorkspaceNodeTestRead | null
+  error_code: string | null
+  result_digest: string
+}
+
+export interface WorkspacePathOperationPreview {
+  schema_version: 'deskpilot.workspace-path-operation-preview.v1'
+  task_id: string
+  operation: 'create' | 'rename'
+  source_path: string | null
+  target_path: string
+  expected_source_version_digest: string | null
+  expected_target_parent_version_digest: string
+  proposed_content_digest: string
+  byte_count: number
+  content: string | null
+  confirmation_digest: string
+}
+
+export interface WorkspacePathOperationReceipt {
+  schema_version: 'deskpilot.workspace-path-operation-receipt.v1'
+  task_id: string
+  operation: 'create' | 'rename'
+  source_path: string | null
+  target_path: string
+  confirmation_digest: string
+  version_digest: string
+  content_digest: string
+  byte_count: number
+  committed_at: string
+  receipt_digest: string
+}
+
 export interface TaskWorkbench {
   schema_version: 'deskpilot.task-workbench.v1'
   task: Task
@@ -1065,10 +1602,13 @@ export interface TaskWorkbench {
     content: string | null
     created_at: string
   }>
+  route: TurnRoute | null
   planning: Record<string, unknown> | null
   contract: Record<string, unknown> | null
   plans: { plans: Array<Record<string, unknown>> }
   executions: { runs: WorkbenchRun[] }
+  replans: { replans: AgentReplan[] }
+  repair_loop: AgentRepairLoopStatus | null
   research: {
     research_session_id: string
     status: string
@@ -1096,9 +1636,24 @@ export interface TaskWorkbench {
       relative_path: string
       active_revision: {
         revision_id: string
+        media_type: 'application/pdf' | 'text/html' | 'text/css' | 'text/markdown'
         content_digest: string
         byte_count: number
         patch_receipt_id: string
+        pdf_render_verification: {
+          profile_id: 'deskpilot.pdf-render.v1'
+          status: 'passed'
+          engine: string
+          source_digest: string
+          page_count: number
+          page_width_points: number
+          page_height_points: number
+          render_dpi: number
+          rendered_page_digests: string[]
+          rendered_page_dimensions: Array<[number, number]>
+          issue_codes: string[]
+          evidence_digest: string
+        } | null
       }
     }>
   } | null
@@ -1119,12 +1674,23 @@ export interface TaskWorkbench {
   } | null
   delivery: {
     delivery_id: string
+    artifact_id: string
     revision_id: string
     verified_claim_ids: string[]
     citation_ids: string[]
     limitation_codes: string[]
     manifest_digest: string
   } | null
+  knowledge: KnowledgeSearchResult | null
+  mcp: McpToolCallResult | null
+  workspace_file: WorkspaceFileRead | null
+  workspace_edit: WorkspaceEditPreview | WorkspaceEditReceipt | null
+  workspace_patch: WorkspacePatchPreview | WorkspacePatchReceipt | null
+  workspace_path_operation: WorkspacePathOperationPreview | WorkspacePathOperationReceipt | null
+  workspace_directory: WorkspaceDirectoryRead | null
+  workspace_check: WorkspaceCheckRead | null
+  workspace_python_test: WorkspacePythonTestRead | null
+  workspace_node_test: WorkspaceNodeTestRead | null
   exports: ArtifactExport[]
   projection_digest: string
 }
@@ -1133,4 +1699,14 @@ export interface CreateResearchWorkbenchTask {
   goal: string
   privacy_mode: 'local_preferred' | 'balanced'
   constraints: string[]
+}
+
+export interface CreateConversationTurn {
+  message: string
+  privacy_mode: 'local_preferred' | 'balanced'
+  constraints: string[]
+}
+
+export interface ContinueConversationTurn {
+  message: string
 }

@@ -1,5 +1,6 @@
 """Phase 71 verification, artifact, browser, and delivery projections."""
 
+import re
 from datetime import datetime
 from typing import Literal, Self
 
@@ -107,15 +108,52 @@ class PatchReceiptRead(BaseModel):
         return self
 
 
+class PdfRenderVerificationRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    profile_id: Literal["deskpilot.pdf-render.v1"]
+    status: Literal["passed"]
+    engine: str
+    source_digest: str = Field(pattern=DIGEST_PATTERN)
+    page_count: int = Field(ge=1, le=1_000)
+    page_width_points: float = Field(gt=0)
+    page_height_points: float = Field(gt=0)
+    render_dpi: int = Field(ge=72, le=600)
+    rendered_page_digests: tuple[str, ...] = Field(min_length=1, max_length=1_000)
+    rendered_page_dimensions: tuple[tuple[int, int], ...] = Field(
+        min_length=1, max_length=1_000
+    )
+    issue_codes: tuple[str, ...]
+    evidence_digest: str = Field(pattern=DIGEST_PATTERN)
+
+    @model_validator(mode="after")
+    def proof_matches(self) -> Self:
+        if len(self.rendered_page_digests) != self.page_count:
+            raise ValueError("PDF rendered page digests are incomplete")
+        if len(self.rendered_page_dimensions) != self.page_count:
+            raise ValueError("PDF rendered page dimensions are incomplete")
+        if any(not re.fullmatch(DIGEST_PATTERN, item) for item in self.rendered_page_digests):
+            raise ValueError("PDF rendered page digest is invalid")
+        if any(width < 2 or height < 2 for width, height in self.rendered_page_dimensions):
+            raise ValueError("PDF rendered page dimensions are invalid")
+        if self.issue_codes:
+            raise ValueError("Passed PDF render verification cannot contain issues")
+        if self.evidence_digest != sha256_digest(
+            self.model_dump(mode="json", exclude={"evidence_digest"})
+        ):
+            raise ValueError("PDF render evidence digest does not match")
+        return self
+
+
 class ArtifactRevisionRead(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     revision_id: str = Field(pattern=REVISION_ID_PATTERN)
     artifact_id: str = Field(pattern=ARTIFACT_ID_PATTERN)
     revision_no: int = Field(ge=1)
-    media_type: Literal["text/html", "text/css"]
+    media_type: Literal["application/pdf", "text/html", "text/css", "text/markdown"]
     content_digest: str = Field(pattern=DIGEST_PATTERN)
     byte_count: int = Field(ge=1)
     patch_receipt_id: str = Field(pattern=PATCH_RECEIPT_ID_PATTERN)
+    pdf_render_verification: PdfRenderVerificationRead | None = None
     created_at: datetime
 
 

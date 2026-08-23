@@ -4,7 +4,9 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 76 已完成统一研究交付台、服务器拥有的 Task Workbench 投影、真实停止 fencing，以及不会覆盖的两步精确 HTML 导出。Conversation、Research、独立 Claim/Citation Verification、ArtifactRevision/PatchReceipt、隔离 Browser evidence、DeliveryManifest 和导出回执现在可在一个任务卷宗中核对；后继动作仍只由持久化 verified edge 解锁。** 详细进度、验证结果和续接入口见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 77～110 已通过全量门禁并在 `codex/stage-110` 形成 checkpoint，下一阶段为 111。** 阶段 110 已让 Phase 107 run/report/baseline 显式绑定 Coordinator/Patch Planner 的 exact ID、版本、Contract、Prompt 与输出 Schema；Phase 109 Admission 会按该身份完整回放，旧 v1 工件摘要继续兼容。当前没有真实模型/Judge/真人 baseline 或 production admission，既有 Agent 仍保持 LOCAL-only。详细进度和续接入口见[项目进度](项目进度.md)。
+
+产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物：内部扩展计划约完成 81%～85%，但相对 Codex 类编码 Agent 的能力覆盖粗估仅 35%～45%，相对 Marvis 类桌面 Agent 约 25%～35%。最大缺口不是更多 Agent 名称，而是开放目标的模型规划、通用执行/验证/修复循环、安全命令与 Git/test/build 工具面、多活动任务，以及登录态浏览器和 Computer/App Agent。后续采用 **Codex 优先、Marvis 后置** 的路线。
 
 ## 一句话架构
 
@@ -154,6 +156,41 @@ flowchart LR
 89. [Task Contract 与 Executable Plan Compiler 最小闭环](doc/69-Task-Contract与Executable-Plan-Compiler最小闭环.md)
 90. [多 Agent 对抗评测与发布门禁](doc/75-多Agent对抗评测与发布门禁.md)
 91. [统一研究工作台与精确 Artifact 导出](doc/76-统一研究工作台与精确Artifact导出.md)
+92. [对话优先 Agent 与安全自动执行](doc/77-对话优先Agent与安全自动执行.md)
+93. [统一对话路由与通用 Agent 能力](doc/78-统一对话路由与通用Agent能力.md)
+94. [受控工作区文件读取与精确替换](doc/79-受控工作区文件读取与精确替换.md)
+95. [隔离多文件补丁与一次确认提交](doc/80-隔离多文件补丁与一次确认提交.md)
+96. [只读目录与断网快照检查](doc/81-只读目录与断网快照检查.md)
+97. [只读 Python 项目测试沙箱](doc/82-只读Python项目测试沙箱.md)
+98. [断网 Node 内置测试沙箱](doc/83-断网Node内置测试沙箱.md)
+99. [可恢复工作区新建与重命名](doc/84-可恢复工作区新建与重命名.md)
+100. [同源 Markdown Artifact 与精确选择导出](doc/85-同源Markdown-Artifact与精确选择导出.md)
+101. [真实渲染验收 PDF Artifact](doc/86-真实渲染验收PDF-Artifact.md)
+102. [确定性对话 Route 自然语言参数提取](doc/87-确定性对话Route自然语言参数提取.md)
+103. [多轮澄清参数补全与 Route 证明](doc/88-多轮澄清参数补全与Route证明.md)
+104. [受限持久 Agent Model Loop 最小闭环](doc/89-受限持久Agent-Model-Loop最小闭环.md)
+105. [Workspace Reader Agent 与持久输入续接](doc/90-Workspace-Reader-Agent与持久输入续接.md)
+106. [服务端持久 Workbench 推进器](doc/91-服务端持久Workbench推进器.md)
+107. [通用 Workspace Read Agent 与目录循环](doc/92-通用Workspace-Read-Agent与目录循环.md)
+108. [服务器裁决 Agent Handoff 与父子续接](doc/93-服务器裁决Agent-Handoff与父子续接.md)
+109. [服务器裁决动态 Agent 任务图与并行 Join](doc/94-服务器裁决动态Agent任务图与并行Join.md)
+110. [类型化 ResultRef 数据流与动态任务图输出节点](doc/95-类型化ResultRef数据流与动态任务图输出节点.md)
+111. [服务器绑定 Capability 输入与异构 Agent 任务图](doc/96-服务器绑定Capability输入与异构Agent任务图.md)
+112. [失败快照与受控 Agent 重规划代](doc/97-失败快照与受控Agent重规划代.md)
+113. [服务器绑定固定测试 Agent 任务图](doc/98-服务器绑定固定测试Agent任务图.md)
+114. [无授权 Repair 建议与跨代 ResultRef 导入](doc/99-无授权Repair建议与跨代ResultRef导入.md)
+115. [批准式 Agent 补丁与固定测试闭环](doc/100-批准式Agent补丁与固定测试闭环.md)
+116. [动态任务图 Patch/Approval 节点与验证续接](doc/101-动态任务图Patch-Approval节点与验证续接.md)
+117. [服务器裁决测试结果条件边](doc/102-服务器裁决测试结果条件边.md)
+118. [测试失败驱动新计划代与逐补丁再批准](doc/103-测试失败驱动新计划代与逐补丁再批准.md)
+119. [对话续修意图与 Replan 用户消息证明](doc/104-对话续修意图与Replan用户消息证明.md)
+120. [总预算守恒的三代修复循环](doc/105-总预算守恒的三代修复循环.md)
+121. [可组合动态图 Patch/Approval 节点](doc/106-可组合动态图Patch-Approval节点.md)
+122. [Live Model 与 Judge-Human 校准门禁](doc/107-Live-Model与Judge-Human校准门禁.md)
+123. [每 Turn Agent 模型路由裁决](doc/108-每Turn-Agent模型路由裁决.md)
+124. [真实校准证据与 Provider Admission](doc/109-真实校准证据与Provider-Admission.md)
+125. [候选 Agent 身份绑定与校准工件 v2](doc/110-候选Agent身份绑定与校准工件v2.md)
+126. [阶段 111～116：通用多 Agent 与 Edge/记事本实施路线](doc/111-116-通用多Agent与Edge记事本实施路线.md)
 
 ## 目标 MVP 与当前边界
 
@@ -171,7 +208,7 @@ flowchart LR
 
 首版不做无人值守支付、绕过登录/验证码、任意管理员命令、系统文件删除、通用软件自动安装、手机远控和多租户云平台。这些能力成本或风险过高，会削弱项目可交付性。
 
-当前代码已完成阶段 70 的持久 Handoff/Invocation/Model Turn 和受控 Web Search/Page Read，并在阶段 71 接入独立 Verification、Artifact/HTML、Browser Verification 与 DeliveryManifest。候选研究结果仍不是真值，必须通过 verified-edge reducer 才能流向后继。
+当前代码已完成持久 Handoff/Invocation/Model Turn、受控 Web Search/Page Read、独立 Verification、同源 HTML/Markdown/PDF Artifact、Browser Verification 与 DeliveryManifest。阶段 89 又将研究前半段升级为两轮受限持久 Model Loop；候选研究结果仍不是真值，必须通过 verified-edge reducer 才能流向后继。
 
 ## 预期工期
 
@@ -210,8 +247,8 @@ flowchart LR
 - 后端另已将结构化写请求、受信计划、Policy/审批绑定、Tool 幂等键以及 effect graph/node/mode/fence 游标保存到 current-user DPAPI 受保护 checkpoint；可证明的 created/paused/waiting-approval 可跨 API 重启精确续跑，running Tool 只转 unknown/`waiting_reconciliation`，由显式 continue/terminate 恢复且绝不重放原 call。
 - `frontend/`：Vue 3、TypeScript、Vite 7，支持安全会话引导、任务提交、暂停/恢复/取消、`waiting_approval` 审批卡、审批失败对账、任务历史/集中 Reconciliation 列表、`waiting_reconciliation` 筛选、Runner 证据刷新、不可改写裁决、graph continue/terminate、attempt/compensation 二次确认和血缘导航、断线续传提示、任务快照、计划、实时事件时间线，Provider CRUD/健康/ETag/路由韧性控制面，以及 graph-control/admission/ready/Outbox 四域脱敏运维、告警/hash-chain 审计、retention/DLQ 二次确认与幂等重试；Vitest 组件测试已接入。
 - 当前 TaskProcessor 的磁盘容量任务通过离线 Fake Provider 获得结构化分类和计划，不调用网络模型；显式 `file.move` 请求使用受信任应用计划模板，路径只来自本地用户表单并强制进入 R1 一次性审批，不从自然语言或模型输出提取。
-- 当前真实 Tool 仍主要是 `computer.disk_usage` 与 `file.move`。冻结 Registry 已增加 `web_researcher`，并有独立的持久 Invocation/Handoff/Model Turn 研究链；它尚未与原 TaskProcessor、本地知识库/MCP、Artifact 和 Browser 组成完整通用任务链。
-- `web.search`/`web.page.read` 在显式开关与 SearchProvider 配置下可用，默认仍关闭；Task Workspace、ArtifactRevision/PatchReceipt、HTML Builder 和 BrowserRenderRun 已实现。未验证研究结果仍只能停在 `awaiting_verification`。
+- 当前真实 Tool 仍主要是 `computer.disk_usage` 与 `file.move`。统一对话入口已接入研究、本地知识、固定 MCP、Workspace 读写/检查/固定测试及 HTML/Markdown/PDF Artifact，但 Turn Router 仍依赖约 15 条预制 Route，尚未形成面向开放目标的通用 Planner 与编码工具循环。
+- `web.search`/`web.page.read` 在显式开关与 SearchProvider 配置下可用，默认仍关闭；Task Workspace、ArtifactRevision/PatchReceipt、同源 HTML/Markdown/PDF Builder、PDF 全页 render evidence 和 HTML BrowserRenderRun 已实现。未验证研究结果仍只能停在 `awaiting_verification`。
 
 受保护 checkpoint 只恢复能与任务事件、Tool 账本、Policy、审批记录和 effect graph 当前节点同时对上的阶段；密文损坏或任一绑定错配都会 fail closed。
 
@@ -219,4 +256,48 @@ flowchart LR
 
 ## 下一步
 
-阶段 76 已完成 Conversation/Research/Artifact 统一用户工作台和精确用户路径 HTML 导出。下一开发项是把本地知识库/MCP 作为受控来源组入同一任务链，并扩展多类 Artifact；覆盖仍保持禁止。每次开发结束同步更新[项目进度](项目进度.md)。
+### 当前实施顺序（2026-08-24 校准）
+
+阶段 77～110 的全量门禁和 Git checkpoint 已于 2026-08-24 完成。后续从该提交依次推进：阶段 111“模型任务提案 + 服务器 Capability Offer”、阶段 112 通用 `Observe → Plan → Execute → Verify → Repair` 持久循环、阶段 113 Codex 类安全编码工具包、阶段 114 三任务并行与托盘后台、阶段 115 三角色 Cloud 候选生命周期/Calibration v3、阶段 116 独立 Edge Profile 与 Windows 记事本安全纵切。完整设计、失败策略和验收边界见[项目进度](项目进度.md)与[阶段 111～116 实施路线](doc/111-116-通用多Agent与Edge记事本实施路线.md)。
+
+以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
+
+阶段 93 已完成首个服务器裁决的父子 Agent Handoff：目录计划由 `workspace_coordinator@1.0.0` 提议预编译的 `workspace_reader@1.1.0` Child，服务端验证 Registry/隐私/深度/循环/Tool scope/预算后才激活；只有 verified Child Result 能唤醒同一 Parent Invocation。停止、重启、fence、证明篡改和 Workbench 任务树已接通。下一开发项是通用 Supervisor、并行只读 Child verified join 与分支级控制。详见 [`doc/93-服务器裁决Agent-Handoff与父子续接.md`](doc/93-服务器裁决Agent-Handoff与父子续接.md)。
+
+阶段 94 已实现服务器裁决的动态 Agent DAG：`workspace_coordinator@1.1.0` 运行时输出完整 `propose_task_graph`，Supervisor 绑定精确 Reader/Capability/上下文和守恒预算后原子封图，Scheduler 按 ready wave 并行领取根节点，只有全部 verified Child 形成的唯一 join Observation 能续接 Parent。当前开放的仍是最多 4 节点的只读目录能力区域，不是任意 shell/写入或运行中改图。详见 [`doc/94-服务器裁决动态Agent任务图与并行Join.md`](doc/94-服务器裁决动态Agent任务图与并行Join.md)。
+
+阶段 98 已把服务器固定的 Python pytest 与 Node `node:test` 沙箱接入动态 Agent DAG。模型可以从 offer 选择命名测试输入槽、Tester 节点、依赖与并行拓扑；服务器仍固定项目/测试路径、executable、argv、静态快照、断网 AppContainer、预算和结果 Schema，并对测试 ResultRef、Workbench 投影及 Replan 血缘 fail closed。详见 [`doc/98-服务器绑定固定测试Agent任务图.md`](doc/98-服务器绑定固定测试Agent任务图.md)。
+
+阶段 99 已让 Replan 携带不授予 Capability 的结构化 Repair Advice，并允许新 generation 只选择服务器 offer 的跨代 verified ResultRef source key。Supervisor 把精确旧 ResultRef 封入 v5 新图，运行时每次消费都重验旧 Plan/Run/graph/node/Invocation/Capability/Workspace/Route 血缘；旧代保持不可变，导入不能替代 Route 输入或扩大权限。详见 [`doc/99-无授权Repair建议与跨代ResultRef导入.md`](doc/99-无授权Repair建议与跨代ResultRef导入.md)。
+
+阶段 100 新增 `workspace_agent_patch_test@1` 与本地 `workspace_patch_planner@1.0.0`。模型只能读取用户显式指定且位于固定测试项目内的一个文件，并提出一个无写权限的精确替换；服务器生成隔离 diff，用户确认当前摘要后才原子提交并保留备份，随后运行固定 pytest 或 `node:test`。测试失败会保留真实写入回执并阻断，不自动重规划或扩大权限。详见 [`doc/100-批准式Agent补丁与固定测试闭环.md`](doc/100-批准式Agent补丁与固定测试闭环.md)。
+
+阶段 101 新增 `workspace_dynamic_patch_test@1`，把同一批准边界封装为服务器裁决的动态 DAG 节点。Coordinator 可编排目录上下文、Patch/Approval 和最终输出依赖，但 Patch 建议仍无权限；graph/node 会持久暂停，只有用户确认当前节点的新摘要后才写入并运行固定测试。成功结果形成类型化 `patch_test` ResultRef 续接下游，测试失败、Repair Advice 或旧 ResultRef 都不能自动获得新写权限。Alembic head 升级为 `0049_agent_graph_patch_approvals`。详见 [`doc/101-动态任务图Patch-Approval节点与验证续接.md`](doc/101-动态任务图Patch-Approval节点与验证续接.md)。
+
+阶段 102 将测试通过升级为 graph v7 的服务器裁决条件边。测试节点的下游依赖必须显式绑定固定 `test_passed` 谓词；服务器以 exact edge、真实结果状态和 ResultRef digest 生成不可变 decision，只有 matched decision 才能解锁目标。failed/error 会让图安全失败并取消未执行下游，遗漏条件或 proof 篡改均 fail closed。Alembic head 升级为 `0050_agent_graph_test_conditions`。详见 [`doc/102-服务器裁决测试结果条件边.md`](doc/102-服务器裁决测试结果条件边.md)。
+
+阶段 103 将图内 Patch/Test 的 false decision 接入一次用户请求的 generation 2。失败 Patch 先形成类型化 ResultRef 和服务器 condition decision，后台不会自动重试；用户显式继续后，Replan v3 绑定旧失败证明但不授予能力，新 Plan/Run/graph 保持独立不可变。新 Patch staging 与安全备份按 manifest 分代，必须取得不同的精确确认，旧确认重放、失败 `patch_test` 导入和 decision 篡改均 fail closed。本阶段无 migration，head 继续为 `0050`。详见 [`doc/103-测试失败驱动新计划代与逐补丁再批准.md`](doc/103-测试失败驱动新计划代与逐补丁再批准.md)。
+
+阶段 104 把明确的对话“继续修复”接入同一个一次性 Replan action。按钮和对话都会先持久化 active user message，Replan v4 再绑定 message ID/digest、固定 continuation intent 和入口来源；创建与读取时均重新验证消息字段、摘要、状态和确定性分类。模糊“继续/再试一次/修复”不构成授权，重复换代继续拒绝，新 Patch 仍需新 manifest 与新确认。v1～v3 摘要兼容，本阶段无 migration。详见 [`doc/104-对话续修意图与Replan用户消息证明.md`](doc/104-对话续修意图与Replan用户消息证明.md)。
+
+阶段 105 把一次性换代扩展为最多 generation 3 的修复循环。新 Task Contract 一次性声明三代总预算，Planning Service 和 Supervisor 都会累计同一 Task 所有代的 Plan/动态图分配；Replan v5 封存换代前、目标 Plan、激活后和剩余预算证明。每代仍需要新的 false decision、active user message、Plan/Run/graph、staging manifest 和 confirmation；第三代失败后按钮与“继续修复”都在写入消息前被拒绝。旧 Replan v1～v4 保持兼容，本阶段无 migration。详见 [`doc/105-总预算守恒的三代修复循环.md`](doc/105-总预算守恒的三代修复循环.md)。
+
+阶段 106 将单 Patch 图升级为可组合的节点级批准协议。Turn Router rules v5 可将一或两个精确文件规范化为服务器槽位；Coordinator 只选择 key，Supervisor 要求每个槽位被精确消费一次，并在 graph v8 中为每个 Patch 封存 exact input digest 与 fresh-confirmation/content-addressed-manifest 策略。双 Patch 纵向闭环与失败换代已证明四份 confirmation/manifest/staging 互不复用；重复槽位的模型提案在封图前被拒绝。旧 graph v1～v7 和 CapabilityInput v1～v3 保持兼容，本阶段无 migration。详见 [`doc/106-可组合动态图Patch-Approval节点.md`](doc/106-可组合动态图Patch-Approval节点.md)。
+
+阶段 106 最终门禁：后端 81 个测试文件 / 597 项，`585 passed + 12 skipped`；Ruff 全仓、严格 mypy 240 个生产源码通过。Phase75 11/11、false-success=0、unauthorized-effect=0，不可变 v15 baseline compare 通过；前端 22 个测试文件 / 154 项、type-check/build 通过。Alembic 当前且唯一 head 仍为 `0050_agent_graph_test_conditions`，无待生成迁移。
+
+阶段 107 新增默认零网络的 live-model/Judge-human 校准门禁。候选 Coordinator/Patch Planner capture 与生产 Runtime 共用精确 `ModelRequest` 构造器；suite/harness/build、Provider/model、Prompt、Schema、盲包、独立 Judge、两名真人主审及必要的第三仲裁者都以不可变摘要绑定。Judge 只接收 blind sample，不能替代真人、服务器确定性 guard、用户确认或 verified edge。CI、未显式启用、Fake Provider 和不满足 strict Schema 能力的 Provider 都会拒绝 live capture。当前完成的是设施和离线测试，尚未执行真实模型/真人 cohort 或签发 Phase 107 baseline。详见 [`doc/107-Live-Model与Judge-Human校准门禁.md`](doc/107-Live-Model与Judge-Human校准门禁.md)。
+
+阶段 107 最终门禁：后端 82 个测试文件 / 602 项，`590 passed + 12 skipped`、统一退出 0；Ruff 全仓、严格 mypy 244 个生产源码通过。Phase75 11/11、false-success=0、unauthorized-effect=0，不可变 v15 baseline compare 通过；前端 22 个测试文件 / 154 项、type-check/build 通过。Alembic 当前且唯一 head 仍为 `0050_agent_graph_test_conditions`，无待生成迁移；SQLite `integrity_check=ok`，Python/uv 依赖和 diff whitespace 通过。
+
+阶段 108 把 Registry freeze 的模型可用性提升为每个 Agent Model Turn 的实际派发授权。Runtime 从 exact Handoff 解析 Agent/版本/Contract/Prompt，用冻结 Prompt Package 统一渲染首条 system message，并在 Context 前后复验 identity、role、privacy、strict Schema、Provider location/capability snapshot 与节点预算。Gateway 只负责选择候选，不能替代 Agent Contract；LOCAL-only Coordinator/Patch Planner 即使面对 cloud 默认 Provider 也会在零 Provider 调用前拒绝。Context 若偷换 Prompt、privacy、Provider 或预算，会留下稳定失败审计但不会进入 dispatching。Phase 107 capture 同样使用新的 Prompt/Contract 请求绑定器；当前没有真实批准 baseline，因此未开放任何 cloud Agent 版本。详见 [`doc/108-每Turn-Agent模型路由裁决.md`](doc/108-每Turn-Agent模型路由裁决.md)。
+
+阶段 108 最终门禁：后端 82 个测试文件 / 606 项，`594 passed + 12 skipped`、统一首轮退出 0；Ruff 全仓、严格 mypy 244 个生产源码通过。Phase75 11/11、false-success=0、unauthorized-effect=0，v15 baseline compare 通过；前端 22 个测试文件 / 154 项、type-check/build 通过。Alembic 当前且唯一 head 仍为 `0050_agent_graph_test_conditions`，无待生成迁移；SQLite `integrity_check=ok`，Python/uv 依赖和 diff whitespace 通过。
+
+阶段 109 在校准设施与逐 Turn route authority 之间增加默认关闭的 production admission。启动 bundle 必须同时携带 Phase 107 suite/run/blind packet/独立 Judge/真人 review/report/baseline 和 exact Agent admission；Loader 会完整重放 grade 与 baseline compare，再绑定 Agent/版本/Contract/Prompt、Provider snapshot、build、Schema、批准人与不超过 90 天的有效期。allow/path 必须同时设置，CI、Fake cloud、duplicate key、symlink、过期或任一 digest 漂移均拒绝。Registry freeze 现在要求 cloud Provider 同时满足 Contract 和 admission；admission 不能扩大 LOCAL-only Contract。当前没有提交真实 bundle，所有现有 Agent 仍只走本地模型。详见 [`doc/109-真实校准证据与Provider-Admission.md`](doc/109-真实校准证据与Provider-Admission.md)。
+
+阶段 109 最终门禁：后端 83 个测试文件 / 610 项，`598 passed + 12 skipped`、统一首轮退出 0；Ruff 全仓、严格 mypy 246 个生产源码通过。Phase75 11/11、false-success=0、unauthorized-effect=0，v15 baseline compare 通过；前端 22 个测试文件 / 154 项、type-check/build 通过。Alembic 当前且唯一 head 仍为 `0050_agent_graph_test_conditions`，无待生成迁移；SQLite `integrity_check=ok`，Python/uv 依赖和 diff whitespace 通过。
+
+阶段 110 将 Phase 107 校准工件升级为候选 Agent identity v2。capture CLI 显式选择 Coordinator/Patch 版本，run/report/baseline 绑定 ordered Agent ID/version/Contract/Prompt/output Schema；每次 blind packet、grade 和 Phase 109 Admission 前都会从受信 Registry 解析同一版本、重建 exact ModelRequest 并拒绝身份漂移。未登记或 Schema 不兼容的版本在 Provider 零调用前失败。旧 v1 run/report/baseline 继续按原材料重算摘要，并已走通完整 Judge-human grade、baseline compare 和 Admission 回放。当前未新增 cloud Contract、真实 cohort 或 production bundle，既有 LOCAL-only 权限不变。详见 [`doc/110-候选Agent身份绑定与校准工件v2.md`](doc/110-候选Agent身份绑定与校准工件v2.md)。
+
+阶段 110 checkpoint 最终门禁：后端 83 个测试文件 / 615 项，`603 passed + 12 skipped`、统一退出 0，耗时 2328.01 秒；Ruff 全仓、严格 mypy 249 个源码、frozen `uv` 同步与 `pip check` 通过。Phase75 v15 为 11/11、false-success=0、unauthorized-effect=0，16 份不可变 baseline 的 SHA-256 比较前后完全一致；Evaluation、wheel 内 22/22 Prompt 资源也通过。前端 22 个测试文件 / 154 项、type-check/build 通过。Alembic current 且唯一 head 为 `0050_agent_graph_test_conditions`，fresh/default SQLite upgrade/check、`integrity_check=ok`、foreign-key 零违规。专用 `deskpilot_test` 的真实 PostgreSQL 11 项（含固定容器重启）和临时 RabbitMQ 1 项均通过，随后恢复 PostgreSQL 原启停状态并移除临时 Broker；Workflow YAML、staged 范围与 diff whitespace 通过。

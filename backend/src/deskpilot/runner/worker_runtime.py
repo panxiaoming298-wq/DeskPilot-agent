@@ -88,7 +88,11 @@ def _iter_tree(
     return files
 
 
-def _runtime_sources() -> tuple[_SourceFile, ...]:
+def _runtime_sources(
+    distributions: tuple[str, ...] = WORKER_DISTRIBUTIONS,
+    *,
+    include_deskpilot: bool = True,
+) -> tuple[_SourceFile, ...]:
     base = Path(sys.base_prefix).resolve(strict=True)
     mappings: dict[PurePosixPath, Path] = {}
 
@@ -122,7 +126,7 @@ def _runtime_sources() -> tuple[_SourceFile, ...]:
             ):
                 add(source, destination)
 
-    for distribution_name in WORKER_DISTRIBUTIONS:
+    for distribution_name in distributions:
         try:
             distribution = importlib.metadata.distribution(distribution_name)
         except importlib.metadata.PackageNotFoundError as error:
@@ -143,14 +147,15 @@ def _runtime_sources() -> tuple[_SourceFile, ...]:
             if source.is_file():
                 add(source, PurePosixPath("Lib/site-packages") / relative_path)
 
-    import deskpilot
+    if include_deskpilot:
+        import deskpilot
 
-    deskpilot_root = Path(deskpilot.__file__).resolve(strict=True).parent
-    for source, destination in _iter_tree(
-        deskpilot_root,
-        PurePosixPath("Lib/site-packages/deskpilot"),
-    ):
-        add(source, destination)
+        deskpilot_root = Path(deskpilot.__file__).resolve(strict=True).parent
+        for source, destination in _iter_tree(
+            deskpilot_root,
+            PurePosixPath("Lib/site-packages/deskpilot"),
+        ):
+            add(source, destination)
 
     sources: list[_SourceFile] = []
     for destination, source in sorted(mappings.items(), key=lambda item: str(item[0])):
@@ -392,7 +397,12 @@ def _remove_staging(path: Path, runtime_root: Path) -> None:
     shutil.rmtree(resolved, ignore_errors=True)
 
 
-def prepare_worker_runtime(runtime_root: Path) -> WorkerRuntimeBundle:
+def prepare_worker_runtime(
+    runtime_root: Path,
+    *,
+    distributions: tuple[str, ...] = WORKER_DISTRIBUTIONS,
+    include_deskpilot: bool = True,
+) -> WorkerRuntimeBundle:
     """Build, protect, publish, and verify the current worker source closure."""
     if os.name != "nt":
         raise WorkerRuntimeError("AppContainer worker runtime requires Windows")
@@ -402,7 +412,7 @@ def prepare_worker_runtime(runtime_root: Path) -> WorkerRuntimeBundle:
     )
 
     root = runtime_root.resolve(strict=False)
-    sources = _runtime_sources()
+    sources = _runtime_sources(distributions, include_deskpilot=include_deskpilot)
     expected_capability_sid = capability_sid_string(WORKER_RUNTIME_CAPABILITY)
     digest = _bundle_digest(sources, expected_capability_sid)
     bundle_root = root / digest

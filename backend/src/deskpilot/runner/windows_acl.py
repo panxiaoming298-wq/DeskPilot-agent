@@ -123,9 +123,7 @@ class WindowsAclError(RuntimeError):
 
 
 def _raise_last_error(operation: str) -> None:
-    raise WindowsAclError(
-        f"{operation} failed with Win32 error {ctypes.get_last_error()}"
-    )
+    raise WindowsAclError(f"{operation} failed with Win32 error {ctypes.get_last_error()}")
 
 
 def _free_local(pointer: object) -> None:
@@ -178,9 +176,7 @@ def capability_sid_string(capability_name: str) -> str:
 
 def _current_user_sid() -> tuple[wintypes.HANDLE, ctypes.Array[ctypes.c_char], PSID]:
     token = wintypes.HANDLE()
-    if not advapi32.OpenProcessToken(
-        kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)
-    ):
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
         _raise_last_error("OpenProcessToken")
     required = wintypes.DWORD()
     advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(required))
@@ -218,21 +214,20 @@ def _entry(sid: PSID, access: int, trustee_type: int) -> EXPLICIT_ACCESS_W:
     return entry
 
 
-def protect_worker_runtime(path: Path, capability_name: str) -> str:
-    """Protect a new runtime tree and grant one capability read/execute access."""
-    resolved = path.resolve(strict=True)
-    if not resolved.is_dir():
-        raise WindowsAclError("Worker runtime ACL target must be a directory")
-
+def _protect_tree(
+    resolved: Path,
+    reader_sid: PSID,
+    reader_type: int,
+    reader_access: int,
+) -> None:
     token = wintypes.HANDLE()
     user_buffer: ctypes.Array[ctypes.c_char] | None = None
-    user_sid = system_sid = administrators_sid = capability_sid = PSID()
+    user_sid = system_sid = administrators_sid = PSID()
     new_acl = PACL()
     try:
         token, user_buffer, user_sid = _current_user_sid()
         system_sid = _string_sid(SYSTEM_SID)
         administrators_sid = _string_sid(ADMINISTRATORS_SID)
-        capability_sid = _derive_capability_sid(capability_name)
         entries = (EXPLICIT_ACCESS_W * 4)(
             _entry(user_sid, FILE_ALL_ACCESS, TRUSTEE_IS_USER),
             _entry(system_sid, FILE_ALL_ACCESS, TRUSTEE_IS_WELL_KNOWN_GROUP),
@@ -242,9 +237,9 @@ def protect_worker_runtime(path: Path, capability_name: str) -> str:
                 TRUSTEE_IS_WELL_KNOWN_GROUP,
             ),
             _entry(
-                capability_sid,
-                FILE_GENERIC_READ_EXECUTE,
-                TRUSTEE_IS_WELL_KNOWN_GROUP,
+                reader_sid,
+                reader_access,
+                reader_type,
             ),
         )
         result = int(advapi32.SetEntriesInAclW(4, entries, None, ctypes.byref(new_acl)))
@@ -264,12 +259,52 @@ def protect_worker_runtime(path: Path, capability_name: str) -> str:
         )
         if result != 0:
             raise WindowsAclError(f"SetNamedSecurityInfoW failed with Win32 error {result}")
-        return capability_sid_string(capability_name)
     finally:
         del user_buffer
         if token:
             kernel32.CloseHandle(token)
         _free_local(system_sid)
         _free_local(administrators_sid)
-        _free_local(capability_sid)
         _free_local(new_acl)
+
+
+def protect_worker_runtime(path: Path, capability_name: str) -> str:
+    """Protect a new runtime tree and grant one capability read/execute access."""
+    resolved = path.resolve(strict=True)
+    if not resolved.is_dir():
+        raise WindowsAclError("Worker runtime ACL target must be a directory")
+    capability_sid = _derive_capability_sid(capability_name)
+    try:
+        _protect_tree(
+            resolved,
+            capability_sid,
+            TRUSTEE_IS_WELL_KNOWN_GROUP,
+            FILE_GENERIC_READ_EXECUTE,
+        )
+        return capability_sid_string(capability_name)
+    finally:
+        _free_local(capability_sid)
+
+
+def protect_appcontainer_read_path(path: Path, appcontainer_sid: str) -> None:
+    """Grant one per-invocation AppContainer SID read-only tree access."""
+    resolved = path.resolve(strict=True)
+    if not resolved.is_dir():
+        raise WindowsAclError("AppContainer read target must be a directory")
+    sid = _string_sid(appcontainer_sid)
+    try:
+        _protect_tree(resolved, sid, TRUSTEE_IS_USER, FILE_GENERIC_READ_EXECUTE)
+    finally:
+        _free_local(sid)
+
+
+def protect_appcontainer_write_path(path: Path, appcontainer_sid: str) -> None:
+    """Grant one per-invocation AppContainer SID access to its scratch tree."""
+    resolved = path.resolve(strict=True)
+    if not resolved.is_dir():
+        raise WindowsAclError("AppContainer scratch target must be a directory")
+    sid = _string_sid(appcontainer_sid)
+    try:
+        _protect_tree(resolved, sid, TRUSTEE_IS_USER, FILE_ALL_ACCESS)
+    finally:
+        _free_local(sid)

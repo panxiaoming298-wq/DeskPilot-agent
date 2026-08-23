@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import DIGEST_PATTERN
+from deskpilot.domain.agent_replanning import AgentRepairLoopStatus, AgentReplanPage
 from deskpilot.domain.agent_runtime import ExecutionRunPage
 from deskpilot.domain.artifact_runtime import (
     ARTIFACT_ID_PATTERN,
@@ -19,13 +20,30 @@ from deskpilot.domain.artifact_runtime import (
     VerificationRunRead,
 )
 from deskpilot.domain.context_memory import ConversationMessageRead
+from deskpilot.domain.knowledge import KnowledgeSearchRead
+from deskpilot.domain.mcp import McpToolCallRead
 from deskpilot.domain.research import ResearchSessionRead
 from deskpilot.domain.schemas import TaskRead
 from deskpilot.domain.task_plans import (
+    CONVERSATION_ID_PATTERN,
+    MESSAGE_ID_PATTERN,
     TASK_ID_PATTERN,
     ExecutablePlanPage,
     PlanningStateRead,
     TaskContractVersionRead,
+)
+from deskpilot.domain.workspace_files import (
+    WorkspaceCheckRead,
+    WorkspaceDirectoryRead,
+    WorkspaceEditPreview,
+    WorkspaceEditReceipt,
+    WorkspaceFileRead,
+    WorkspaceNodeTestRead,
+    WorkspacePatchPreview,
+    WorkspacePatchReceipt,
+    WorkspacePathOperationPreview,
+    WorkspacePathOperationReceipt,
+    WorkspacePythonTestRead,
 )
 
 ARTIFACT_EXPORT_ID_PATTERN = r"^xpt_[0-9a-f]{64}$"
@@ -74,6 +92,10 @@ class WorkbenchStage(StrEnum):
     READY_TO_DELIVER = "ready_to_deliver"
     DELIVERED = "delivered"
     EXPORTED = "exported"
+    EXECUTING = "executing"
+    NEEDS_CLARIFICATION = "needs_clarification"
+    NEEDS_USER_ACTION = "needs_user_action"
+    UNSUPPORTED = "unsupported"
     BLOCKED = "blocked"
 
 
@@ -85,8 +107,85 @@ class WorkbenchAction(StrEnum):
     BUILD_ARTIFACT = "build_artifact"
     VERIFY_BROWSER = "verify_browser"
     FINALIZE_DELIVERY = "finalize_delivery"
+    EXECUTE_ROUTE = "execute_route"
+    REPLAN_FAILED_EXECUTION = "replan_failed_execution"
+    COMMIT_WORKSPACE_EDIT = "commit_workspace_edit"
+    COMMIT_WORKSPACE_PATCH = "commit_workspace_patch"
+    COMMIT_WORKSPACE_PATH_OPERATION = "commit_workspace_path_operation"
     PREPARE_EXPORT = "prepare_export"
     STOP_EXECUTION = "stop_execution"
+
+
+class TurnRouteDecision(StrEnum):
+    ROUTED = "routed"
+    NEEDS_CLARIFICATION = "needs_clarification"
+    UNSUPPORTED = "unsupported"
+
+
+class TurnRouteStatus(StrEnum):
+    READY = "ready"
+    RUNNING = "running"
+    NEEDS_USER_ACTION = "needs_user_action"
+    WAITING_USER_INPUT = "waiting_user_input"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class TurnRouteRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["deskpilot.turn-route.v1"] = "deskpilot.turn-route.v1"
+    task_id: str = Field(pattern=TASK_ID_PATTERN)
+    conversation_id: str = Field(pattern=CONVERSATION_ID_PATTERN)
+    user_message_id: str = Field(pattern=MESSAGE_ID_PATTERN)
+    decision: TurnRouteDecision
+    route_id: (
+        Literal[
+            "research_to_html",
+            "knowledge_lookup",
+            "mcp_text_metrics",
+            "workspace_file_read",
+            "workspace_file_replace",
+            "workspace_patch_bundle",
+            "workspace_agent_patch_test",
+            "workspace_dynamic_patch_test",
+            "workspace_file_create",
+            "workspace_file_rename",
+            "workspace_directory_list",
+            "workspace_directory_analyze",
+            "workspace_snapshot_check",
+            "workspace_python_test",
+            "workspace_node_test",
+        ]
+        | None
+    )
+    route_version: Literal["1"] | None
+    route_manifest_digest: str | None = Field(default=None, pattern=DIGEST_PATTERN)
+    candidate_digest: str = Field(pattern=DIGEST_PATTERN)
+    parameter_digest: str = Field(pattern=DIGEST_PATTERN)
+    resolved_from_task_id: str | None = Field(default=None, pattern=TASK_ID_PATTERN)
+    resolution_rule: str | None = Field(default=None, min_length=1, max_length=64)
+    resolution_digest: str | None = Field(default=None, pattern=DIGEST_PATTERN)
+    reason_code: str
+    status: TurnRouteStatus
+    result_digest: str | None = Field(default=None, pattern=DIGEST_PATTERN)
+    error_code: str | None = None
+    revision: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def resolution_is_complete(self) -> Self:
+        values = (
+            self.resolved_from_task_id,
+            self.resolution_rule,
+            self.resolution_digest,
+        )
+        if any(value is not None for value in values) != all(value is not None for value in values):
+            raise ValueError("Turn Route resolution binding must be complete")
+        if self.resolved_from_task_id is not None and self.decision is not TurnRouteDecision.ROUTED:
+            raise ValueError("Only routed Turns can resolve a clarification")
+        return self
 
 
 class WorkbenchActionRead(BaseModel):
@@ -95,9 +194,7 @@ class WorkbenchActionRead(BaseModel):
     enabled: bool
     reason_code: str
     explanation: str
-    effect_class: Literal[
-        "read_only", "workspace_write", "user_path_write", "execution_control"
-    ]
+    effect_class: Literal["read_only", "workspace_write", "user_path_write", "execution_control"]
 
 
 class CreateResearchWorkbenchTask(BaseModel):
@@ -107,9 +204,26 @@ class CreateResearchWorkbenchTask(BaseModel):
     constraints: tuple[str, ...] = Field(default=(), max_length=50)
 
 
+class CreateConversationTurn(BaseModel):
+    """A user turn that starts a new immutable Task inside a conversation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    message: str = Field(min_length=1, max_length=4_000)
+    privacy_mode: Literal["local_preferred", "balanced"] = "local_preferred"
+    constraints: tuple[str, ...] = Field(default=(), max_length=50)
+
+
+class ContinueConversationTurn(BaseModel):
+    """A follow-up turn; the service creates a replacement Task in the same conversation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    message: str = Field(min_length=1, max_length=4_000)
+
+
 class PrepareArtifactExport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     target_path: str = Field(min_length=1, max_length=32_767)
+    artifact_id: str | None = Field(default=None, pattern=ARTIFACT_ID_PATTERN)
 
 
 class CommitArtifactExport(BaseModel):
@@ -119,9 +233,7 @@ class CommitArtifactExport(BaseModel):
 
 class ArtifactExportRead(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal["deskpilot.artifact-export.v1"] = (
-        "deskpilot.artifact-export.v1"
-    )
+    schema_version: Literal["deskpilot.artifact-export.v1"] = "deskpilot.artifact-export.v1"
     export_id: str = Field(pattern=ARTIFACT_EXPORT_ID_PATTERN)
     delivery_id: str = Field(pattern=DELIVERY_ID_PATTERN)
     task_id: str = Field(pattern=TASK_ID_PATTERN)
@@ -169,15 +281,28 @@ class TaskWorkbenchRead(BaseModel):
     stage: WorkbenchStage
     actions: tuple[WorkbenchActionRead, ...]
     conversation: tuple[ConversationMessageRead, ...]
+    route: TurnRouteRead | None
     planning: PlanningStateRead | None
     contract: TaskContractVersionRead | None
     plans: ExecutablePlanPage
     executions: ExecutionRunPage
+    replans: AgentReplanPage
+    repair_loop: AgentRepairLoopStatus | None
     research: ResearchSessionRead | None
     verification: VerificationRunRead | None
     workspace: TaskWorkspaceRead | None
     browser: BrowserRenderRunRead | None
     delivery: DeliveryManifestRead | None
+    knowledge: KnowledgeSearchRead | None
+    mcp: McpToolCallRead | None
+    workspace_file: WorkspaceFileRead | None
+    workspace_edit: WorkspaceEditPreview | WorkspaceEditReceipt | None
+    workspace_patch: WorkspacePatchPreview | WorkspacePatchReceipt | None
+    workspace_path_operation: WorkspacePathOperationPreview | WorkspacePathOperationReceipt | None
+    workspace_directory: WorkspaceDirectoryRead | None
+    workspace_check: WorkspaceCheckRead | None
+    workspace_python_test: WorkspacePythonTestRead | None = None
+    workspace_node_test: WorkspaceNodeTestRead | None = None
     exports: tuple[ArtifactExportRead, ...]
     projection_digest: str = Field(pattern=DIGEST_PATTERN)
 

@@ -3,6 +3,7 @@
 import ctypes
 import msvcrt
 import os
+import shutil
 import subprocess
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -370,13 +371,12 @@ class WindowsSecuritySnapshot:
 class _AppContainerProfile:
     name: str
     sid: LPVOID
+    sid_text: str
     local_app_data: str
 
 
 def _hresult_message(operation: str, result: int) -> ProcessIsolationError:
-    return ProcessIsolationError(
-        f"{operation} failed with HRESULT 0x{result & 0xFFFFFFFF:08X}"
-    )
+    return ProcessIsolationError(f"{operation} failed with HRESULT 0x{result & 0xFFFFFFFF:08X}")
 
 
 def _delete_appcontainer_profile_name(profile_name: str) -> None:
@@ -423,9 +423,17 @@ def _create_appcontainer_profile(
         )
         if result < 0:
             raise _hresult_message("GetAppContainerFolderPath", result)
+        sid_value = sid_text.value
+        if not sid_value:
+            raise ProcessIsolationError("AppContainer profile SID is unavailable")
         if not folder.value:
             raise ProcessIsolationError("AppContainer profile folder is unavailable")
-        return _AppContainerProfile(name=name, sid=sid, local_app_data=folder.value)
+        return _AppContainerProfile(
+            name=name,
+            sid=sid,
+            sid_text=sid_value,
+            local_app_data=folder.value,
+        )
     except Exception:
         advapi32.FreeSid(sid)
         try:
@@ -474,9 +482,7 @@ def _derive_worker_runtime_capability() -> LPVOID:
     capability_sid = LPVOID()
     try:
         if group_count.value != 1 or capability_count.value != 1:
-            raise ProcessIsolationError(
-                "Windows returned an unexpected worker capability SID set"
-            )
+            raise ProcessIsolationError("Windows returned an unexpected worker capability SID set")
         capability_sid = LPVOID(capabilities[0])
         capabilities[0] = LPVOID()
         return capability_sid
@@ -543,9 +549,7 @@ def current_process_security_snapshot() -> WindowsSecuritySnapshot:
             ctypes.cast(privilege_buffer, ctypes.POINTER(wintypes.DWORD)).contents.value
         )
         in_job = wintypes.BOOL()
-        if not kernel32.IsProcessInJob(
-            kernel32.GetCurrentProcess(), None, ctypes.byref(in_job)
-        ):
+        if not kernel32.IsProcessInJob(kernel32.GetCurrentProcess(), None, ctypes.byref(in_job)):
             _raise_last_error("IsProcessInJob")
         return WindowsSecuritySnapshot(
             integrity_level_rid=int(rid_pointer.contents.value),
@@ -560,9 +564,7 @@ def _create_restricted_low_token() -> wintypes.HANDLE:
     source = wintypes.HANDLE()
     restricted = wintypes.HANDLE()
     access = TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT
-    if not advapi32.OpenProcessToken(
-        kernel32.GetCurrentProcess(), access, ctypes.byref(source)
-    ):
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), access, ctypes.byref(source)):
         _raise_last_error("OpenProcessToken")
     try:
         if not advapi32.CreateRestrictedToken(
@@ -581,9 +583,7 @@ def _create_restricted_low_token() -> wintypes.HANDLE:
         if not advapi32.ConvertStringSidToSidW(LOW_INTEGRITY_SID, ctypes.byref(sid)):
             _raise_last_error("ConvertStringSidToSidW")
         try:
-            label = TOKEN_MANDATORY_LABEL(
-                SID_AND_ATTRIBUTES(sid, SE_GROUP_INTEGRITY)
-            )
+            label = TOKEN_MANDATORY_LABEL(SID_AND_ATTRIBUTES(sid, SE_GROUP_INTEGRITY))
             label_size = ctypes.sizeof(label) + int(advapi32.GetLengthSid(sid))
             if not advapi32.SetTokenInformation(
                 restricted,
@@ -652,9 +652,7 @@ def _make_parent_only(handle: wintypes.HANDLE) -> None:
 def _environment_block(environment: dict[str, str]) -> ctypes.Array[ctypes.c_wchar]:
     content = "\0".join(
         f"{key}={value}"
-        for key, value in sorted(
-            environment.items(), key=lambda item: item[0].upper()
-        )
+        for key, value in sorted(environment.items(), key=lambda item: item[0].upper())
     )
     return ctypes.create_unicode_buffer(content + "\0\0")
 
@@ -666,9 +664,7 @@ def _read_handle(
     destination: list[bytes],
 ) -> None:
     try:
-        descriptor = msvcrt.open_osfhandle(
-            _handle_integer(handle), os.O_RDONLY | os.O_BINARY
-        )
+        descriptor = msvcrt.open_osfhandle(_handle_integer(handle), os.O_RDONLY | os.O_BINARY)
         with os.fdopen(descriptor, "rb", buffering=0) as stream:
             chunks: list[bytes] = []
             remaining = limit + 1
@@ -681,6 +677,59 @@ def _read_handle(
             destination.append(b"".join(chunks))
     except OSError:
         destination.append(b"")
+
+
+def _is_reparse_point(path: Path) -> bool:
+    return path.is_symlink() or bool(
+        getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400
+    )
+
+
+def _mirror_tree(source: Path, target: Path, *, hardlink: bool) -> None:
+    resolved = source.resolve(strict=True)
+    if not resolved.is_dir() or target.exists():
+        raise ProcessIsolationUnavailableError(
+            "AppContainer mirror source or destination is invalid"
+        )
+    if hardlink and resolved.drive.casefold() != target.drive.casefold():
+        raise ProcessIsolationUnavailableError(
+            "AppContainer runtime mirror must stay on one volume"
+        )
+    target.mkdir(parents=True, exist_ok=False)
+    try:
+        for item in sorted(resolved.rglob("*"), key=lambda path: path.as_posix()):
+            if _is_reparse_point(item):
+                raise ProcessIsolationUnavailableError(
+                    "AppContainer mirrors reject links and reparse points"
+                )
+            destination = target.joinpath(*item.relative_to(resolved).parts)
+            if item.is_dir():
+                destination.mkdir(exist_ok=False)
+            elif item.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if hardlink:
+                    os.link(item, destination)
+                else:
+                    shutil.copyfile(item, destination)
+    except Exception:
+        shutil.rmtree(target, ignore_errors=True)
+        raise
+
+
+def _map_mirrored_path(
+    value: str,
+    mappings: tuple[tuple[Path, Path], ...],
+) -> str:
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        return value
+    for source, target in mappings:
+        try:
+            relative = candidate.relative_to(source)
+        except ValueError:
+            continue
+        return str(target.joinpath(*relative.parts))
+    return value
 
 
 class WindowsRestrictedProcessLauncher(ProcessLauncher):
@@ -741,6 +790,7 @@ class WindowsRestrictedProcessLauncher(ProcessLauncher):
         if not command or not Path(command[0]).is_absolute():
             raise ProcessIsolationError("Tool worker executable path must be absolute")
 
+        effective_command = command
         profile = None
         token = None
         job = None
@@ -753,9 +803,64 @@ class WindowsRestrictedProcessLauncher(ProcessLauncher):
         capability_sid = LPVOID()
         capability_entries: ctypes.Array[SID_AND_ATTRIBUTES] | None = None
         process_created = False
+        appcontainer_temp_environment: str | None = None
+        mirrored_runtime: Path | None = None
+        mirrored_workspace: Path | None = None
         try:
             if self._policy.require_network_isolation:
                 profile = _create_appcontainer_profile(self._profile_journal)
+                if self._policy.appcontainer_mirror_workspace:
+                    if (
+                        self._policy.worker_runtime_bundle is None
+                        or self._policy.working_directory is None
+                    ):
+                        raise ProcessIsolationUnavailableError(
+                            "AppContainer mirror policy is incomplete"
+                        )
+                    mirror_root = Path(profile.local_app_data) / "DeskPilotInvocation"
+                    mirrored_runtime = mirror_root / "runtime"
+                    mirrored_workspace = mirror_root / "workspace"
+                    runtime_source = Path(self._policy.worker_runtime_bundle).resolve(strict=True)
+                    workspace_source = Path(self._policy.working_directory).resolve(strict=True)
+                    _mirror_tree(runtime_source, mirrored_runtime, hardlink=True)
+                    _mirror_tree(workspace_source, mirrored_workspace, hardlink=False)
+                    mappings = (
+                        (runtime_source, mirrored_runtime),
+                        (workspace_source, mirrored_workspace),
+                    )
+                    effective_command = tuple(
+                        _map_mirrored_path(value, mappings) for value in command
+                    )
+                if (
+                    self._policy.appcontainer_read_paths
+                    or self._policy.appcontainer_temp_path is not None
+                ):
+                    from deskpilot.runner.windows_acl import (
+                        WindowsAclError,
+                        protect_appcontainer_read_path,
+                        protect_appcontainer_write_path,
+                    )
+
+                    try:
+                        for read_path in self._policy.appcontainer_read_paths:
+                            protect_appcontainer_read_path(Path(read_path), profile.sid_text)
+                        if self._policy.appcontainer_temp_path is not None:
+                            requested_temp = Path(self._policy.appcontainer_temp_path)
+                            source_local_app_data = Path(os.environ["LOCALAPPDATA"])
+                            try:
+                                relative_temp = requested_temp.relative_to(source_local_app_data)
+                            except ValueError:
+                                physical_temp = requested_temp
+                            else:
+                                physical_temp = Path(profile.local_app_data) / relative_temp
+                                physical_temp.mkdir(parents=True, exist_ok=True)
+                            protect_appcontainer_write_path(
+                                physical_temp,
+                                profile.sid_text,
+                            )
+                            appcontainer_temp_environment = str(requested_temp)
+                    except WindowsAclError as error:
+                        raise ProcessIsolationUnavailableError(str(error)) from error
             else:
                 token = _create_restricted_low_token()
             job = _create_job(self._policy)
@@ -814,9 +919,7 @@ class WindowsRestrictedProcessLauncher(ProcessLauncher):
                     None,
                     None,
                 ):
-                    _raise_last_error(
-                        "UpdateProcThreadAttribute(security capabilities)"
-                    )
+                    _raise_last_error("UpdateProcThreadAttribute(security capabilities)")
 
             startup = STARTUPINFOEXW()
             startup.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEXW)
@@ -825,24 +928,40 @@ class WindowsRestrictedProcessLauncher(ProcessLauncher):
             startup.StartupInfo.hStdOutput = stdout_write
             startup.StartupInfo.hStdError = stderr_write
             startup.lpAttributeList = attribute_list
-            command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(command))
+            command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(effective_command))
             runtime_root = (
-                Path(self._policy.worker_runtime_bundle)
+                mirrored_runtime or Path(self._policy.worker_runtime_bundle)
                 if self._policy.worker_runtime_bundle is not None
                 else None
             )
             environment_values = sanitized_worker_environment(runtime_root=runtime_root)
-            current_directory = os.getcwd()
+            current_directory = (
+                str(mirrored_workspace)
+                if mirrored_workspace is not None
+                else self._policy.working_directory or os.getcwd()
+            )
             if profile is not None:
-                profile_temp = str(Path(profile.local_app_data) / "Temp")
+                if mirrored_workspace is not None:
+                    profile_temp_path = Path(profile.local_app_data) / "Temp"
+                    profile_temp_path.mkdir(parents=True, exist_ok=True)
+                    profile_temp = str(profile_temp_path)
+                    local_app_data = profile.local_app_data
+                else:
+                    profile_temp = appcontainer_temp_environment or os.environ.get(
+                        "TEMP", str(Path(os.environ["LOCALAPPDATA"]) / "Temp")
+                    )
+                    local_app_data = os.environ["LOCALAPPDATA"]
                 environment_values.update(
                     {
-                        "LOCALAPPDATA": profile.local_app_data,
+                        "LOCALAPPDATA": local_app_data,
                         "TEMP": profile_temp,
                         "TMP": profile_temp,
                     }
                 )
-                current_directory = str(Path(os.environ["SYSTEMROOT"]) / "System32")
+                if mirrored_workspace is None:
+                    current_directory = self._policy.working_directory or str(
+                        Path(os.environ["SYSTEMROOT"]) / "System32"
+                    )
             environment = _environment_block(environment_values)
             creation_flags = (
                 CREATE_SUSPENDED
@@ -852,7 +971,7 @@ class WindowsRestrictedProcessLauncher(ProcessLauncher):
             )
             if profile is not None:
                 created = kernel32.CreateProcessW(
-                    command[0],
+                    effective_command[0],
                     command_line,
                     None,
                     None,
@@ -944,11 +1063,13 @@ class WindowsRestrictedProcessLauncher(ProcessLauncher):
             stdout_thread.join(timeout=1)
             stderr_thread.join(timeout=1)
             if cancelled:
-                raise IsolatedProcessCancelledError("Tool worker was cancelled")
+                raise IsolatedProcessCancelledError(
+                    "Tool worker was cancelled",
+                    stdout=stdout_parts[0] if stdout_parts else b"",
+                    stderr=stderr_parts[0] if stderr_parts else b"",
+                )
             exit_code = wintypes.DWORD(STILL_ACTIVE)
-            if not kernel32.GetExitCodeProcess(
-                process_info.hProcess, ctypes.byref(exit_code)
-            ):
+            if not kernel32.GetExitCodeProcess(process_info.hProcess, ctypes.byref(exit_code)):
                 _raise_last_error("GetExitCodeProcess")
             return IsolatedProcessResult(
                 return_code=int(exit_code.value),

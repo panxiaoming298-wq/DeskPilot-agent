@@ -1,9 +1,9 @@
 """Provider-neutral read-only web research and citation contracts."""
 
 from datetime import datetime
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
 
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import DIGEST_PATTERN
@@ -140,6 +140,38 @@ class ResearchAgentDecision(BaseModel):
     kind: Literal["submit_result"] = "submit_result"
     claims: tuple[ResearchClaimProposal, ...] = Field(min_length=1, max_length=20)
     limitation_codes: tuple[str, ...] = Field(default=(), max_length=20)
+
+
+class ResearchRouteRequestDecision(BaseModel):
+    """A proposal to invoke one server-bound read-only research Route."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["deskpilot.agent-decision.v1"] = "deskpilot.agent-decision.v1"
+    kind: Literal["request_route"] = "request_route"
+    route_binding_id: str = Field(pattern=r"^rbn_[0-9a-f]{64}$")
+    query: str = Field(min_length=1, max_length=500)
+    decision_summary: str = Field(min_length=1, max_length=300)
+
+
+class ResearchSubmitResultDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["deskpilot.agent-decision.v1"] = "deskpilot.agent-decision.v1"
+    kind: Literal["submit_result"] = "submit_result"
+    claims: tuple[ResearchClaimProposal, ...] = Field(min_length=1, max_length=20)
+    limitation_codes: tuple[str, ...] = Field(default=(), max_length=20)
+    decision_summary: str = Field(min_length=1, max_length=300)
+
+
+ResearchLoopDecisionValue = Annotated[
+    ResearchRouteRequestDecision | ResearchSubmitResultDecision,
+    Field(discriminator="kind"),
+]
+
+
+class ResearchLoopDecision(RootModel[ResearchLoopDecisionValue]):
+    """Exactly one normalized decision per persisted research Model Turn."""
+
+    model_config = ConfigDict(frozen=True)
 
 
 class ResearchSessionRead(BaseModel):

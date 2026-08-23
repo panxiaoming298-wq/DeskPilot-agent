@@ -33,6 +33,17 @@ class ProcessIsolationUnavailableError(ProcessIsolationError):
 class IsolatedProcessCancelledError(ProcessIsolationError):
     code = "TOOL_CANCELLED"
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+    ) -> None:
+        super().__init__(message)
+        self.stdout = stdout
+        self.stderr = stderr
+
 
 @dataclass(frozen=True, slots=True)
 class IsolationPolicy:
@@ -43,6 +54,10 @@ class IsolationPolicy:
     worker_runtime_root: str | None = None
     worker_runtime_bundle: str | None = None
     appcontainer_profile_journal_path: str | None = None
+    working_directory: str | None = None
+    appcontainer_read_paths: tuple[str, ...] = ()
+    appcontainer_temp_path: str | None = None
+    appcontainer_mirror_workspace: bool = False
 
     def __post_init__(self) -> None:
         if self.memory_limit_bytes < 67_108_864:
@@ -53,9 +68,32 @@ class IsolationPolicy:
             self.worker_runtime_root,
             self.worker_runtime_bundle,
             self.appcontainer_profile_journal_path,
+            self.working_directory,
+            self.appcontainer_temp_path,
         ):
             if value is not None and (not value or "\x00" in value or len(value) > 32_767):
                 raise ValueError("Worker isolation path is invalid")
+        if self.working_directory is not None and not Path(self.working_directory).is_absolute():
+            raise ValueError("Worker isolation working directory must be absolute")
+        if len(self.appcontainer_read_paths) > 8:
+            raise ValueError("Worker isolation accepts at most eight read-only paths")
+        for value in self.appcontainer_read_paths:
+            if not value or "\x00" in value or len(value) > 32_767 or not Path(value).is_absolute():
+                raise ValueError("Worker AppContainer read path is invalid")
+        if (
+            self.appcontainer_temp_path is not None
+            and not Path(self.appcontainer_temp_path).is_absolute()
+        ):
+            raise ValueError("Worker AppContainer temp path must be absolute")
+        if self.appcontainer_mirror_workspace and (
+            not self.require_network_isolation
+            or self.worker_runtime_bundle is None
+            or self.working_directory is None
+        ):
+            raise ValueError(
+                "AppContainer workspace mirroring requires a runtime bundle, "
+                "working directory, and network isolation"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +164,9 @@ class ProcessLauncher:
 class PortableProcessLauncher(ProcessLauncher):
     """Compatibility path: process separation without a Windows kernel sandbox."""
 
+    def __init__(self, policy: IsolationPolicy | None = None) -> None:
+        self._cwd = policy.working_directory if policy is not None else None
+
     def run(
         self,
         *,
@@ -138,13 +179,11 @@ class PortableProcessLauncher(ProcessLauncher):
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=os.getcwd(),
+            cwd=self._cwd or os.getcwd(),
             env=sanitized_worker_environment(),
             close_fds=True,
             start_new_session=os.name != "nt",
-            creationflags=(
-                getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-            ),
+            creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0),
         )
         stdout = b""
         stderr = b""
@@ -189,7 +228,7 @@ def create_process_launcher(policy: IsolationPolicy) -> ProcessLauncher:
         except ProcessIsolationError:
             if policy.require_windows_sandbox or policy.require_network_isolation:
                 raise
-            launcher = PortableProcessLauncher()
+            launcher = PortableProcessLauncher(policy)
             launcher.validate()
         return launcher
     else:
@@ -197,7 +236,7 @@ def create_process_launcher(policy: IsolationPolicy) -> ProcessLauncher:
             raise ProcessIsolationUnavailableError(
                 "Required Windows process or network isolation is unavailable on this Runner"
             )
-        launcher = PortableProcessLauncher()
+        launcher = PortableProcessLauncher(policy)
     launcher.validate()
     return launcher
 

@@ -197,6 +197,12 @@ async def test_postgresql_graph_control_claim_plan_baseline() -> None:
     task_prefix = f"tsk_gcplan_{prefix}_"
     try:
         await database.migrate()
+        # Plan buffers are compared against an immutable fresh-database
+        # baseline.  DELETE leaves random-key B-tree pages behind across local
+        # reruns, so reset this guarded disposable database's task projection.
+        async with database.session() as session:
+            async with session.begin():
+                await session.execute(text("TRUNCATE TABLE tasks CASCADE"))
         async with database.session() as session:
             async with session.begin():
                 database_time = await session.scalar(text("SELECT CURRENT_TIMESTAMP"))

@@ -1,18 +1,28 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from deskpilot.agents import create_builtin_agent_registry
+from deskpilot.application.agent_model_loop import (
+    AgentModelLoopRouteRejectedError,
+    AgentModelLoopRuntime,
+)
+from deskpilot.application.agent_model_requests import (
+    bind_agent_model_request,
+    build_patch_planner_model_request,
+)
 from deskpilot.application.agent_registry import (
     AgentAlreadyRegisteredError,
     AgentContractInvalidError,
     AgentDisabledError,
     AgentHandoffNotAllowedError,
     AgentIoSchemaMismatchError,
+    AgentModelRouteNotAllowedError,
     AgentPromptDigestMismatchError,
     AgentRegistration,
     AgentRegistry,
@@ -22,6 +32,7 @@ from deskpilot.application.agent_registry import (
     load_agent_contract,
     load_prompt_package,
 )
+from deskpilot.application.model_gateway import ModelGateway
 from deskpilot.application.plan_binder import (
     AgentBudgetExceededError,
     AgentPlanBinder,
@@ -41,13 +52,25 @@ from deskpilot.domain.agent_contracts import (
     AgentResultPolicy,
     AgentToolGrant,
     AgentToolPolicy,
+    BoundAgentRef,
     PromptPackageRef,
+)
+from deskpilot.domain.agent_runtime import (
+    AgentInvocationRead,
+    ClaimedInvocation,
+    HandoffEnvelope,
 )
 from deskpilot.domain.model_contracts import (
     ModelCapabilityRequirements,
     ModelLocation,
+    ModelProtocol,
+    ModelProviderDescriptor,
+    ModelRequest,
+    ModelResponse,
     ModelRole,
 )
+from deskpilot.domain.model_routing import ModelGatewayPolicy, ModelProviderPricing
+from deskpilot.domain.task_plans import PlanNodeBudget
 from deskpilot.domain.tool_contracts import ToolRiskLevel
 from deskpilot.model_providers.fake import FakeModelProvider
 from deskpilot.tools import create_builtin_registry
@@ -61,6 +84,56 @@ class SampleInput(BaseModel):
 class SampleOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     result_ref: str
+
+
+class CountingModelProvider(FakeModelProvider):
+    def __init__(
+        self,
+        *,
+        provider_id: str,
+        model: str,
+        location: ModelLocation,
+    ) -> None:
+        super().__init__(
+            provider_id=provider_id,
+            model=model,
+            location=location,
+        )
+        self.calls = 0
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.calls += 1
+        return await super().complete(request)
+
+
+def _patch_route_request() -> tuple[PlanNodeBudget, ModelRequest]:
+    budget = PlanNodeBudget(
+        model_calls=1,
+        tool_calls=0,
+        input_tokens=12_000,
+        output_tokens=2_000,
+        wall_seconds=60,
+        retries=0,
+        cost_micros=100_000,
+        handoffs=0,
+    )
+    request = build_patch_planner_model_request(
+        request_id="agent-route-policy-test",
+        task_id="task-agent-route-policy",
+        privacy_mode="balanced",
+        budget=budget,
+        phase="request_route",
+        path="backend/src/math_ops.py",
+        project_path="backend",
+        test_path="backend/tests/test_math_ops.py",
+        test_kind="python",
+        objective="Read one exact server-bound file.",
+        route_binding_id="route-binding-test",
+        patch_binding_id="patch-binding-test",
+        route_id="workspace_dynamic_patch_test",
+        upstream_data=[],
+    )
+    return budget, request
 
 
 def _write_prompt(root: Path, package_id: str = "test.agent_prompt") -> object:
@@ -91,6 +164,7 @@ def _registration(
     delegates: tuple[AgentHandoffRef, ...] = (),
     receives: tuple[AgentHandoffRef, ...] = (),
     grant_disk: bool = False,
+    allowed_locations: tuple[ModelLocation, ...] = (ModelLocation.LOCAL,),
 ) -> AgentRegistration:
     from deskpilot.application.agent_registry import PromptPackage
 
@@ -135,7 +209,7 @@ def _registration(
         ),
         model_policy=AgentModelPolicy(
             role=ModelRole.TOOL_AGENT,
-            allowed_locations=(ModelLocation.LOCAL,),
+            allowed_locations=allowed_locations,
             allowed_privacy_modes=("local_only",),
             requirements=ModelCapabilityRequirements(
                 structured_output=True,
@@ -197,14 +271,374 @@ def test_builtin_registry_is_frozen_redacted_and_supervisor_is_not_an_agent() ->
         "builtin.knowledge_researcher",
         "builtin.task_synthesizer",
         "builtin.web_researcher",
+        "builtin.workspace_coordinator",
+        "builtin.workspace_patch_planner",
+        "builtin.workspace_reader",
+        "builtin.workspace_tester",
     }
     assert all(item.status is AgentRegistryStatus.ENABLED for item in snapshot.agents)
     assert "supervisor" not in snapshot.model_dump_json().lower()
     assert "instruction" not in snapshot.model_dump_json().lower()
     assert all(item.input_schema_digest and item.output_schema_digest for item in snapshot.agents)
+    legacy_workspace = registry.resolve_exact("builtin.workspace_reader", "1.0.0")
+    directory_workspace = registry.resolve_exact("builtin.workspace_reader", "1.1.0")
+    preferred_workspace = registry.resolve_preferred("builtin.workspace_reader")
+    assert legacy_workspace.contract.provides == ("workspace.file.read.v1",)
+    assert directory_workspace.contract.provides == (
+        "workspace.file.read.v1",
+        "workspace.directory.read.v1",
+    )
+    assert preferred_workspace.contract.version == "1.2.0"
+    assert preferred_workspace.contract.provides == (
+        "workspace.file.read.v1",
+        "workspace.directory.read.v1",
+    )
+    workspace_tester = registry.resolve_exact("builtin.workspace_tester", "1.0.0")
+    assert workspace_tester.contract.provides == (
+        "workspace.python.test.v1",
+        "workspace.node.test.v1",
+    )
+    assert workspace_tester.contract.tool_policy.grants == ()
+    patch_planner = registry.resolve_exact("builtin.workspace_patch_planner", "1.0.0")
+    assert patch_planner.contract.provides == ("workspace.patch.propose.v1",)
+    assert patch_planner.contract.tool_policy.grants == ()
+    assert patch_planner.contract.model_policy.allowed_locations == (ModelLocation.LOCAL,)
     with pytest.raises(AgentRegistryFrozenError):
         computer = registry.resolve_exact("builtin.computer_observer", "1.0.0")
         registry.register(_registration(computer.prompt_package))
+
+
+def test_registry_freeze_requires_cloud_contract_and_separate_admission(
+    tmp_path: Path,
+) -> None:
+    class StaticAdmissionPolicy:
+        def __init__(self, allowed: bool) -> None:
+            self.allowed = allowed
+
+        def allows(
+            self,
+            _contract: AgentContract,
+            _prompt_package_digest: str,
+            _provider: ModelProviderDescriptor,
+        ) -> bool:
+            return self.allowed
+
+    prompt = _write_prompt(tmp_path)
+    cloud = FakeModelProvider(
+        provider_id="cloud-test",
+        model="cloud-test-v1",
+        location=ModelLocation.CLOUD,
+    ).descriptor.model_copy(update={"protocol": ModelProtocol.OPENAI_COMPATIBLE_CHAT})
+    denied = AgentRegistry(StaticAdmissionPolicy(False))
+    denied.register(
+        _registration(prompt, allowed_locations=(ModelLocation.CLOUD,))
+    )
+    denied.freeze(create_builtin_registry(), (cloud,))
+    assert denied.descriptor_exact("test.alpha", "1.0.0").status is (
+        AgentRegistryStatus.DISABLED
+    )
+
+    admitted = AgentRegistry(StaticAdmissionPolicy(True))
+    admitted.register(
+        _registration(prompt, allowed_locations=(ModelLocation.CLOUD,))
+    )
+    admitted.freeze(create_builtin_registry(), (cloud,))
+    assert admitted.resolve_exact("test.alpha", "1.0.0").contract.agent_id == (
+        "test.alpha"
+    )
+
+
+def test_runtime_model_route_revalidates_exact_agent_policy() -> None:
+    local = FakeModelProvider().descriptor
+    cloud = FakeModelProvider(
+        provider_id="fake-cloud",
+        model="deskpilot-cloud-fixture-v1",
+        location=ModelLocation.CLOUD,
+    ).descriptor
+    registry = create_builtin_agent_registry(
+        create_builtin_registry(),
+        (local, cloud),
+    )
+    patch_planner = registry.resolve_exact(
+        "builtin.workspace_patch_planner",
+        "1.0.0",
+    )
+    target = patch_planner.contract
+    _, request = _patch_route_request()
+    request = bind_agent_model_request(
+        request,
+        agent_id=target.agent_id,
+        agent_version=target.version,
+        contract_digest=target.digest,
+        prompt_package_digest=patch_planner.prompt_package.digest,
+        prompt_instruction=patch_planner.prompt_package.instruction,
+    )
+
+    validated = registry.validate_model_route(
+        target.agent_id,
+        target.version,
+        contract_digest=target.digest,
+        prompt_package_digest=target.prompt_package.digest,
+        request=request,
+        provider=local,
+    )
+    assert validated is patch_planner
+
+    with pytest.raises(AgentModelRouteNotAllowedError, match="Selected Provider"):
+        registry.validate_model_route(
+            target.agent_id,
+            target.version,
+            contract_digest=target.digest,
+            prompt_package_digest=target.prompt_package.digest,
+            request=request,
+            provider=cloud,
+        )
+    with pytest.raises(AgentModelRouteNotAllowedError, match="privacy mode"):
+        registry.validate_model_route(
+            target.agent_id,
+            target.version,
+            contract_digest=target.digest,
+            prompt_package_digest=target.prompt_package.digest,
+            request=request.model_copy(update={"privacy_mode": "quality_first"}),
+            provider=local,
+        )
+    with pytest.raises(AgentModelRouteNotAllowedError, match="Model request"):
+        registry.validate_model_route(
+            target.agent_id,
+            target.version,
+            contract_digest=target.digest,
+            prompt_package_digest=target.prompt_package.digest,
+            request=request.model_copy(update={"role": ModelRole.SUMMARIZER}),
+            provider=local,
+        )
+    with pytest.raises(AgentModelRouteNotAllowedError, match="Prompt Package"):
+        registry.validate_model_route(
+            target.agent_id,
+            target.version,
+            contract_digest=target.digest,
+            prompt_package_digest=target.prompt_package.digest,
+            request=request.model_copy(
+                update={
+                    "messages": (
+                        request.messages[0].model_copy(update={"content": "drifted prompt"}),
+                        *request.messages[1:],
+                    )
+                }
+            ),
+            provider=local,
+        )
+    weak_local = local.model_copy(
+        update={
+            "capabilities": local.capabilities.model_copy(
+                update={"strict_json_schema": False}
+            )
+        }
+    )
+    with pytest.raises(AgentModelRouteNotAllowedError, match="Selected Provider"):
+        registry.validate_model_route(
+            target.agent_id,
+            target.version,
+            contract_digest=target.digest,
+            prompt_package_digest=target.prompt_package.digest,
+            request=request,
+            provider=weak_local,
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_model_loop_rejects_cloud_before_persist_or_provider_call() -> None:
+    local_provider = FakeModelProvider()
+    cloud_provider = CountingModelProvider(
+        provider_id="fake-cloud",
+        model="deskpilot-cloud-fixture-v1",
+        location=ModelLocation.CLOUD,
+    )
+    gateway = ModelGateway(
+        default_provider_id=cloud_provider.descriptor.provider_id,
+        policy=ModelGatewayPolicy(
+            provider_pricing=(
+                ModelProviderPricing(provider_id=cloud_provider.descriptor.provider_id),
+                ModelProviderPricing(provider_id=local_provider.descriptor.provider_id),
+            )
+        ),
+    )
+    gateway.register(cloud_provider)
+    gateway.register(local_provider)
+    registry = create_builtin_agent_registry(
+        create_builtin_registry(),
+        (local_provider.descriptor, cloud_provider.descriptor),
+    )
+    patch_planner = registry.resolve_exact(
+        "builtin.workspace_patch_planner",
+        "1.0.0",
+    )
+    contract = patch_planner.contract
+    request_budget, request = _patch_route_request()
+    target = BoundAgentRef(
+        agent_id=contract.agent_id,
+        version=contract.version,
+        contract_digest=contract.digest,
+        prompt_package_digest=contract.prompt_package.digest,
+    )
+    claimed = ClaimedInvocation.model_construct(
+        handoff=HandoffEnvelope.model_construct(
+            target_agent=target,
+            budget_allocation=request_budget,
+        )
+    )
+    runtime = AgentModelLoopRuntime(
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        registry,
+        gateway,
+        None,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(AgentModelLoopRouteRejectedError):
+        await runtime.dispatch(
+            claimed,
+            turn_no=1,
+            request=request,
+            decision_model=SampleOutput,
+        )
+
+    assert cloud_provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_model_loop_rejects_budget_drift_before_provider_call() -> None:
+    local_provider = CountingModelProvider(
+        provider_id="fake-local",
+        model="deskpilot-fake-v1",
+        location=ModelLocation.LOCAL,
+    )
+    gateway = ModelGateway(
+        default_provider_id=local_provider.descriptor.provider_id,
+        policy=ModelGatewayPolicy(
+            provider_pricing=(
+                ModelProviderPricing(provider_id=local_provider.descriptor.provider_id),
+            )
+        ),
+    )
+    gateway.register(local_provider)
+    registry = create_builtin_agent_registry(
+        create_builtin_registry(),
+        (local_provider.descriptor,),
+    )
+    contract = registry.resolve_exact(
+        "builtin.workspace_patch_planner",
+        "1.0.0",
+    ).contract
+    target = BoundAgentRef(
+        agent_id=contract.agent_id,
+        version=contract.version,
+        contract_digest=contract.digest,
+        prompt_package_digest=contract.prompt_package.digest,
+    )
+    request_budget, request = _patch_route_request()
+    claimed = ClaimedInvocation.model_construct(
+        handoff=HandoffEnvelope.model_construct(
+            target_agent=target,
+            budget_allocation=request_budget,
+        )
+    )
+    runtime = AgentModelLoopRuntime(
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        registry,
+        gateway,
+        None,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(AgentModelLoopRouteRejectedError, match="budget"):
+        await runtime.dispatch(
+            claimed,
+            turn_no=1,
+            request=request.model_copy(
+                update={"max_output_tokens": request_budget.output_tokens + 1}
+            ),
+            decision_model=SampleOutput,
+        )
+
+    assert local_provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_model_loop_revalidates_context_expanded_request_before_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_provider = CountingModelProvider(
+        provider_id="fake-local",
+        model="deskpilot-fake-v1",
+        location=ModelLocation.LOCAL,
+    )
+    gateway = ModelGateway(
+        default_provider_id=local_provider.descriptor.provider_id,
+        policy=ModelGatewayPolicy(
+            provider_pricing=(
+                ModelProviderPricing(provider_id=local_provider.descriptor.provider_id),
+            )
+        ),
+    )
+    gateway.register(local_provider)
+    registry = create_builtin_agent_registry(
+        create_builtin_registry(),
+        (local_provider.descriptor,),
+    )
+    contract = registry.resolve_exact(
+        "builtin.workspace_patch_planner",
+        "1.0.0",
+    ).contract
+    target = BoundAgentRef(
+        agent_id=contract.agent_id,
+        version=contract.version,
+        contract_digest=contract.digest,
+        prompt_package_digest=contract.prompt_package.digest,
+    )
+    request_budget, request = _patch_route_request()
+    claimed = ClaimedInvocation.model_construct(
+        handoff=HandoffEnvelope.model_construct(
+            target_agent=target,
+            budget_allocation=request_budget,
+        ),
+        invocation=AgentInvocationRead.model_construct(
+            invocation_id=f"ain_{'a' * 64}",
+        ),
+    )
+    context_memory = MagicMock()
+    context_memory.build_for_turn = AsyncMock(
+        side_effect=lambda *args: (
+            None,
+            args[-1].model_copy(update={"privacy_mode": "quality_first"}),
+        )
+    )
+    runtime = AgentModelLoopRuntime(
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        registry,
+        gateway,
+        context_memory,  # type: ignore[arg-type]
+    )
+    prepare = AsyncMock()
+    fail = AsyncMock()
+    mark_dispatching = AsyncMock()
+    monkeypatch.setattr(runtime, "_prepare", prepare)
+    monkeypatch.setattr(runtime, "fail", fail)
+    monkeypatch.setattr(runtime, "_mark_dispatching", mark_dispatching)
+
+    with pytest.raises(AgentModelLoopRouteRejectedError, match="Context-expanded"):
+        await runtime.dispatch(
+            claimed,
+            turn_no=1,
+            request=request,
+            decision_model=SampleOutput,
+        )
+
+    prepare.assert_awaited_once()
+    fail.assert_awaited_once()
+    mark_dispatching.assert_not_awaited()
+    assert fail.await_args.args[2] == AgentModelLoopRouteRejectedError.code
+    assert local_provider.calls == 0
 
 
 def test_agent_api_is_read_only_filterable_exact_and_redacted(client: TestClient) -> None:

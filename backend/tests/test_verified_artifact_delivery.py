@@ -15,10 +15,12 @@ from deskpilot.application.browser_verifier import (
     IsolatedChromiumVerifier,
     audit_static_html,
 )
+from deskpilot.application.pdf_artifact_renderer import RenderedPdf
 from deskpilot.application.plan_compiler import research_to_html_contract, research_to_html_draft
 from deskpilot.application.web_research import SafePageReader
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.core.config import Settings
+from deskpilot.domain.artifact_runtime import PdfRenderVerificationRead, digested
 from deskpilot.domain.model_routing import ModelGatewayPolicy, ModelProviderPricing
 from deskpilot.domain.research import PageSnapshot, SearchHit, SearchProviderResult, SearchRequest
 from deskpilot.infrastructure.models import (
@@ -106,6 +108,32 @@ class FakeIsolatedBrowser:
         )
 
 
+class FakePdfRenderer:
+    async def render(self, entry_path: Path) -> RenderedPdf:
+        assert entry_path.name.endswith(".html")
+        content = b"%PDF-1.4\n" + b"1" * 512 + b"\n%%EOF\n"
+        source_digest = sha256_digest({"bytes_hex": content.hex()})
+        material: dict[str, object] = {
+            "profile_id": "deskpilot.pdf-render.v1",
+            "status": "passed",
+            "engine": "fake-pdf-renderer-v1",
+            "source_digest": source_digest,
+            "page_count": 1,
+            "page_width_points": 595.0,
+            "page_height_points": 842.0,
+            "render_dpi": 144,
+            "rendered_page_digests": (sha256_digest({"page": 1}),),
+            "rendered_page_dimensions": ((1190, 1684),),
+            "issue_codes": (),
+        }
+        return RenderedPdf(
+            content=content,
+            verification=PdfRenderVerificationRead.model_validate(
+                digested(material, "evidence_digest")
+            ),
+        )
+
+
 @pytest.fixture
 def delivery_client(tmp_path: Path) -> Iterator[TestClient]:
     settings = Settings(
@@ -130,6 +158,7 @@ def delivery_client(tmp_path: Path) -> Iterator[TestClient]:
         search_provider=FakeSearchProvider(),
         page_reader=FakePageReader(),
         browser_verifier=FakeIsolatedBrowser(),
+        pdf_artifact_renderer=FakePdfRenderer(),
     )
     with TestClient(app, headers=headers) as client:
         yield client
@@ -199,6 +228,11 @@ def test_only_verified_edges_unlock_artifact_browser_and_delivery(
     built = delivery_client.post(f"/api/v1/execution-runs/{run_id}/artifacts:build")
     assert built.status_code == 200, built.text
     workspace = built.json()
+    assert [item["relative_path"] for item in workspace["artifacts"]] == [
+        "index.html",
+        "report.md",
+        "report.pdf",
+    ]
     revision = workspace["artifacts"][0]["active_revision"]
     receipt = delivery_client.get(f"/api/v1/patch-receipts/{revision['patch_receipt_id']}")
     assert receipt.status_code == 200, receipt.text
@@ -249,7 +283,7 @@ def test_only_verified_edges_unlock_artifact_browser_and_delivery(
     assert task_status == "succeeded"
     assert verdict_count >= 1
     assert snapshot_count == 1
-    assert receipt_count == 1
+    assert receipt_count == 3
 
 
 def test_tampered_citation_cannot_unlock_verified_edge(

@@ -182,7 +182,9 @@ class ResearchContract(BaseModel):
 class TaskWorkspaceContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     workspace_ref: str = Field(pattern=r"^workspace://task/[0-9a-f]{32}$")
-    allowed_extensions: tuple[Literal[".html", ".css"], ...] = Field(min_length=1)
+    allowed_extensions: tuple[Literal[".html", ".css", ".md", ".pdf"], ...] = Field(
+        min_length=1
+    )
     max_total_bytes: int = Field(ge=1, le=10_485_760)
     max_files: int = Field(ge=1, le=100)
     retention_days: int = Field(ge=1, le=365)
@@ -384,11 +386,10 @@ class DraftPlan(BaseModel):
                 raise ValueError("Draft dependency is unknown")
             if node.handoff_parent is not None and node.handoff_parent not in known:
                 raise ValueError("Draft handoff parent is unknown")
-            if (
-                node.handoff_parent is not None
-                and node.handoff_parent not in node.depends_on
-            ):
-                raise ValueError("Draft handoff parent must also be a dependency")
+            if node.handoff_parent == node.local_key:
+                raise ValueError("Draft node cannot hand off to itself")
+            if node.handoff_parent is not None and node.handoff_parent in node.depends_on:
+                raise ValueError("Optional handoff activation is separate from verified edges")
             graph[node.local_key] = node.depends_on
         visiting: set[str] = set()
         visited: set[str] = set()

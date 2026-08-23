@@ -162,3 +162,20 @@ $env:DESKPILOT_TEST_DOCKER_CLI = "C:\Program Files\Docker\Docker\resources\bin\d
 1. 接入真实外部 broker，演练 at-least-once 重投、响应丢失、Inbox 去重与 DLQ requeue。
 
 所有故障点继续保持 claim-before-runner、prepare/commit/unknown 和 receipt 是已提交效果唯一恢复依据的既有语义。
+
+## 9. 阶段 110 Checkpoint 的重复运行修正
+
+阶段 77～110 汇总门禁在复用同一 `deskpilot_test` 数据库时发现两类测试环境漂移，冻结 baseline、查询和阈值均未改写：
+
+1. ready-v6 原始 plan 记录于空/旧统计状态，planner 估算 1 行而实际返回 101 行；对单一 1000-node graph 显式 `ANALYZE` 后，`graph_id` 没有选择性，PostgreSQL 合理选择 Seq Scan，不能把它误报成索引回归。
+2. 16000-control 等随机主键 workload 虽在 finally 中 `DELETE`，重复运行仍保留 B-tree 物理膨胀，buffer 计数会逐次偏离“fresh database”基线。
+
+门禁现在先在共享 fail-closed guard 已确认的可抛弃测试库内 `TRUNCATE tasks CASCADE`，同时重置逻辑数据与 task 子表索引的物理 footprint。ready-v6 另显式建立 16 个 graph 的 planner context、固定统计采样并执行 `ANALYZE`，使目标 `graph_id` 约占 1/16；随后分三层验证：
+
+- `pg_catalog` 精确断言 ordinal、membership 与 node primary-key 三个索引的列顺序、unique、valid、ready 与 live 状态；
+- 默认 PostgreSQL planner 必须返回 101 行、累计扫描不超过 303 行、使用预期索引且不得出现 Seq Scan；
+- 只为重放不可变历史 shape，在同一事务关闭 Bitmap scan，再使用原 comparator 严格比较旧的双 Index Scan baseline。
+
+这不会通过关闭 Seq Scan 隐藏默认优化器退化：真实默认 plan 在前一层单独执行并受有界扫描断言保护；索引缺失或失效也会先被 catalog gate 拒绝。长期如需把 analyzed 默认 Bitmap plan 本身版本化，应追加不同名称的新 baseline，不得覆盖现有 PG17 文件。
+
+修正后两份计划专项连续通过，完整 PostgreSQL marker 为 `11 passed + 604 deselected`；固定容器 restart 同轮通过，原本停止的 `deskpilot-postgres` 在门禁后恢复为停止。数据库 URL 与凭据不进入 JUnit、文档或提交。

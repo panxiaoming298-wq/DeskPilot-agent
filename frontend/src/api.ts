@@ -45,6 +45,8 @@ import type {
   LongTermMemoryExport,
   LongTermMemoryPage,
   ArtifactExport,
+  ContinueConversationTurn,
+  CreateConversationTurn,
   CreateResearchWorkbenchTask,
   TaskWorkbench,
   WorkbenchRun,
@@ -722,6 +724,85 @@ export function createResearchWorkbenchTask(
   })
 }
 
+export function createConversationTurn(
+  command: CreateConversationTurn,
+): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>('/api/v1/conversation-turns', {
+    method: 'POST',
+    body: JSON.stringify(command),
+  })
+}
+
+export function continueConversationTurn(
+  taskId: string,
+  command: ContinueConversationTurn,
+): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/conversation-turns`,
+    { method: 'POST', body: JSON.stringify(command) },
+  )
+}
+
+export function advanceTaskWorkbench(taskId: string): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/workbench:advance`,
+    { method: 'POST' },
+  )
+}
+
+export function stopTaskWorkbench(taskId: string): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/workbench:stop`,
+    { method: 'POST' },
+  )
+}
+
+export function replanTaskWorkbench(taskId: string): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/workbench:replan`,
+    { method: 'POST' },
+  )
+}
+
+export function commitWorkspaceEdit(
+  taskId: string,
+  confirmationDigest: string,
+): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/workspace-edit:commit`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ confirmation_digest: confirmationDigest }),
+    },
+  )
+}
+
+export function commitWorkspacePatch(
+  taskId: string,
+  confirmationDigest: string,
+): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/workspace-patch:commit`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ confirmation_digest: confirmationDigest }),
+    },
+  )
+}
+
+export function commitWorkspacePathOperation(
+  taskId: string,
+  confirmationDigest: string,
+): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/workspace-path-operation:commit`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ confirmation_digest: confirmationDigest }),
+    },
+  )
+}
+
 export function getTaskWorkbench(taskId: string): Promise<TaskWorkbench> {
   return request<TaskWorkbench>(
     `/api/v1/tasks/${encodeURIComponent(taskId)}/workbench`,
@@ -749,13 +830,14 @@ export function prepareArtifactExport(
   deliveryId: string,
   targetPath: string,
   idempotencyKey: string,
+  artifactId?: string,
 ): Promise<ArtifactExport> {
   return request<ArtifactExport>(
     `/api/v1/deliveries/${encodeURIComponent(deliveryId)}/exports:prepare`,
     {
       method: 'POST',
       headers: { 'Idempotency-Key': idempotencyKey },
-      body: JSON.stringify({ target_path: targetPath }),
+      body: JSON.stringify({ target_path: targetPath, artifact_id: artifactId }),
     },
   )
 }
