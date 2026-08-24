@@ -123,6 +123,36 @@ class WorkspaceNodeTestExecutorInput(BaseModel):
     test_path: str = Field(min_length=1, max_length=32_767)
 
 
+class WorkspaceProjectSearchExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-project-search-executor-input.v1"] = (
+        "deskpilot.workspace-project-search-executor-input.v1"
+    )
+    project_path: str = Field(min_length=1, max_length=32_767)
+    query: str = Field(min_length=1, max_length=256)
+
+
+class WorkspaceProjectBatchReadExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-project-batch-read-executor-input.v1"] = (
+        "deskpilot.workspace-project-batch-read-executor-input.v1"
+    )
+    project_path: str = Field(min_length=1, max_length=32_767)
+    paths: tuple[str, ...] = Field(min_length=1, max_length=32)
+
+
+class WorkspaceGitInspectExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-git-inspect-executor-input.v1"] = (
+        "deskpilot.workspace-git-inspect-executor-input.v1"
+    )
+    project_path: str = Field(min_length=1, max_length=32_767)
+    operation: Literal["status", "diff", "log"]
+
+
 class WorkspacePatchChangeExecutorInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -167,6 +197,9 @@ CapabilityExecutorInput = Annotated[
     | WorkspaceSnapshotCheckExecutorInput
     | WorkspacePythonTestExecutorInput
     | WorkspaceNodeTestExecutorInput
+    | WorkspaceProjectSearchExecutorInput
+    | WorkspaceProjectBatchReadExecutorInput
+    | WorkspaceGitInspectExecutorInput
     | WorkspacePatchBundleExecutorInput
     | ArtifactHtmlExecutorInput
     | BrowserVerifyExecutorInput,
@@ -300,6 +333,11 @@ _INPUT_SCHEMA_BY_CAPABILITY = {
     "workspace.snapshot.check.v1": "deskpilot.workspace-check-executor-input.v1",
     "workspace.python.test.v1": "deskpilot.workspace-python-test-executor-input.v1",
     "workspace.node.test.v1": "deskpilot.workspace-node-test-executor-input.v1",
+    "workspace.project.search.v1": "deskpilot.workspace-project-search-executor-input.v1",
+    "workspace.project.read-many.v1": (
+        "deskpilot.workspace-project-batch-read-executor-input.v1"
+    ),
+    "workspace.git.inspect.v1": "deskpilot.workspace-git-inspect-executor-input.v1",
     "workspace.patch.bundle.v1": "deskpilot.workspace-patch-bundle-executor-input.v1",
     "artifact.html.v1": "deskpilot.artifact-html-executor-input.v1",
     "browser.verify.v1": "deskpilot.browser-verify-executor-input.v1",
@@ -377,6 +415,33 @@ class CapabilityInputBindingCatalog:
                 ("project_path", "test_path"),
                 WorkspaceNodeTestExecutorInput,
                 frozenset(),
+                (),
+            ),
+            (
+                "workspace_project_search",
+                "workspace.project.search.v1",
+                "workspace_project_search",
+                ("project_path", "query"),
+                WorkspaceProjectSearchExecutorInput,
+                frozenset(),
+                (),
+            ),
+            (
+                "workspace_project_batch_read",
+                "workspace.project.read-many.v1",
+                "workspace_project_batch_read",
+                ("project_path", "paths_json"),
+                WorkspaceProjectBatchReadExecutorInput,
+                frozenset(),
+                (),
+            ),
+            (
+                "workspace_git_inspect",
+                "workspace.git.inspect.v1",
+                "workspace_git_inspect",
+                ("project_path", "operation"),
+                WorkspaceGitInspectExecutorInput,
+                frozenset({"operation"}),
                 (),
             ),
             (
@@ -573,6 +638,21 @@ class CapabilityInputBindingCatalog:
                     "Workspace patch changes must be one JSON list"
                 )
             result = {"changes": decoded}
+        elif profile.route_id == "workspace_project_batch_read":
+            try:
+                decoded = json.loads(normalized["paths_json"])
+            except (TypeError, json.JSONDecodeError) as error:
+                raise CapabilityInputLineageRejectedError(
+                    "Project batch-read paths are not valid JSON"
+                ) from error
+            if not isinstance(decoded, list):
+                raise CapabilityInputLineageRejectedError(
+                    "Project batch-read paths must be one JSON list"
+                )
+            result = {
+                "project_path": normalized["project_path"],
+                "paths": decoded,
+            }
         return result
 
     def capabilities(self) -> tuple[CapabilityRef, ...]:
@@ -593,9 +673,12 @@ __all__ = [
     "McpTextMetricsExecutorInput",
     "ResolvedVerifiedCapabilityResult",
     "WorkspaceNodeTestExecutorInput",
+    "WorkspaceGitInspectExecutorInput",
     "WorkspacePatchBundleExecutorInput",
     "WorkspacePatchChangeExecutorInput",
     "WorkspacePythonTestExecutorInput",
+    "WorkspaceProjectBatchReadExecutorInput",
+    "WorkspaceProjectSearchExecutorInput",
     "WorkspaceSnapshotCheckExecutorInput",
     "canonicalize_capability_parameter",
 ]

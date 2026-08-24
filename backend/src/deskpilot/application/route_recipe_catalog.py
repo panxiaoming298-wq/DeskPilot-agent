@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -33,6 +34,12 @@ from deskpilot.application.plan_compiler import (
     workspace_file_replace_draft,
     workspace_node_test_contract,
     workspace_node_test_draft,
+    workspace_git_inspect_contract,
+    workspace_git_inspect_draft,
+    workspace_project_batch_read_contract,
+    workspace_project_batch_read_draft,
+    workspace_project_search_contract,
+    workspace_project_search_draft,
     workspace_patch_bundle_contract,
     workspace_patch_bundle_draft,
     workspace_python_test_contract,
@@ -59,6 +66,9 @@ RouteId = Literal[
     "workspace_snapshot_check",
     "workspace_python_test",
     "workspace_node_test",
+    "workspace_project_search",
+    "workspace_project_batch_read",
+    "workspace_git_inspect",
 ]
 RouteRecipeVersion = Literal["1", "2"]
 
@@ -239,6 +249,29 @@ _LEGACY_ROUTE_SPECS: Mapping[RouteId, dict[str, object]] = MappingProxyType(
     }
 )
 
+_PLANNER_ONLY_ROUTE_SPECS: Mapping[RouteId, dict[str, object]] = MappingProxyType(
+    {
+        "workspace_project_search": {
+            "route_id": "workspace_project_search",
+            "producer_ref": "workspace_project_search.v1",
+            "capabilities": ("workspace.project.search.v1",),
+            "max_risk": "R0",
+        },
+        "workspace_project_batch_read": {
+            "route_id": "workspace_project_batch_read",
+            "producer_ref": "workspace_project_batch_read.v1",
+            "capabilities": ("workspace.project.read-many.v1",),
+            "max_risk": "R0",
+        },
+        "workspace_git_inspect": {
+            "route_id": "workspace_git_inspect",
+            "producer_ref": "workspace_git_inspect.v1",
+            "capabilities": ("workspace.git.inspect.v1",),
+            "max_risk": "R0",
+        },
+    }
+)
+
 _PARAMETERS: Mapping[RouteId, tuple[RouteParameterSpec, ...]] = MappingProxyType(
     {
         "research_to_html": (RouteParameterSpec("goal"),),
@@ -295,6 +328,18 @@ _PARAMETERS: Mapping[RouteId, tuple[RouteParameterSpec, ...]] = MappingProxyType
             RouteParameterSpec("project_path"),
             RouteParameterSpec("test_path"),
         ),
+        "workspace_project_search": (
+            RouteParameterSpec("project_path"),
+            RouteParameterSpec("query"),
+        ),
+        "workspace_project_batch_read": (
+            RouteParameterSpec("project_path"),
+            RouteParameterSpec("paths_json"),
+        ),
+        "workspace_git_inspect": (
+            RouteParameterSpec("project_path"),
+            RouteParameterSpec("operation", allowed_values=("status", "diff", "log")),
+        ),
     }
 )
 
@@ -308,6 +353,14 @@ class RouteRecipeCatalog:
     @staticmethod
     def route_ids() -> tuple[RouteId, ...]:
         return tuple(_LEGACY_ROUTE_SPECS)
+
+    @staticmethod
+    def planner_route_ids() -> tuple[RouteId, ...]:
+        return (*_LEGACY_ROUTE_SPECS, *_PLANNER_ONLY_ROUTE_SPECS)
+
+    @staticmethod
+    def is_planner_route(route_id: str) -> bool:
+        return route_id in _LEGACY_ROUTE_SPECS or route_id in _PLANNER_ONLY_ROUTE_SPECS
 
     @staticmethod
     def parameter_specs(route_id: RouteId) -> tuple[RouteParameterSpec, ...]:
@@ -324,7 +377,7 @@ class RouteRecipeCatalog:
         """Compile every currently available v2 recipe before any model call."""
 
         variants: list[tuple[RouteId, str, dict[str, str]]] = []
-        for route_id in cls.route_ids():
+        for route_id in cls.planner_route_ids():
             if route_id in {
                 "workspace_agent_patch_test",
                 "workspace_dynamic_patch_test",
@@ -378,10 +431,16 @@ class RouteRecipeCatalog:
 
     @staticmethod
     def manifest(route_id: RouteId, version: RouteRecipeVersion) -> dict[str, object]:
-        legacy = _LEGACY_ROUTE_SPECS[route_id]
         if version == "1":
-            return dict(legacy)
-        capabilities = tuple(cast(tuple[str, ...], legacy["capabilities"]))
+            try:
+                return dict(_LEGACY_ROUTE_SPECS[route_id])
+            except KeyError as error:
+                raise RouteRecipeError("Planner-only Route has no deterministic manifest") from error
+        try:
+            current = _LEGACY_ROUTE_SPECS.get(route_id) or _PLANNER_ONLY_ROUTE_SPECS[route_id]
+        except KeyError as error:
+            raise RouteRecipeError("Turn Route recipe is not registered") from error
+        capabilities = tuple(cast(tuple[str, ...], current["capabilities"]))
         if route_id == "workspace_directory_analyze":
             # v1 predated fixed test nodes even though the trusted Contract later
             # bound them. v2 records the exact four-capability surface without
@@ -396,9 +455,9 @@ class RouteRecipeCatalog:
             "schema_version": "deskpilot.route-recipe.v2",
             "route_id": route_id,
             "version": "2",
-            "trusted_template_ref": legacy["producer_ref"],
+            "trusted_template_ref": current["producer_ref"],
             "capabilities": capabilities,
-            "max_risk": legacy["max_risk"],
+            "max_risk": current["max_risk"],
             "parameter_binding": [
                 item.manifest() for item in RouteRecipeCatalog.parameter_specs(route_id)
             ],
@@ -514,6 +573,18 @@ class RouteRecipeCatalog:
             return workspace_node_test_contract(task_id, capabilities), workspace_node_test_draft(
                 task_id
             )
+        if route_id == "workspace_project_search":
+            return workspace_project_search_contract(
+                task_id, capabilities
+            ), workspace_project_search_draft(task_id)
+        if route_id == "workspace_project_batch_read":
+            return workspace_project_batch_read_contract(
+                task_id, capabilities
+            ), workspace_project_batch_read_draft(task_id)
+        if route_id == "workspace_git_inspect":
+            return workspace_git_inspect_contract(
+                task_id, capabilities
+            ), workspace_git_inspect_draft(task_id)
         if route_id == "workspace_file_replace":
             return workspace_file_replace_contract(
                 task_id, capabilities
@@ -595,6 +666,17 @@ class RouteRecipeCatalog:
                 )
             if set(parameters).intersection(test_names) and not test_bound:
                 raise RouteRecipeError("Directory fixed test binding is incomplete")
+        if route_id == "workspace_project_batch_read":
+            try:
+                paths = json.loads(parameters["paths_json"])
+            except (KeyError, TypeError, json.JSONDecodeError) as error:
+                raise RouteRecipeError("Project batch-read paths are not valid JSON") from error
+            if (
+                not isinstance(paths, list)
+                or not 1 <= len(paths) <= 32
+                or any(not isinstance(item, str) or not item for item in paths)
+            ):
+                raise RouteRecipeError("Project batch-read paths are invalid")
 
 
 def _unquote(value: str) -> str:

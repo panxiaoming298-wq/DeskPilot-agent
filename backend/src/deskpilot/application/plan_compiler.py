@@ -971,6 +971,108 @@ def workspace_node_test_draft(task_id: str, contract_version: int = 1) -> DraftP
     )
 
 
+def workspace_project_search_contract(
+    task_id: str, capabilities: CapabilityCatalog
+) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.project.search.v1",
+        objective="在显式项目根内递归搜索受限 UTF-8 源文件",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_project_search",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description=(
+                "结果绑定项目根、查询摘要、排序匹配、扫描边界与链接拒绝策略。"
+            ),
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="application/json", language="zh-CN"),
+    )
+
+
+def workspace_project_search_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_project_search.v1",
+        local_key="workspace_project_search",
+        capability_id="workspace.project.search.v1",
+        objective="递归搜索项目源文件并生成有界内容寻址匹配。",
+        acceptance_ref="ac_workspace_project_search",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
+def workspace_project_batch_read_contract(
+    task_id: str, capabilities: CapabilityCatalog
+) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.project.read-many.v1",
+        objective="在显式项目根内批量读取受限 UTF-8 文件",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_project_batch_read",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description="结果绑定排序路径、逐文件版本/内容摘要和总字节边界。",
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="application/json", language="zh-CN"),
+    )
+
+
+def workspace_project_batch_read_draft(
+    task_id: str, contract_version: int = 1
+) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_project_batch_read.v1",
+        local_key="workspace_project_batch_read",
+        capability_id="workspace.project.read-many.v1",
+        objective="批量读取项目文件并复核每个版本证明。",
+        acceptance_ref="ac_workspace_project_batch_read",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
+def workspace_git_inspect_contract(
+    task_id: str, capabilities: CapabilityCatalog
+) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.git.inspect.v1",
+        objective="以服务器固定只读配置检查项目 Git 状态、差异或历史",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_git_inspect",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description=(
+                "结果绑定仓库/HEAD/工具链摘要、固定操作、输出限制及关闭扩展证明。"
+            ),
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="application/json", language="zh-CN"),
+    )
+
+
+def workspace_git_inspect_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_git_inspect.v1",
+        local_key="workspace_git_inspect",
+        capability_id="workspace.git.inspect.v1",
+        objective="运行一个服务器固定的只读 Git 检查。",
+        acceptance_ref="ac_workspace_git_inspect",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
 def workspace_file_replace_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
     return _direct_capability_contract(
         task_id,

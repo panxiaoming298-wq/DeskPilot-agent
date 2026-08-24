@@ -218,6 +218,41 @@ def create_builtin_capability_catalog(
                 workspace_write=False,
             ),
             _pack(
+                capability_id="workspace.project.search.v1",
+                runtime_enabled=True,
+                description=(
+                    "在项目根目录下递归搜索受限 UTF-8 源文件；拒绝链接与 reparse point。"
+                ),
+                allowed_operations=("conversation-workspace.project.search",),
+                max_risk_level=ToolRiskLevel.R0,
+                external_ingress=True,
+                external_egress=False,
+                workspace_write=False,
+            ),
+            _pack(
+                capability_id="workspace.project.read-many.v1",
+                runtime_enabled=True,
+                description="在同一项目根下批量读取最多 32 个受限 UTF-8 文件。",
+                allowed_operations=("conversation-workspace.project.read-many",),
+                max_risk_level=ToolRiskLevel.R0,
+                external_ingress=True,
+                external_egress=False,
+                workspace_write=False,
+            ),
+            _pack(
+                capability_id="workspace.git.inspect.v1",
+                runtime_enabled=True,
+                description=(
+                    "只运行服务器固定的 Git status/diff/log，并关闭 hooks、外部 diff、"
+                    "textconv、pager 与 optional locks。"
+                ),
+                allowed_operations=("conversation-workspace.git.inspect",),
+                max_risk_level=ToolRiskLevel.R0,
+                external_ingress=True,
+                external_egress=False,
+                workspace_write=False,
+            ),
+            _pack(
                 capability_id="workspace.patch.propose.v1",
                 runtime_enabled=True,
                 description=(

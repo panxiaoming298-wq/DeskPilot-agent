@@ -1938,14 +1938,20 @@ class TurnRouter:
             raise TurnRouteProofRejectedError("Turn Route state is invalid") from error
         route_id = cast(RouteId | None, record.route_id)
         if decision is TurnRouteDecision.ROUTED:
-            if route_id not in _ROUTE_SPECS or record.route_version not in {"1", "2"}:
+            if record.route_version not in {"1", "2"}:
                 raise TurnRouteProofRejectedError("Turn Route binding is unknown")
             if record.route_version == "1":
+                if route_id not in _ROUTE_SPECS:
+                    raise TurnRouteProofRejectedError("Deterministic Route binding is unknown")
                 expected_manifest = RouteRecipeCatalog.digest(route_id, "1")
                 if record.route_manifest_digest != expected_manifest:
                     raise TurnRouteProofRejectedError("Turn Route manifest changed")
-            elif record.route_manifest_digest is None:
-                raise TurnRouteProofRejectedError("Model Route manifest is missing")
+            elif (
+                route_id is None
+                or not RouteRecipeCatalog.is_planner_route(route_id)
+                or record.route_manifest_digest is None
+            ):
+                raise TurnRouteProofRejectedError("Model Route binding is unknown")
             if status is TurnRouteStatus.NOT_APPLICABLE:
                 raise TurnRouteProofRejectedError("Routed Turn cannot be non-executable")
         elif (

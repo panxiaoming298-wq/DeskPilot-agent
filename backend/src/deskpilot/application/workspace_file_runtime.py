@@ -201,6 +201,35 @@ class WorkspaceFileRuntime:
         }
         return WorkspaceFileRead.model_validate({**result, "result_digest": sha256_digest(result)})
 
+    def resolve_project_directory(self, relative_path: str) -> tuple[Path, str]:
+        """Resolve one trusted project root without exposing a user-selected cwd to models."""
+
+        return self._resolve_directory(relative_path)
+
+    def resolve_project_file(self, relative_path: str) -> tuple[Path, str]:
+        """Resolve one project file through the same root and reparse-point guard."""
+
+        return self._resolve_file(relative_path)
+
+    def read_project_material(self, path: Path) -> _Material:
+        """Read a path that a trusted recursive scanner already resolved beneath the root."""
+
+        if self._root is None:
+            raise WorkspaceFileDisabledError("Conversation workspace is not configured")
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(self._root)
+        except (OSError, ValueError) as error:
+            raise WorkspaceFilePathRejectedError(
+                "Project file must stay beneath the configured workspace"
+            ) from error
+        value = resolved.stat(follow_symlinks=False)
+        if self._is_reparse_point(resolved, value):
+            raise WorkspaceFilePathRejectedError(
+                "Workspace links and reparse points are not allowed"
+            )
+        return self._read_absolute_material(resolved, self._relative(resolved))
+
     def list_directory(self, relative_path: str) -> WorkspaceDirectoryRead:
         path, normalized = self._resolve_directory(relative_path)
         try:
