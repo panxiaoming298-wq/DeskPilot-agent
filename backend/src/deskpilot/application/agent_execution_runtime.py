@@ -471,12 +471,13 @@ class AgentExecutionRuntime:
             run, node, invocation = await self._locked_worker_mutation(
                 session, invocation_id
             )
-            self._assert_active_worker_lease(
+            self._assert_worker_lease(
                 run,
                 node,
                 invocation,
                 owner_id,
                 fencing_token,
+                allowed_run_statuses=(ExecutionRunStatus.ACTIVE.value,),
                 allowed_node_statuses=(ExecutionNodeStatus.CLAIMED.value,),
             )
             if invocation.execution_status not in {
@@ -531,12 +532,16 @@ class AgentExecutionRuntime:
             run, node, invocation = await self._locked_worker_mutation(
                 session, result.invocation_id
             )
-            self._assert_active_worker_lease(
+            self._assert_worker_lease(
                 run,
                 node,
                 invocation,
                 owner_id,
                 fencing_token,
+                allowed_run_statuses=(
+                    ExecutionRunStatus.ACTIVE.value,
+                    ExecutionRunStatus.AWAITING_VERIFICATION.value,
+                ),
                 allowed_node_statuses=(ExecutionNodeStatus.RUNNING.value,),
             )
             if invocation.execution_status != InvocationExecutionStatus.RUNNING.value:
@@ -563,7 +568,26 @@ class AgentExecutionRuntime:
             node.claim_expires_at = None
             node.revision += 1
             node.updated_at = now
-            run.status = ExecutionRunStatus.AWAITING_VERIFICATION.value
+            active_sibling_id = await session.scalar(
+                select(TaskExecutionNodeRecord.node_id)
+                .where(
+                    TaskExecutionNodeRecord.run_id == run.run_id,
+                    TaskExecutionNodeRecord.node_id != node.node_id,
+                    TaskExecutionNodeRecord.status.in_(
+                        (
+                            ExecutionNodeStatus.READY.value,
+                            ExecutionNodeStatus.CLAIMED.value,
+                            ExecutionNodeStatus.RUNNING.value,
+                        )
+                    ),
+                )
+                .limit(1)
+            )
+            run.status = (
+                ExecutionRunStatus.ACTIVE.value
+                if active_sibling_id is not None
+                else ExecutionRunStatus.AWAITING_VERIFICATION.value
+            )
             run.revision += 1
             run.updated_at = now
             await session.flush()
@@ -1141,7 +1165,7 @@ class AgentExecutionRuntime:
         return run, node, invocation
 
     @classmethod
-    def _assert_active_worker_lease(
+    def _assert_worker_lease(
         cls,
         run: TaskExecutionRunRecord,
         node: TaskExecutionNodeRecord,
@@ -1149,10 +1173,11 @@ class AgentExecutionRuntime:
         owner_id: str,
         fencing_token: int,
         *,
+        allowed_run_statuses: tuple[str, ...],
         allowed_node_statuses: tuple[str, ...],
     ) -> None:
         if (
-            run.status != ExecutionRunStatus.ACTIVE.value
+            run.status not in allowed_run_statuses
             or node.status not in allowed_node_statuses
             or invocation.run_id != run.run_id
             or invocation.node_id != node.node_id

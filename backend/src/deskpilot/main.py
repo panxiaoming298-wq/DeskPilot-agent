@@ -93,6 +93,7 @@ from deskpilot.application.runner_supervisor import RunnerSupervisor
 from deskpilot.application.task_checkpoint_codec import TaskCheckpointCodec
 from deskpilot.application.task_service import TaskService
 from deskpilot.application.task_workbench_service import TaskWorkbenchService
+from deskpilot.application.turn_planner_runtime import TurnPlannerRuntime
 from deskpilot.application.turn_router import (
     TurnRouter,
     WorkspaceCheckPort,
@@ -408,6 +409,13 @@ def create_app(
             resolved_workspace_python_test_runtime,
             resolved_workspace_node_test_runtime,
         )
+        turn_planner_runtime = TurnPlannerRuntime(
+            database,
+            agent_registry,
+            model_gateway,
+            capability_catalog,
+            plan_compilation_service,
+        )
         task_workbench_service = TaskWorkbenchService(
             database,
             task_service,
@@ -421,26 +429,19 @@ def create_app(
             artifact_delivery_runtime,
             artifact_export_runtime,
             turn_router,
+            turn_planner_runtime,
         )
         workbench_runtime = (
             WorkbenchRuntimeCoordinator(
                 database,
                 task_workbench_service,
                 instance_id=instance_id,
-                poll_interval_seconds=(
-                    resolved_settings.workbench_runtime_poll_interval_seconds
-                ),
-                claim_ttl_seconds=(
-                    resolved_settings.workbench_runtime_claim_ttl_seconds
-                ),
+                poll_interval_seconds=(resolved_settings.workbench_runtime_poll_interval_seconds),
+                claim_ttl_seconds=(resolved_settings.workbench_runtime_claim_ttl_seconds),
                 concurrency=resolved_settings.workbench_runtime_concurrency,
                 max_failures=resolved_settings.workbench_runtime_max_failures,
-                retry_base_seconds=(
-                    resolved_settings.workbench_runtime_retry_base_seconds
-                ),
-                retry_max_seconds=(
-                    resolved_settings.workbench_runtime_retry_max_seconds
-                ),
+                retry_base_seconds=(resolved_settings.workbench_runtime_retry_base_seconds),
+                retry_max_seconds=(resolved_settings.workbench_runtime_retry_max_seconds),
             )
             if resolved_settings.workbench_runtime_enabled
             else None
@@ -545,6 +546,7 @@ def create_app(
         app.state.task_workbench_service = task_workbench_service
         app.state.workbench_runtime = workbench_runtime
         app.state.turn_router = turn_router
+        app.state.turn_planner_runtime = turn_planner_runtime
         app.state.workspace_file_runtime = workspace_file_runtime
         app.state.workspace_agent_runtime = workspace_agent_runtime
         app.state.workspace_check_runtime = resolved_workspace_check_runtime

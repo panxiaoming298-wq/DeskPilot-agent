@@ -270,6 +270,7 @@ def test_builtin_registry_is_frozen_redacted_and_supervisor_is_not_an_agent() ->
         "builtin.computer_observer",
         "builtin.knowledge_researcher",
         "builtin.task_synthesizer",
+        "builtin.turn_planner",
         "builtin.web_researcher",
         "builtin.workspace_coordinator",
         "builtin.workspace_patch_planner",

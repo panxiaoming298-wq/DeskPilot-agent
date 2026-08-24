@@ -1,9 +1,13 @@
+import asyncio
 import hmac
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
 
+from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
 from deskpilot.application.phase75_evaluation import (
     ExternalOracle,
     Phase75EvaluationCompiler,
@@ -14,13 +18,15 @@ from deskpilot.application.phase75_evaluation import (
     Phase75ScenarioRunner,
 )
 from deskpilot.core.canonical_json import canonical_json_bytes, sha256_digest
+from deskpilot.domain.agent_runtime import AgentOutputResult, AgentResult
 from deskpilot.domain.phase75_evaluations import TrialObservation
+from deskpilot.infrastructure.database import Database
 
 BASELINE = (
     Path(__file__).parent
     / "baselines"
     / "evaluations"
-    / "multi-agent-core-v15.baseline.json"
+    / "multi-agent-core-v16.baseline.json"
 )
 
 
@@ -86,6 +92,107 @@ async def test_phase75_independent_suite_runs_real_parallel_join_and_passes_gate
         "REQUIRED_TRIAL_FAILED",
         "FALSE_SUCCESS",
     }
+
+
+@pytest.mark.asyncio
+async def test_claimed_worker_can_start_after_a_sibling_enters_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_start = AgentExecutionRuntime.start_invocation
+    original_submit = AgentExecutionRuntime.submit_result
+    first_submitted = asyncio.Event()
+    deferred_start: tuple[str, str, int] | None = None
+    start_count = 0
+
+    async def defer_second_start(
+        runtime: AgentExecutionRuntime,
+        invocation_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> object:
+        nonlocal deferred_start, start_count
+        start_count += 1
+        if start_count == 1:
+            return await original_start(runtime, invocation_id, owner_id, fencing_token)
+        deferred_start = (invocation_id, owner_id, fencing_token)
+        return object()
+
+    async def ordered_submit(
+        runtime: AgentExecutionRuntime,
+        result: AgentResult | AgentOutputResult,
+        *,
+        owner_id: str,
+        fencing_token: int,
+    ) -> object:
+        invocation_id = result.invocation_id
+        if deferred_start is not None and invocation_id == deferred_start[0]:
+            await asyncio.wait_for(first_submitted.wait(), timeout=5)
+            await original_start(runtime, *deferred_start)
+        submitted = await original_submit(
+            runtime,
+            result,
+            owner_id=owner_id,
+            fencing_token=fencing_token,
+        )
+        if deferred_start is None or invocation_id != deferred_start[0]:
+            first_submitted.set()
+        return submitted
+
+    monkeypatch.setattr(AgentExecutionRuntime, "start_invocation", defer_second_start)
+    monkeypatch.setattr(AgentExecutionRuntime, "submit_result", ordered_submit)
+    parallel = next(
+        item
+        for item in Phase75EvaluationService().plan().trials
+        if item.case.scenario == "runtime.parallel_verified_join"
+    )
+
+    observation = await Phase75ScenarioRunner().run(parallel)
+
+    assert observation.sut_outcome == "succeeded"
+    assert start_count == 2
+    assert first_submitted.is_set()
+    assert observation.artifact_evidence["result_count"] == 2
+    assert observation.join_unlocked is True
+
+
+@pytest.mark.asyncio
+async def test_phase75_trial_database_is_disposed_when_runtime_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    dispose_count = 0
+    submit_count = 0
+    delayed_submit_settled = asyncio.Event()
+    original_dispose = Database.dispose
+
+    async def tracked_dispose(database: Database) -> None:
+        nonlocal dispose_count
+        dispose_count += 1
+        await original_dispose(database)
+
+    async def injected_failure(*args: object, **kwargs: object) -> object:
+        nonlocal submit_count
+        submit_count += 1
+        if submit_count == 1:
+            raise RuntimeError("injected Phase75 runtime failure")
+        await asyncio.sleep(0.05)
+        delayed_submit_settled.set()
+        return object()
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(Database, "dispose", tracked_dispose)
+    monkeypatch.setattr(AgentExecutionRuntime, "submit_result", injected_failure)
+    parallel = next(
+        item
+        for item in Phase75EvaluationService().plan().trials
+        if item.case.scenario == "runtime.parallel_verified_join"
+    )
+
+    with pytest.raises(RuntimeError, match="injected Phase75 runtime failure"):
+        await Phase75ScenarioRunner().run(parallel)
+
+    assert delayed_submit_settled.is_set()
+    assert dispose_count == 1
+    assert await asyncio.to_thread(os.listdir, tmp_path) == []
 
 
 def test_external_oracle_catches_false_success_and_false_accept() -> None:

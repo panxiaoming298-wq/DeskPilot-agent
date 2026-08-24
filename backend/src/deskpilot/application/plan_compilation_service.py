@@ -91,6 +91,19 @@ class PlanCompilationService:
         self._database = database
         self._compiler = compiler
 
+    def preview_initial(
+        self,
+        contract: TaskContract,
+        draft: DraftPlan,
+    ) -> ExecutablePlan:
+        """Compile the exact generation-1 manifest without persisting state."""
+
+        if contract.version != 1 or contract.previous_contract_digest is not None:
+            raise PlanningVersionConflictError(
+                "Initial Planner preview requires Task Contract version 1"
+            )
+        return self._compiler.compile(contract, draft, generation=1)
+
     async def activate(
         self,
         contract: TaskContract,
@@ -178,6 +191,162 @@ class PlanCompilationService:
             raise PlanningVersionConflictError(
                 "Planning generation changed concurrently"
             ) from error
+
+    async def activate_initial_once(
+        self,
+        contract: TaskContract,
+        draft: DraftPlan,
+    ) -> ExecutablePlanRead:
+        """Create generation 1 once, or return that exact active generation.
+
+        This entry point is deliberately narrower than ``activate``.  It is used
+        after a terminal Turn Planner adjudication, where a crash may leave the
+        exact plan active before its separate provenance Binding is persisted.
+        Recovery must never turn that situation into generation 2.
+        """
+
+        expected = self.preview_initial(contract, draft)
+        try:
+            async with self._database.session() as session, session.begin():
+                return await self._activate_initial_once_locked(
+                    session,
+                    contract=contract,
+                    expected=expected,
+                )
+        except IntegrityError:
+            # SQLite does not implement row-level FOR UPDATE.  Its uniqueness
+            # constraints still elect one generation-1 writer; the loser may
+            # only accept the exact winner and can never advance a generation.
+            async with self._database.session() as session:
+                state = await session.get(TaskPlanningStateRecord, contract.task_id)
+                if state is None:
+                    raise PlanningVersionConflictError(
+                        "Initial planning generation changed concurrently"
+                    ) from None
+                return await self._validate_initial_exact(
+                    session,
+                    state=state,
+                    contract=contract,
+                    expected=expected,
+                )
+
+    async def activate_initial_once_in_session(
+        self,
+        session: AsyncSession,
+        contract: TaskContract,
+        draft: DraftPlan,
+    ) -> ExecutablePlanRead:
+        """Activate generation 1 inside the caller's larger atomic transaction."""
+
+        expected = self.preview_initial(contract, draft)
+        return await self._activate_initial_once_locked(
+            session,
+            contract=contract,
+            expected=expected,
+        )
+
+    async def _activate_initial_once_locked(
+        self,
+        session: AsyncSession,
+        *,
+        contract: TaskContract,
+        expected: ExecutablePlan,
+    ) -> ExecutablePlanRead:
+        task = await session.scalar(
+            select(TaskRecord)
+            .where(TaskRecord.task_id == contract.task_id)
+            .with_for_update()
+        )
+        if task is None:
+            raise PlanningNotFoundError("Task does not exist")
+        state = await session.scalar(
+            select(TaskPlanningStateRecord)
+            .where(TaskPlanningStateRecord.task_id == contract.task_id)
+            .with_for_update()
+        )
+        if state is not None:
+            return await self._validate_initial_exact(
+                session,
+                state=state,
+                contract=contract,
+                expected=expected,
+            )
+        now = utc_now()
+        session.add(
+            TaskContractVersionRecord(
+                task_id=contract.task_id,
+                version=contract.version,
+                contract_id=contract.contract_id,
+                previous_contract_digest=contract.previous_contract_digest,
+                manifest=contract.model_dump(mode="json"),
+                contract_digest=contract.digest,
+                created_at=now,
+            )
+        )
+        session.add(
+            TaskPlanGenerationRecord(
+                task_id=contract.task_id,
+                generation=1,
+                plan_id=expected.plan_id,
+                contract_version=contract.version,
+                contract_digest=contract.digest,
+                status="active",
+                manifest=expected.model_dump(mode="json"),
+                plan_manifest_digest=expected.plan_manifest_digest,
+                created_at=now,
+            )
+        )
+        session.add(
+            TaskPlanningStateRecord(
+                task_id=contract.task_id,
+                active_contract_version=1,
+                active_contract_digest=contract.digest,
+                active_plan_generation=1,
+                active_plan_digest=expected.plan_manifest_digest,
+                revision=1,
+                updated_at=now,
+            )
+        )
+        await session.flush()
+        return ExecutablePlanRead(plan=expected, status="active")
+
+    async def _validate_initial_exact(
+        self,
+        session: AsyncSession,
+        *,
+        state: TaskPlanningStateRecord,
+        contract: TaskContract,
+        expected: ExecutablePlan,
+    ) -> ExecutablePlanRead:
+        await self._validate_active_state(session, state)
+        if (
+            state.active_contract_version != 1
+            or state.active_plan_generation != 1
+            or state.active_contract_digest != contract.digest
+            or state.active_plan_digest != expected.plan_manifest_digest
+        ):
+            raise PlanningVersionConflictError(
+                "Task already has a different active planning generation"
+            )
+        contract_record = await session.get(
+            TaskContractVersionRecord,
+            (contract.task_id, 1),
+        )
+        plan_record = await session.get(
+            TaskPlanGenerationRecord,
+            (contract.task_id, 1),
+        )
+        if contract_record is None or plan_record is None:
+            raise PlanningProofRejectedError(
+                "Initial planning evidence is incomplete"
+            )
+        persisted_contract = self._contract_from_record(contract_record)
+        persisted_plan = self._plan_from_record(plan_record)
+        if persisted_contract != contract or persisted_plan != expected:
+            raise PlanningVersionConflictError(
+                "Existing generation 1 does not match the trusted Planner recipe"
+            )
+        return ExecutablePlanRead(plan=persisted_plan, status="active")
 
     async def get_state(self, task_id: str) -> PlanningStateRead:
         async with self._database.session() as session:

@@ -77,7 +77,7 @@ const starterSuggestions = [
 ]
 
 const stageLabel: Record<string, string> = {
-  idle: '等待指令', planned: '计划已建立', researching: '正在公开取证',
+  idle: '等待指令', interpreting: '正在解释任务', planned: '计划已建立', researching: '正在公开取证',
   awaiting_verification: '正在独立核验', building_artifact: '正在构建交付物',
   verifying_browser: '正在隔离验收', ready_to_deliver: '正在形成交付',
   delivered: '已完成', exported: '已导出', executing: '正在执行',
@@ -94,7 +94,7 @@ const researchFlow: FlowItem[] = [
 ]
 
 const autoActions = new Set<WorkbenchAction>([
-  'run_research', 'verify_claims', 'build_artifact', 'verify_browser', 'finalize_delivery', 'execute_route', 'replan_failed_execution',
+  'interpret_turn', 'run_research', 'verify_claims', 'build_artifact', 'verify_browser', 'finalize_delivery', 'execute_route', 'replan_failed_execution',
 ])
 
 const routeLabels: Record<string, string> = {
@@ -163,6 +163,7 @@ const failedConditionDecision = computed(() => taskGraphs.value
   .find((decision) => !decision.matched) ?? null)
 const observesServerProgress = computed(() => Boolean(
   enabledAutoAction.value
+  || workbench.value?.stage === 'interpreting'
   || (
     run.value
     && ['active', 'awaiting_verification'].includes(run.value.status)
@@ -213,8 +214,12 @@ const evidenceCount = computed(() => (
   + (workbench.value?.workspace_check ? 1 : 0)
   + (workbench.value?.workspace_python_test ? 1 : 0)
   + (workbench.value?.workspace_node_test ? 1 : 0)
+  + (workbench.value?.turn_planning ? 1 : 0)
 ))
 const routeFlow = computed<FlowItem[]>(() => {
+  if (workbench.value?.stage === 'interpreting') {
+    return [{ key: 'interpret_turn', action: 'interpret_turn', label: '解释任务并选择能力', detail: '模型只能引用服务器预编译 Offer；选择本身不授予权限' }]
+  }
   if (workbench.value?.route?.route_id === 'knowledge_lookup') {
     return [{ key: 'knowledge_lookup', action: 'execute_route', label: '查询本地知识', detail: '内容寻址检索，返回片段与来源证明' }]
   }
@@ -274,6 +279,7 @@ const routeFlow = computed<FlowItem[]>(() => {
 })
 const routeName = computed(() => {
   const route = workbench.value?.route
+  if (workbench.value?.stage === 'interpreting') return '正在匹配安全能力'
   if (!route) return '未建立路由'
   if (route.decision === 'needs_clarification') return '需要澄清'
   if (route.decision === 'unsupported') return '未匹配能力'
@@ -282,6 +288,7 @@ const routeName = computed(() => {
 const routeExplanation = computed(() => {
   const value = workbench.value
   if (!value) return ''
+  if (value.stage === 'interpreting') return '服务器已冻结可用能力、契约、预算与参数边界；本地 Planner 只能从这些 opaque Offer 中提案。'
   if (value.stage === 'needs_clarification') return '请说明要研究公开来源、查询本地知识、统计文本，还是读取、修改或检查工作区。'
   if (value.stage === 'unsupported') return '这条指令没有被偷偷执行；系统只会运行已声明且当前可用的安全路由。'
   if (value.stage === 'needs_user_action' && value.route?.route_id === 'workspace_file_replace') {
@@ -322,6 +329,7 @@ function problemMessage(caught: unknown): string {
 
 function nodeState(node: WorkbenchNode | undefined, action: WorkbenchAction): 'done' | 'active' | 'queued' {
   if (actionMap.value.get(action)?.enabled) return 'active'
+  if (action === 'interpret_turn' && workbench.value?.stage === 'interpreting') return 'active'
   if (!node) return 'queued'
   if (action === 'run_research') {
     return ['awaiting_verification', 'verified'].includes(node.status) ? 'done' : 'queued'
@@ -1009,12 +1017,37 @@ onBeforeUnmount(() => {
       </header>
       <p class="panel-intro">这里是结果的证据层，不是操作主入口。</p>
 
+      <details v-if="workbench?.turn_planning" open>
+        <summary>Turn Planner Proof <span>{{ workbench.turn_planning.run.status }}</span></summary>
+        <dl class="route-proof">
+          <div><dt>预编译 Offer</dt><dd>{{ workbench.turn_planning.run.offer_count }} 个</dd></div>
+          <div><dt>Planner 状态</dt><dd>{{ workbench.turn_planning.run.status }}</dd></div>
+          <div><dt>请求证明</dt><dd>{{ shortDigest(workbench.turn_planning.run.request_digest) }}</dd></div>
+          <div><dt>运行证明</dt><dd>{{ shortDigest(workbench.turn_planning.run.run_digest) }}</dd></div>
+          <div v-if="workbench.turn_planning.run.failure">
+            <dt>失败证明</dt>
+            <dd>{{ workbench.turn_planning.run.failure.error_code }} · {{ shortDigest(workbench.turn_planning.run.failure.failure_digest) }} · 不自动重放</dd>
+          </div>
+          <div v-if="workbench.turn_planning.adjudication">
+            <dt>服务器裁决</dt>
+            <dd>{{ workbench.turn_planning.adjudication.outcome }} · {{ workbench.turn_planning.adjudication.reason_code }} · {{ shortDigest(workbench.turn_planning.adjudication.adjudication_digest) }}</dd>
+          </div>
+          <div v-if="workbench.turn_planning.binding">
+            <dt>计划绑定</dt>
+            <dd>{{ workbench.turn_planning.binding.status }} · {{ shortDigest(workbench.turn_planning.binding.binding_digest) }}</dd>
+          </div>
+          <div><dt>投影证明</dt><dd>{{ shortDigest(workbench.turn_planning.planning_digest) }}</dd></div>
+        </dl>
+        <p class="empty-proof">这里只显示服务器证明摘要；模型原始响应、参数原文与用户消息不会作为权限展示，失败也不会自动重放。</p>
+      </details>
+
       <details v-if="workbench?.route" open>
         <summary>Route Receipt <span>{{ workbench.route.decision }}</span></summary>
         <dl class="route-proof">
           <div><dt>能力路由</dt><dd>{{ routeName }}</dd></div>
           <div><dt>判定摘要</dt><dd>{{ shortDigest(workbench.route.candidate_digest) }}</dd></div>
           <div><dt>参数摘要</dt><dd>{{ shortDigest(workbench.route.parameter_digest) }}</dd></div>
+          <div v-if="workbench.route.turn_planning_provenance_digest"><dt>Planner 来源证明</dt><dd>{{ shortDigest(workbench.route.turn_planning_provenance_digest) }}</dd></div>
           <div v-if="workbench.route.resolution_digest"><dt>对话补全证明</dt><dd>{{ shortDigest(workbench.route.resolution_digest) }}</dd></div>
           <div><dt>结果摘要</dt><dd>{{ shortDigest(workbench.route.result_digest) }}</dd></div>
         </dl>

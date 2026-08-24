@@ -61,6 +61,7 @@ from deskpilot.domain.research import (
 )
 from deskpilot.domain.task_plans import PlanNodeBudget
 from deskpilot.domain.tool_contracts import ToolRiskLevel
+from deskpilot.domain.turn_planning import TurnPlannerUnsupportedDecision
 
 TASK_CLASSIFICATION_SCHEMA = "task_classification"
 TASK_PLAN_SCHEMA = "task_plan"
@@ -71,6 +72,7 @@ WORKSPACE_PATCH_PLANNER_LOOP_DECISION_SCHEMA = "workspace_patch_planner_loop_dec
 WORKSPACE_COORDINATOR_LOOP_DECISION_SCHEMA = "workspace_coordinator_loop_decision"
 WORKSPACE_DYNAMIC_COORDINATOR_LOOP_DECISION_SCHEMA = "workspace_dynamic_coordinator_loop_decision"
 CITATION_VERIFICATION_DECISION_SCHEMA = "citation_verification_decision"
+TURN_PLANNER_DECISION_SCHEMA = "turn_planner_decision"
 
 
 class FakeModelProvider:
@@ -213,6 +215,12 @@ class FakeModelProvider:
                 confidence=1.0,
                 recommended_agent="computer",
                 rationale="Fake Provider 固定选择安全的磁盘容量只读演示路径。",
+            ).model_dump(mode="json")
+        if request.output_schema.name == TURN_PLANNER_DECISION_SCHEMA:
+            # The default offline provider must never infer that selecting the first
+            # capability offer is safe. Positive planner paths use explicit fixtures.
+            return TurnPlannerUnsupportedDecision(
+                kind="unsupported"
             ).model_dump(mode="json")
         if request.output_schema.name == TASK_PLAN_SCHEMA:
             return TaskPlan(

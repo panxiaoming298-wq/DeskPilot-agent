@@ -101,6 +101,22 @@ async def advance_task_workbench(
 
 
 @router.post(
+    "/tasks/{task_id}/workbench:interpret-turn",
+    response_model=TaskWorkbenchRead,
+)
+async def interpret_task_workbench_turn(
+    task_id: TaskId,
+    service: WorkbenchDependency,
+    response: Response,
+) -> TaskWorkbenchRead:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await service.interpret_turn(task_id)
+    except TaskWorkbenchError as error:
+        raise _workbench_problem(error) from error
+
+
+@router.post(
     "/tasks/{task_id}/workbench:stop",
     response_model=TaskWorkbenchRead,
 )

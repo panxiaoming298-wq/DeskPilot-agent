@@ -410,6 +410,7 @@ describe('phase 76 workbench API', () => {
       createConversationTurn,
       createResearchWorkbenchTask,
       getTaskWorkbench,
+      interpretTaskWorkbench,
       prepareArtifactExport,
       replanTaskWorkbench,
       runWorkbenchStep,
@@ -424,6 +425,7 @@ describe('phase 76 workbench API', () => {
     })
     await continueConversationTurn('task/with spaces?#', { message: '更换研究主题' })
     await advanceTaskWorkbench('task/with spaces?#')
+    await interpretTaskWorkbench('task/with spaces?#')
     await stopTaskWorkbench('task/with spaces?#')
     await replanTaskWorkbench('task/with spaces?#')
     await commitWorkspaceEdit('task/with spaces?#', 'b'.repeat(64))
@@ -447,39 +449,43 @@ describe('phase 76 workbench API', () => {
     expectAuthenticatedRequest(
       fetchMock, 4, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench:advance', 'POST',
     )
+    const interpretInit = expectAuthenticatedRequest(
+      fetchMock, 5, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench:interpret-turn', 'POST',
+    )
+    expect(interpretInit.body).toBeUndefined()
     expectAuthenticatedRequest(
-      fetchMock, 5, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench:stop', 'POST',
+      fetchMock, 6, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench:stop', 'POST',
     )
     expectAuthenticatedRequest(
-      fetchMock, 6, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench:replan', 'POST',
+      fetchMock, 7, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench:replan', 'POST',
     )
     expectAuthenticatedRequest(
-      fetchMock, 7, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workspace-edit:commit', 'POST',
+      fetchMock, 8, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workspace-edit:commit', 'POST',
     )
     expectAuthenticatedRequest(
-      fetchMock, 8, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workspace-patch:commit', 'POST',
+      fetchMock, 9, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workspace-patch:commit', 'POST',
     )
     expectAuthenticatedRequest(
-      fetchMock, 9, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workspace-path-operation:commit', 'POST',
+      fetchMock, 10, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workspace-path-operation:commit', 'POST',
     )
     expectAuthenticatedRequest(
-      fetchMock, 10, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench', undefined,
+      fetchMock, 11, '/api/v1/tasks/task%2Fwith%20spaces%3F%23/workbench', undefined,
     )
     expectAuthenticatedRequest(
-      fetchMock, 11, '/api/v1/execution-runs/run%2Fwith%20spaces%3F%23/claims:verify', 'POST',
+      fetchMock, 12, '/api/v1/execution-runs/run%2Fwith%20spaces%3F%23/claims:verify', 'POST',
     )
     expectAuthenticatedRequest(
-      fetchMock, 12, '/api/v1/execution-runs/run%2Fwith%20spaces%3F%23:cancel', 'POST',
+      fetchMock, 13, '/api/v1/execution-runs/run%2Fwith%20spaces%3F%23:cancel', 'POST',
     )
     const prepareInit = expectAuthenticatedRequest(
-      fetchMock, 13, '/api/v1/deliveries/delivery%2Fwith%20spaces%3F%23/exports:prepare', 'POST',
+      fetchMock, 14, '/api/v1/deliveries/delivery%2Fwith%20spaces%3F%23/exports:prepare', 'POST',
     )
     expect(new Headers(prepareInit.headers).get('Idempotency-Key')).toBe('prepare-key-0001')
     expect(prepareInit.body).toBe(JSON.stringify({
       target_path: 'D:\\Reports\\x.md', artifact_id: `art_${'e'.repeat(64)}`,
     }))
     const commitInit = expectAuthenticatedRequest(
-      fetchMock, 14, '/api/v1/artifact-exports/export%2Fwith%20spaces%3F%23:commit', 'POST',
+      fetchMock, 15, '/api/v1/artifact-exports/export%2Fwith%20spaces%3F%23:commit', 'POST',
     )
     expect(new Headers(commitInit.headers).get('Idempotency-Key')).toBe('commit-key-00001')
   })

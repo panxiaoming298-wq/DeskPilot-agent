@@ -750,6 +750,13 @@ export function advanceTaskWorkbench(taskId: string): Promise<TaskWorkbench> {
   )
 }
 
+export function interpretTaskWorkbench(taskId: string): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/workbench:interpret-turn`,
+    { method: 'POST' },
+  )
+}
+
 export function stopTaskWorkbench(taskId: string): Promise<TaskWorkbench> {
   return request<TaskWorkbench>(
     `/api/v1/tasks/${encodeURIComponent(taskId)}/workbench:stop`,

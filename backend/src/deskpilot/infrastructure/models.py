@@ -246,9 +246,425 @@ class ConversationMessageRecord(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class TurnPlanningOfferRecord(Base):
+    """Immutable server-precompiled offer bound to one exact user message."""
+
+    __tablename__ = "turn_planning_offers"
+    __table_args__ = (
+        CheckConstraint("contract_version >= 1", name="ck_turn_planning_offer_contract"),
+        CheckConstraint(
+            "expected_plan_generation = 1",
+            name="ck_turn_planning_offer_expected_plan",
+        ),
+        UniqueConstraint("offer_key", name="uq_turn_planning_offer_key"),
+        UniqueConstraint("offer_digest", name="uq_turn_planning_offer_digest"),
+        UniqueConstraint(
+            "offer_id",
+            "task_id",
+            "user_message_id",
+            "user_message_digest",
+            "offer_digest",
+            name="uq_turn_planning_offer_scope",
+        ),
+        Index(
+            "ix_turn_planning_offers_message",
+            "task_id",
+            "user_message_id",
+            "created_at",
+        ),
+    )
+
+    offer_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    offer_key: Mapped[str] = mapped_column(String(68))
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
+    user_message_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="CASCADE")
+    )
+    user_message_digest: Mapped[str] = mapped_column(String(64))
+    contract_id: Mapped[str] = mapped_column(String(40))
+    contract_version: Mapped[int] = mapped_column(Integer)
+    contract_digest: Mapped[str] = mapped_column(String(64))
+    execution_agents_manifest: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    execution_agents_digest: Mapped[str] = mapped_column(String(64))
+    expected_plan_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    expected_plan_id: Mapped[str] = mapped_column(String(68))
+    expected_plan_generation: Mapped[int] = mapped_column(Integer)
+    expected_plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    expected_plan_binding_snapshot_digest: Mapped[str] = mapped_column(String(64))
+    capabilities_manifest: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    capabilities_digest: Mapped[str] = mapped_column(String(64))
+    provider_id: Mapped[str] = mapped_column(String(64))
+    provider_model: Mapped[str] = mapped_column(String(200))
+    provider_snapshot_digest: Mapped[str] = mapped_column(String(64))
+    recipe_id: Mapped[str] = mapped_column(String(64))
+    recipe_version: Mapped[str] = mapped_column(String(16))
+    recipe_digest: Mapped[str] = mapped_column(String(64))
+    budget_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    budget_digest: Mapped[str] = mapped_column(String(64))
+    parameter_schema_manifest: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    parameter_schema_digest: Mapped[str] = mapped_column(String(64))
+    policy_snapshot_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    offer_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TurnPlannerRunRecord(Base):
+    """Immutable terminal record of exactly one planner model attempt."""
+
+    __tablename__ = "turn_planner_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('prepared', 'dispatching', 'succeeded', 'failed', "
+            "'outcome_unknown', 'cancelled')",
+            name="ck_turn_planner_run_status",
+        ),
+        CheckConstraint(
+            "revision >= 1 AND claim_fencing_token >= 0",
+            name="ck_turn_planner_run_revision",
+        ),
+        CheckConstraint(
+            "(status = 'prepared' AND claim_owner_id IS NULL AND "
+            "claim_fencing_token = 0 AND claim_expires_at IS NULL AND "
+            "request_dispatched_at IS NULL AND completed_at IS NULL AND "
+            "response_digest IS NULL AND failure_code IS NULL AND failure_digest IS NULL) OR "
+            "(status = 'dispatching' AND claim_owner_id IS NOT NULL AND "
+            "claim_fencing_token >= 1 AND claim_expires_at IS NOT NULL AND "
+            "request_dispatched_at IS NOT NULL AND completed_at IS NULL AND "
+            "response_digest IS NULL AND failure_code IS NULL AND failure_digest IS NULL) OR "
+            "(status = 'succeeded' AND claim_owner_id IS NULL AND claim_expires_at IS NULL "
+            "AND request_dispatched_at IS NOT NULL AND completed_at IS NOT NULL AND "
+            "response_digest IS NOT NULL AND failure_code IS NULL AND failure_digest IS NULL) OR "
+            "(status = 'failed' AND claim_owner_id IS NULL AND claim_expires_at IS NULL "
+            "AND request_dispatched_at IS NOT NULL AND completed_at IS NOT NULL AND "
+            "response_digest IS NULL AND failure_code IS NOT NULL AND "
+            "failure_code NOT IN ('PLANNER_OUTCOME_UNKNOWN', 'PLANNER_CANCELLED') "
+            "AND failure_digest IS NOT NULL) OR "
+            "(status = 'outcome_unknown' AND claim_owner_id IS NULL AND "
+            "claim_expires_at IS NULL AND request_dispatched_at IS NOT NULL AND "
+            "completed_at IS NOT NULL AND response_digest IS NULL AND "
+            "failure_code = 'PLANNER_OUTCOME_UNKNOWN' AND failure_digest IS NOT NULL) OR "
+            "(status = 'cancelled' AND claim_owner_id IS NULL AND claim_expires_at IS NULL "
+            "AND completed_at IS NOT NULL AND response_digest IS NULL AND "
+            "failure_code = 'PLANNER_CANCELLED' AND failure_digest IS NOT NULL)",
+            name="ck_turn_planner_run_outcome",
+        ),
+        UniqueConstraint(
+            "task_id",
+            "user_message_id",
+            name="uq_turn_planner_run_message",
+        ),
+        UniqueConstraint("run_digest", name="uq_turn_planner_run_digest"),
+        UniqueConstraint(
+            "run_id",
+            "task_id",
+            "user_message_id",
+            "user_message_digest",
+            "run_digest",
+            name="uq_turn_planner_run_scope",
+        ),
+        UniqueConstraint(
+            "run_id",
+            "task_id",
+            "user_message_id",
+            "reservation_digest",
+            name="uq_turn_planner_run_reservation",
+        ),
+        Index(
+            "ix_turn_planner_runs_message",
+            "task_id",
+            "user_message_id",
+            "created_at",
+        ),
+        Index(
+            "ix_turn_planner_runs_claim",
+            "status",
+            "claim_expires_at",
+        ),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
+    user_message_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="CASCADE")
+    )
+    user_message_digest: Mapped[str] = mapped_column(String(64))
+    planner_agent_id: Mapped[str] = mapped_column(String(100))
+    planner_agent_version: Mapped[str] = mapped_column(String(16))
+    planner_contract_digest: Mapped[str] = mapped_column(String(64))
+    planner_prompt_package_digest: Mapped[str] = mapped_column(String(64))
+    provider_id: Mapped[str] = mapped_column(String(64))
+    provider_model: Mapped[str] = mapped_column(String(200))
+    provider_snapshot_digest: Mapped[str] = mapped_column(String(64))
+    offer_set_digest: Mapped[str] = mapped_column(String(64))
+    request_digest: Mapped[str] = mapped_column(String(64))
+    fallback_candidate_digest: Mapped[str] = mapped_column(String(64))
+    reservation_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32))
+    revision: Mapped[int] = mapped_column(Integer)
+    claim_owner_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    claim_fencing_token: Mapped[int] = mapped_column(Integer)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    request_dispatched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    response_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    failure_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    run_digest: Mapped[str] = mapped_column(String(64))
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TurnPlannerAdjudicationRecord(Base):
+    """Immutable server adjudication of one untrusted planner response."""
+
+    __tablename__ = "turn_planner_adjudications"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "run_id",
+                "task_id",
+                "user_message_id",
+                "user_message_digest",
+                "run_digest",
+            ],
+            [
+                "turn_planner_runs.run_id",
+                "turn_planner_runs.task_id",
+                "turn_planner_runs.user_message_id",
+                "turn_planner_runs.user_message_digest",
+                "turn_planner_runs.run_digest",
+            ],
+            name="fk_turn_planner_adjudication_run_scope",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "outcome IN ('single_step', 'multi_step_deferred', "
+            "'deterministic_fallback', 'needs_user_input', 'unsupported')",
+            name="ck_turn_planner_adjudication_outcome",
+        ),
+        CheckConstraint(
+            "(outcome = 'single_step' AND selected_offer_count = 1 AND "
+            "proposal_digest IS NOT NULL AND parameter_bindings_manifest IS NOT NULL "
+            "AND parameter_bindings_digest IS NOT NULL) OR "
+            "(outcome = 'multi_step_deferred' AND selected_offer_count BETWEEN 2 AND 8 "
+            "AND proposal_digest IS NOT NULL AND parameter_bindings_manifest IS NOT NULL "
+            "AND parameter_bindings_digest IS NOT NULL) OR "
+            "(outcome = 'needs_user_input' AND selected_offer_count BETWEEN 0 AND 1 "
+            "AND proposal_digest IS NOT NULL AND parameter_bindings_manifest IS NOT NULL "
+            "AND parameter_bindings_digest IS NOT NULL) OR "
+            "(outcome = 'unsupported' AND selected_offer_count = 0 AND "
+            "proposal_digest IS NOT NULL AND parameter_bindings_manifest IS NOT NULL "
+            "AND parameter_bindings_digest IS NOT NULL) OR "
+            "(outcome = 'deterministic_fallback' AND selected_offer_count = 0 "
+            "AND proposal_digest IS NULL AND parameter_bindings_manifest IS NULL "
+            "AND parameter_bindings_digest IS NULL)",
+            name="ck_turn_planner_adjudication_selection",
+        ),
+        UniqueConstraint("run_id", name="uq_turn_planner_adjudication_run"),
+        UniqueConstraint("adjudication_digest", name="uq_turn_planner_adjudication_digest"),
+        UniqueConstraint(
+            "adjudication_id",
+            "task_id",
+            "user_message_id",
+            "user_message_digest",
+            "adjudication_digest",
+            name="uq_turn_planner_adjudication_scope",
+        ),
+        Index(
+            "ix_turn_planner_adjudications_message",
+            "task_id",
+            "user_message_id",
+            "created_at",
+        ),
+    )
+
+    adjudication_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
+    user_message_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="CASCADE")
+    )
+    user_message_digest: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(String(68))
+    run_digest: Mapped[str] = mapped_column(String(64))
+    outcome: Mapped[str] = mapped_column(String(32))
+    selected_offer_count: Mapped[int] = mapped_column(Integer)
+    parameter_bindings_manifest: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    parameter_bindings_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    proposal_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason_code: Mapped[str] = mapped_column(String(100))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    adjudication_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TurnPlanBindingRecord(Base):
+    """Immutable trusted binding, including deferred and non-applicable outcomes."""
+
+    __tablename__ = "turn_plan_bindings"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "adjudication_id",
+                "task_id",
+                "user_message_id",
+                "user_message_digest",
+                "adjudication_digest",
+            ],
+            [
+                "turn_planner_adjudications.adjudication_id",
+                "turn_planner_adjudications.task_id",
+                "turn_planner_adjudications.user_message_id",
+                "turn_planner_adjudications.user_message_digest",
+                "turn_planner_adjudications.adjudication_digest",
+            ],
+            name="fk_turn_plan_binding_adjudication_scope",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            [
+                "offer_id",
+                "task_id",
+                "user_message_id",
+                "user_message_digest",
+                "offer_digest",
+            ],
+            [
+                "turn_planning_offers.offer_id",
+                "turn_planning_offers.task_id",
+                "turn_planning_offers.user_message_id",
+                "turn_planning_offers.user_message_digest",
+                "turn_planning_offers.offer_digest",
+            ],
+            name="fk_turn_plan_binding_offer_scope",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "task_id",
+                "plan_generation",
+                "plan_id",
+                "plan_manifest_digest",
+                "contract_version",
+                "contract_digest",
+            ],
+            [
+                "task_plan_generations.task_id",
+                "task_plan_generations.generation",
+                "task_plan_generations.plan_id",
+                "task_plan_generations.plan_manifest_digest",
+                "task_plan_generations.contract_version",
+                "task_plan_generations.contract_digest",
+            ],
+            name="fk_turn_plan_binding_plan_generation",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('bound', 'multi_step_deferred', 'not_applicable')",
+            name="ck_turn_plan_binding_status",
+        ),
+        CheckConstraint(
+            "(status = 'bound' AND offer_id IS NOT NULL AND offer_digest IS NOT NULL AND "
+            "plan_id IS NOT NULL AND "
+            "plan_generation IS NOT NULL AND plan_manifest_digest IS NOT NULL AND "
+            "contract_id IS NOT NULL AND contract_version IS NOT NULL AND "
+            "contract_digest IS NOT NULL) OR "
+            "(status IN ('multi_step_deferred', 'not_applicable') AND offer_id IS NULL "
+            "AND offer_digest IS NULL "
+            "AND plan_id IS NULL AND plan_generation IS NULL AND "
+            "plan_manifest_digest IS NULL AND contract_id IS NULL AND "
+            "contract_version IS NULL AND contract_digest IS NULL)",
+            name="ck_turn_plan_binding_target",
+        ),
+        UniqueConstraint("adjudication_id", name="uq_turn_plan_binding_adjudication"),
+        UniqueConstraint("binding_digest", name="uq_turn_plan_binding_digest"),
+        UniqueConstraint(
+            "binding_id",
+            "adjudication_id",
+            "task_id",
+            "user_message_id",
+            "binding_digest",
+            name="uq_turn_plan_binding_route_scope",
+        ),
+        Index(
+            "ix_turn_plan_bindings_message",
+            "task_id",
+            "user_message_id",
+            "created_at",
+        ),
+    )
+
+    binding_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
+    user_message_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="CASCADE")
+    )
+    user_message_digest: Mapped[str] = mapped_column(String(64))
+    adjudication_id: Mapped[str] = mapped_column(String(68))
+    adjudication_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32))
+    offer_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    offer_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    plan_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    plan_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    plan_manifest_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    contract_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    contract_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    contract_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason_code: Mapped[str] = mapped_column(String(100))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    binding_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class TurnRouteRecord(Base):
     __tablename__ = "turn_routes"
     __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "turn_planner_run_id",
+                "task_id",
+                "user_message_id",
+                "turn_planning_reservation_digest",
+            ],
+            [
+                "turn_planner_runs.run_id",
+                "turn_planner_runs.task_id",
+                "turn_planner_runs.user_message_id",
+                "turn_planner_runs.reservation_digest",
+            ],
+            name="fk_turn_route_planner_reservation",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "turn_plan_binding_id",
+                "turn_planning_adjudication_id",
+                "task_id",
+                "user_message_id",
+                "turn_plan_binding_digest",
+            ],
+            [
+                "turn_plan_bindings.binding_id",
+                "turn_plan_bindings.adjudication_id",
+                "turn_plan_bindings.task_id",
+                "turn_plan_bindings.user_message_id",
+                "turn_plan_bindings.binding_digest",
+            ],
+            name="fk_turn_route_planning_provenance",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "decision IN ('routed', 'needs_clarification', 'unsupported')",
             name="ck_turn_route_decision",
@@ -266,7 +682,24 @@ class TurnRouteRecord(Base):
             "resolution_digest IS NOT NULL AND resolved_from_task_id <> task_id)",
             name="ck_turn_route_resolution",
         ),
+        CheckConstraint(
+            "(turn_planning_adjudication_id IS NULL AND turn_plan_binding_id IS NULL "
+            "AND turn_plan_binding_digest IS NULL AND "
+            "turn_planning_provenance_digest IS NULL) OR "
+            "(turn_planning_adjudication_id IS NOT NULL AND turn_plan_binding_id IS NOT NULL "
+            "AND turn_plan_binding_digest IS NOT NULL AND "
+            "turn_planning_provenance_digest IS NOT NULL)",
+            name="ck_turn_route_planning_provenance",
+        ),
+        CheckConstraint(
+            "(turn_planner_run_id IS NULL AND "
+            "turn_planning_reservation_digest IS NULL) OR "
+            "(turn_planner_run_id IS NOT NULL AND "
+            "turn_planning_reservation_digest IS NOT NULL)",
+            name="ck_turn_route_planner_reservation",
+        ),
         Index("ix_turn_routes_conversation", "conversation_id", "created_at"),
+        Index("ix_turn_routes_planner_run", "turn_planner_run_id"),
     )
 
     task_id: Mapped[str] = mapped_column(
@@ -295,6 +728,20 @@ class TurnRouteRecord(Base):
     )
     resolution_rule: Mapped[str | None] = mapped_column(String(64), nullable=True)
     resolution_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    turn_planner_run_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    turn_planning_reservation_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    turn_planning_adjudication_id: Mapped[str | None] = mapped_column(
+        String(68), nullable=True
+    )
+    turn_plan_binding_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    turn_plan_binding_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    turn_planning_provenance_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     reason_code: Mapped[str] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(32))
     result_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -629,6 +1076,16 @@ class TaskPlanGenerationRecord(Base):
         CheckConstraint("status IN ('active', 'superseded')", name="ck_task_plan_status"),
         UniqueConstraint("plan_id", name="uq_task_plan_id"),
         Index("ix_task_plan_generations_task", "task_id", "generation"),
+        Index(
+            "uq_task_plan_generation_binding",
+            "task_id",
+            "generation",
+            "plan_id",
+            "plan_manifest_digest",
+            "contract_version",
+            "contract_digest",
+            unique=True,
+        ),
     )
 
     task_id: Mapped[str] = mapped_column(

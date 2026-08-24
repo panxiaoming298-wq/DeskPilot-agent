@@ -46,13 +46,14 @@ POST /api/v1/tasks/{task_id}:cancel
 .\.venv\Scripts\alembic.exe check
 ```
 
-第一版 migration 可初始化空库，也能接管早期数据库而不重建原有任务。当前 head 为 `0050_agent_graph_test_conditions`；阶段 76～102 已依次加入 Artifact export、Turn Route、PDF render evidence、多轮澄清、持久 Model Loop/Input、服务端 Workbench 推进、动态 Handoff/DAG、类型化 ResultRef/CapabilityInput、不可变 Replan generation lineage、服务器绑定固定测试节点、跨代 verified ResultRef 导入、图内 Patch/Approval proof 和测试结果条件边。
+第一版 migration 可初始化空库，也能接管早期数据库而不重建原有任务。阶段 111 的当前 head 为 `0051_turn_planning_offers`；阶段 76～102 已依次加入 Artifact export、Turn Route、PDF render evidence、多轮澄清、持久 Model Loop/Input、服务端 Workbench 推进、动态 Handoff/DAG、类型化 ResultRef/CapabilityInput、不可变 Replan generation lineage、服务器绑定固定测试节点、跨代 verified ResultRef 导入、图内 Patch/Approval proof 和测试结果条件边，阶段 111 再增加 Offer、Planner Run、Adjudication、Plan Binding 与 Route provenance。该 head 已通过阶段全量门禁。
 
 ## 阶段 76 Task Workbench 与精确导出 API
 
 ```text
 POST /api/v1/research-workbench/tasks
 GET  /api/v1/tasks/{task_id}/workbench
+POST /api/v1/tasks/{task_id}/workbench:interpret-turn
 POST /api/v1/tasks/{task_id}/workbench:replan
 GET  /api/v1/tasks/{task_id}/replans
 POST /api/v1/execution-runs/{run_id}:cancel
@@ -68,6 +69,8 @@ Workbench 投影组合精确 task 的 Conversation、Planning、Execution、Rese
 阶段 88 增加多轮澄清补全：缺少一个受支持参数时先返回 `needs_clarification`，下一条短回答通过源 Task、有限规则和 resolution digest 绑定为新 Route；读取和执行都会复核该证明。详见 [`doc/88-多轮澄清参数补全与Route证明.md`](../doc/88-多轮澄清参数补全与Route证明.md)。
 
 阶段 89 将 `web_researcher@1.1.0` 升级为固定两轮的受限 Model Loop：第一轮只能请求 Handoff 已冻结的 `research.read.v1` binding，第二轮只能提交候选结果。派发、决策和脱敏观察持久化；越界 binding、无进展、预算超限和证明漂移都 fail closed。详见 [`doc/89-受限持久Agent-Model-Loop最小闭环.md`](../doc/89-受限持久Agent-Model-Loop最小闭环.md)。
+
+阶段 111 保留 15 条确定性 Route 的 v1 digest 和模型零调用路径。规则未命中时，Workbench 可通过 `workbench:interpret-turn` 驱动独立 `TurnPlannerRuntime`：服务器预编译绑定 exact Contract/执行 Agent/Prompt/Provider/Capability/Policy/预算与 expected Plan 的 opaque Offer，LOCAL-only `builtin.turn_planner@1.0.0` 只能引用 `offer_key` 和持久用户消息中的原文参数。单步骤由服务器 trusted recipe 激活，1～8 步中的多步骤保存为 `MULTI_STEP_PLAN_DEFERRED`；失败保存证明且不自动重放。公开 Workbench 只返回脱敏状态/数量/digest 摘要，不暴露完整 Offer、模型 response、参数值或内部 Provider/Plan binding。代码、CI 与阶段 111 全量门禁均已完成，详见 [`doc/111-通用任务提案与Capability-Offer.md`](../doc/111-通用任务提案与Capability-Offer.md)。
 
 ## Task Contract 与 Executable Plan 只读 API
 
@@ -330,7 +333,9 @@ GET /api/v1/agents/{agent_id}/versions/{version}
 
 阶段 110 checkpoint 最终验证：后端 83 个测试文件 / 615 项，`603 passed + 12 skipped`、统一退出 0，耗时 2328.01 秒；Ruff 全仓、严格 mypy 249 个源码、frozen `uv` 同步、`pip check` 和 wheel Prompt 22/22 打包检查通过。Phase75 v15 为 11/11、false-success=0、unauthorized-effect=0，16 份不可变 baseline 的 SHA-256 比较前后完全一致；前端 22 个测试文件 / 154 项、type-check 和 production build 通过。Alembic current 且唯一 head 为 `0050_agent_graph_test_conditions`，default/fresh SQLite upgrade/check、`integrity_check=ok`、foreign-key 零违规。真实 PostgreSQL 11 项（专用 `deskpilot_test`，含固定容器重启）和临时 RabbitMQ 1 项通过，环境已恢复；Workflow YAML 与 diff whitespace 通过。
 
-下一实现方向改为阶段 111“模型驱动的通用任务提案 + 服务器 Capability Offer”。模型只输出无权限 proposal 和 offer key，服务端继续冻结 exact Agent/Contract/Prompt/Provider、Capability、预算、Workspace 与输出 Schema；现有确定性 Turn Router 保留为安全回退与回归基准。之后依次推进通用持久任务循环、安全编码 Profile、三任务/托盘后台、三角色 Calibration v3，以及独立 Edge Profile + Windows 记事本纵切。详见根目录 [`项目进度.md`](../项目进度.md)与 [`doc/111-116-通用多Agent与Edge记事本实施路线.md`](../doc/111-116-通用多Agent与Edge记事本实施路线.md)。
+阶段 111 最终验证：后端 87 个测试文件 / 653 项，`641 passed + 12 skipped`、统一退出 0，耗时 2540.26 秒；Ruff、严格 mypy 253 个源码、frozen `uv` 与 `pip check` 通过。Phase75 v16 为 11/11、false-success=0、unauthorized-effect=0，17 份 baseline SHA-256 前后不变；wheel Prompt 24/24。前端 22 文件 / 155 项、type-check/build 通过；Alembic 唯一 head `0051_turn_planning_offers`，default/fresh SQLite 无漂移。真实 PostgreSQL 11/11 与 RabbitMQ 1/1 通过并恢复/清理环境。
+
+下一实现方向为阶段 112 通用持久任务循环，之后依次推进安全编码 Profile、三任务/托盘后台、三角色 Calibration v3，以及独立 Edge Profile + Windows 记事本纵切。详见根目录 [`项目进度.md`](../项目进度.md)与 [`doc/111-116-通用多Agent与Edge记事本实施路线.md`](../doc/111-116-通用多Agent与Edge记事本实施路线.md)。
 
 ## 测试
 

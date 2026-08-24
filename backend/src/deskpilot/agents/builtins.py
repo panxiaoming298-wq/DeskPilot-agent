@@ -40,6 +40,7 @@ from deskpilot.domain.model_contracts import (
 )
 from deskpilot.domain.research import ResearchAgentDecision, ResearchLoopDecision
 from deskpilot.domain.tool_contracts import ToolRiskLevel
+from deskpilot.domain.turn_planning import TurnPlannerDecision, TurnPlannerInput
 
 
 class AgentReferenceInput(BaseModel):
@@ -76,6 +77,7 @@ def create_builtin_agent_registry(
     workspace_patch_planner_prompt = load_prompt_package(
         prompt_root, "workspace_patch_planner_loop.json"
     )
+    turn_planner_prompt = load_prompt_package(prompt_root, "turn_planner.json")
     synthesizer_prompt = load_prompt_package(prompt_root, "task_synthesizer.json")
     disk = tool_registry.resolve("computer.disk_usage", "1.0.0").contract
     synth_ref = AgentHandoffRef(agent_id="builtin.task_synthesizer", version="1.0.0")
@@ -95,6 +97,42 @@ def create_builtin_agent_registry(
     )
 
     registry = AgentRegistry(model_admissions)
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.turn_planner",
+                version="1.0.0",
+                kind=AgentKind.WORKER,
+                display_name="Turn Planner",
+                description=(
+                    "只从服务器预编译的 opaque Capability Offer 提出任务步骤；"
+                    "不能授予能力、权限或审批。"
+                ),
+                provides=("turn.plan.propose.v1",),
+                prompt=turn_planner_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(),
+                role=ModelRole.PLANNER,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=1,
+                    max_tool_calls=0,
+                    max_input_tokens=32_000,
+                    max_output_tokens=2_000,
+                    max_wall_seconds=60,
+                    max_retries=0,
+                    max_cost_micros=100_000,
+                ),
+                required_evidence=("server_capability_offer", "turn_planning_adjudication"),
+                input_model=TurnPlannerInput,
+                output_model=TurnPlannerDecision,
+                allowed_sources=("conversation_message", "server_capability_offer"),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=TurnPlannerInput,
+            output_model=TurnPlannerDecision,
+            prompt_package=turn_planner_prompt,
+        )
+    )
     registry.register(
         AgentRegistration(
             contract=_contract(
@@ -566,6 +604,7 @@ def _contract(
     require_citations: bool = False,
     rag_collections: tuple[str, ...] = (),
     output_model: type[BaseModel] = EvidenceAgentResult,
+    input_model: type[BaseModel] = AgentReferenceInput,
     allowed_sources: tuple[str, ...] = (
         "task_contract",
         "upstream_artifact",
@@ -592,7 +631,7 @@ def _contract(
             renderer_version=manifest.renderer_version,
             digest=prompt.digest,
         ),
-        input_schema=AgentReferenceInput.model_json_schema(),
+        input_schema=input_model.model_json_schema(),
         output_schema=output_model.model_json_schema(),
         tool_policy=tool_policy,
         handoff_policy=handoff,

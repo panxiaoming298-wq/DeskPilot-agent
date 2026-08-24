@@ -961,6 +961,7 @@ export interface LongTermMemoryExport extends LongTermMemoryPage {
 
 export type WorkbenchStage =
   | 'idle'
+  | 'interpreting'
   | 'planned'
   | 'researching'
   | 'awaiting_verification'
@@ -976,6 +977,7 @@ export type WorkbenchStage =
   | 'blocked'
 
 export type WorkbenchAction =
+  | 'interpret_turn'
   | 'activate_research_plan'
   | 'start_execution'
   | 'run_research'
@@ -1362,20 +1364,94 @@ export interface TurnRoute {
     | 'workspace_python_test'
     | 'workspace_node_test'
     | null
-  route_version: '1' | null
+  route_version: '1' | '2' | null
   route_manifest_digest: string | null
+  turn_planning_adjudication_id: string | null
+  turn_plan_binding_id: string | null
+  turn_planning_provenance_digest: string | null
   candidate_digest: string
   parameter_digest: string
   resolved_from_task_id: string | null
   resolution_rule: string | null
   resolution_digest: string | null
   reason_code: string
-  status: 'ready' | 'running' | 'needs_user_action' | 'succeeded' | 'failed' | 'not_applicable'
+  status:
+    | 'ready'
+    | 'running'
+    | 'waiting_user_input'
+    | 'needs_user_action'
+    | 'succeeded'
+    | 'failed'
+    | 'not_applicable'
   result_digest: string | null
   error_code: string | null
   revision: number
   created_at: string
   updated_at: string
+}
+
+export type TurnPlannerRunStatus =
+  | 'prepared'
+  | 'dispatching'
+  | 'succeeded'
+  | 'failed'
+  | 'outcome_unknown'
+  | 'cancelled'
+
+export interface TurnPlannerFailureProof {
+  schema_version: 'deskpilot.turn-planner-failure-proof.v1'
+  error_code:
+    | 'PLANNER_TIMEOUT'
+    | 'PLANNER_SCHEMA_REJECTED'
+    | 'PLANNER_UNKNOWN_OFFER'
+    | 'PLANNER_PROVIDER_UNAVAILABLE'
+    | 'PLANNER_BINDING_REJECTED'
+    | 'PLANNER_OUTCOME_UNKNOWN'
+    | 'PLANNER_CANCELLED'
+  detail_digest: string
+  retry_policy: 'never_automatic'
+  failure_digest: string
+}
+
+export interface TurnPlannerRunWorkbenchSummary {
+  schema_version: 'deskpilot.turn-planner-run-workbench-summary.v1'
+  status: TurnPlannerRunStatus
+  offer_count: number
+  offer_set_digest: string
+  request_digest: string
+  response_digest: string | null
+  failure: TurnPlannerFailureProof | null
+  revision: number
+  run_digest: string
+}
+
+export interface TurnPlannerAdjudicationWorkbenchSummary {
+  schema_version: 'deskpilot.turn-planner-adjudication-workbench-summary.v1'
+  outcome:
+    | 'single_step'
+    | 'multi_step_deferred'
+    | 'deterministic_fallback'
+    | 'needs_user_input'
+    | 'unsupported'
+  selected_offer_count: number
+  reason_code: string
+  adjudication_digest: string
+}
+
+export interface TurnPlanBindingWorkbenchSummary {
+  schema_version: 'deskpilot.turn-plan-binding-workbench-summary.v1'
+  status: 'bound' | 'multi_step_deferred' | 'not_applicable'
+  reason_code: string
+  binding_digest: string
+}
+
+export interface TurnPlanningWorkbenchRead {
+  schema_version: 'deskpilot.turn-planning-workbench-read.v1'
+  run: TurnPlannerRunWorkbenchSummary
+  adjudication: TurnPlannerAdjudicationWorkbenchSummary | null
+  binding: TurnPlanBindingWorkbenchSummary | null
+  revision: number
+  planning_digest: string
 }
 
 export interface ArtifactExport {
@@ -1603,6 +1679,7 @@ export interface TaskWorkbench {
     created_at: string
   }>
   route: TurnRoute | null
+  turn_planning: TurnPlanningWorkbenchRead | null
   planning: Record<string, unknown> | null
   contract: Record<string, unknown> | null
   plans: { plans: Array<Record<string, unknown>> }

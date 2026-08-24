@@ -6,6 +6,8 @@ import asyncio
 import hmac
 import json
 import tempfile
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -102,6 +104,17 @@ class Phase75EvaluationError(RuntimeError):
 
 class Phase75GateError(Phase75EvaluationError):
     code = "PHASE75_GATE_REJECTED"
+
+
+@asynccontextmanager
+async def _temporary_trial_database() -> AsyncIterator[Database]:
+    with tempfile.TemporaryDirectory(prefix="deskpilot-phase75-trial-") as directory:
+        root = Path(directory)
+        database = Database(f"sqlite+aiosqlite:///{(root / 'trial.db').as_posix()}")
+        try:
+            yield database
+        finally:
+            await database.dispose()
 
 
 def _phase75_hit(rank: int) -> SearchHit:
@@ -567,9 +580,7 @@ class Phase75ScenarioRunner:
                 }
 
     async def _runtime_scenario(self, case: Phase75Case) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="deskpilot-phase75-trial-") as directory:
-            root = Path(directory)
-            database = Database(f"sqlite+aiosqlite:///{(root / 'trial.db').as_posix()}")
+        async with _temporary_trial_database() as database:
             await database.migrate()
             tools, agents = _registries()
             compiler = PlanCompiler(
@@ -645,7 +656,19 @@ class Phase75ScenarioRunner:
                     fencing_token=claim.claim_fencing_token,
                 )
 
-            await asyncio.gather(submit(claim_a), submit(claim_b))
+            submit_outcomes = await asyncio.gather(
+                submit(claim_a), submit(claim_b), return_exceptions=True
+            )
+            submit_failure = next(
+                (
+                    outcome
+                    for outcome in submit_outcomes
+                    if isinstance(outcome, BaseException)
+                ),
+                None,
+            )
+            if submit_failure is not None:
+                raise submit_failure
             verified_count = 2
             if case.scenario == "runtime.partial_branch_failure":
                 verified_count = 1
@@ -703,7 +726,6 @@ class Phase75ScenarioRunner:
                 handoff_count = int(
                     await session.scalar(select(func.count()).select_from(AgentHandoffRecord)) or 0
                 )
-            await database.dispose()
         partial = case.scenario == "runtime.partial_branch_failure"
         duplicate_count = max(0, invocation_count - 2)
         acceptance = {

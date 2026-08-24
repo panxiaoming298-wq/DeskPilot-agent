@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0050_agent_graph_test_conditions"
+CURRENT_REVISION = "0051_turn_planning_offers"
 
 
 def _sync_url(path: Path) -> str:
@@ -144,6 +144,10 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
             "agent_task_graph_nodes",
             "agent_replans",
             "workspace_agent_results",
+            "turn_planning_offers",
+            "turn_planner_runs",
+            "turn_planner_adjudications",
+            "turn_plan_bindings",
         }.issubset(inspector.get_table_names())
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
@@ -870,7 +874,7 @@ def test_stage_102_graph_test_condition_migration_round_trips(tmp_path: Path) ->
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0050_agent_graph_test_conditions",
         target_revision="0049_agent_graph_patch_approvals",
         insert_statement="""
             INSERT INTO task_execution_edges (
@@ -2519,6 +2523,358 @@ def test_stage_98_agent_test_result_kind_migration_round_trips(tmp_path: Path) -
     assert "python_test" not in constraints["ck_workspace_agent_result_kind"]
     assert "node_test" not in constraints["ck_workspace_agent_result_kind"]
     assert revision == "0047_agent_replans"
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_111_turn_planning_migration_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-111-turn-planning-round-trip.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        tables = set(inspector.get_table_names())
+        route_columns = {
+            item["name"] for item in inspector.get_columns("turn_routes")
+        }
+        offer_columns = {
+            item["name"] for item in inspector.get_columns("turn_planning_offers")
+        }
+        offer_constraints = {
+            item["name"]
+            for item in inspector.get_check_constraints("turn_planning_offers")
+        }
+        run_columns = {
+            item["name"] for item in inspector.get_columns("turn_planner_runs")
+        }
+        run_indexes = {
+            item["name"] for item in inspector.get_indexes("turn_planner_runs")
+        }
+        run_unique_constraints = {
+            item["name"]
+            for item in inspector.get_unique_constraints("turn_planner_runs")
+        }
+        route_constraints = {
+            item["name"] for item in inspector.get_check_constraints("turn_routes")
+        }
+        route_foreign_keys = {
+            item["name"]: item for item in inspector.get_foreign_keys("turn_routes")
+        }
+        route_indexes = {
+            item["name"] for item in inspector.get_indexes("turn_routes")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {
+        "turn_planning_offers",
+        "turn_planner_runs",
+        "turn_planner_adjudications",
+        "turn_plan_bindings",
+    }.issubset(tables)
+    assert {
+        "turn_planner_run_id",
+        "turn_planning_reservation_digest",
+        "turn_planning_adjudication_id",
+        "turn_plan_binding_id",
+        "turn_plan_binding_digest",
+        "turn_planning_provenance_digest",
+    }.issubset(route_columns)
+    assert {
+        "execution_agents_manifest",
+        "execution_agents_digest",
+        "expected_plan_manifest",
+        "expected_plan_id",
+        "expected_plan_generation",
+        "expected_plan_manifest_digest",
+        "expected_plan_binding_snapshot_digest",
+    }.issubset(offer_columns)
+    assert {
+        "agent_id",
+        "agent_version",
+        "agent_contract_digest",
+        "prompt_package_digest",
+    }.isdisjoint(offer_columns)
+    assert "ck_turn_planning_offer_expected_plan" in offer_constraints
+    assert {
+        "revision",
+        "claim_owner_id",
+        "claim_fencing_token",
+        "claim_expires_at",
+        "request_dispatched_at",
+        "fallback_candidate_digest",
+        "reservation_digest",
+        "completed_at",
+        "updated_at",
+    }.issubset(run_columns)
+    assert {
+        "ix_turn_planner_runs_message",
+        "ix_turn_planner_runs_claim",
+    }.issubset(run_indexes)
+    assert "uq_turn_planner_run_reservation" in run_unique_constraints
+    assert {
+        "ck_turn_route_planner_reservation",
+        "ck_turn_route_planning_provenance",
+    }.issubset(route_constraints)
+    reservation_fk = route_foreign_keys["fk_turn_route_planner_reservation"]
+    assert reservation_fk["referred_table"] == "turn_planner_runs"
+    assert reservation_fk["options"].get("ondelete") == "RESTRICT"
+    assert "ix_turn_routes_planner_run" in route_indexes
+    assert revision == CURRENT_REVISION
+
+    common = {
+        "created_at": "2026-08-24 00:00:00+00:00",
+        "digest": "a" * 64,
+        "message_digest": "b" * 64,
+    }
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0050_agent_graph_test_conditions",
+        insert_statement="""
+            INSERT INTO turn_planning_offers (
+                offer_id, offer_key, task_id, user_message_id, user_message_digest,
+                contract_id, contract_version, contract_digest,
+                execution_agents_manifest, execution_agents_digest,
+                expected_plan_manifest, expected_plan_id, expected_plan_generation,
+                expected_plan_manifest_digest, expected_plan_binding_snapshot_digest,
+                capabilities_manifest, capabilities_digest,
+                provider_id, provider_model, provider_snapshot_digest,
+                recipe_id, recipe_version, recipe_digest,
+                budget_manifest, budget_digest,
+                parameter_schema_manifest, parameter_schema_digest,
+                policy_snapshot_digest, manifest, offer_digest, created_at
+            ) VALUES (
+                :row_id, :offer_key, :task_id, :message_id, :message_digest,
+                :contract_id, 1, :digest,
+                :empty_list, :digest,
+                :empty_object, :plan_id, 1, :digest, :digest,
+                :empty_list, :digest,
+                'local', 'test', :digest,
+                'research', '2', :digest,
+                :empty_object, :digest,
+                :empty_list, :digest,
+                :digest, :empty_object, :offer_digest, :created_at
+            )
+        """,
+        parameters={
+            **common,
+            "row_id": "tpo_" + "1" * 64,
+            "offer_key": "ofk_" + "2" * 64,
+            "task_id": "tsk_" + "3" * 32,
+            "message_id": "msg_" + "4" * 32,
+            "contract_id": "tc_" + "5" * 32,
+            "plan_id": "epl_" + "7" * 64,
+            "empty_list": "[]",
+            "empty_object": "{}",
+            "offer_digest": "6" * 64,
+        },
+        snapshot_statement="""
+            SELECT offer_id, offer_key, offer_digest
+            FROM turn_planning_offers WHERE offer_id = :row_id
+        """,
+        cleanup_statement="DELETE FROM turn_planning_offers WHERE offer_id = :row_id",
+    )
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0050_agent_graph_test_conditions",
+        insert_statement="""
+            INSERT INTO turn_planner_runs (
+                run_id, task_id, user_message_id, user_message_digest,
+                planner_agent_id, planner_agent_version, planner_contract_digest,
+                planner_prompt_package_digest, provider_id, provider_model,
+                provider_snapshot_digest, offer_set_digest, request_digest,
+                fallback_candidate_digest, reservation_digest,
+                status, revision, claim_owner_id, claim_fencing_token,
+                claim_expires_at, request_dispatched_at,
+                response_digest, failure_code, failure_digest, manifest, run_digest,
+                completed_at, created_at, updated_at
+            ) VALUES (
+                :row_id, :task_id, :message_id, :message_digest,
+                'builtin.turn_planner', '1.0.0', :digest,
+                :digest, 'local', 'test',
+                :digest, :digest, :digest,
+                :digest, :reservation_digest,
+                'prepared', 1, NULL, 0,
+                NULL, NULL,
+                NULL, NULL, NULL, :empty_object, :run_digest,
+                NULL, :created_at, :created_at
+            )
+        """,
+        parameters={
+            **common,
+            "row_id": "tpr_" + "1" * 64,
+            "task_id": "tsk_" + "3" * 32,
+            "message_id": "msg_" + "4" * 32,
+            "empty_object": "{}",
+            "reservation_digest": "8" * 64,
+            "run_digest": "7" * 64,
+        },
+        snapshot_statement="""
+            SELECT run_id, status, revision, claim_fencing_token, run_digest
+            FROM turn_planner_runs WHERE run_id = :row_id
+        """,
+        cleanup_statement="DELETE FROM turn_planner_runs WHERE run_id = :row_id",
+    )
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0050_agent_graph_test_conditions",
+        insert_statement="""
+            INSERT INTO turn_planner_adjudications (
+                adjudication_id, task_id, user_message_id, user_message_digest,
+                run_id, run_digest, outcome, selected_offer_count,
+                parameter_bindings_manifest, parameter_bindings_digest,
+                proposal_digest, reason_code, manifest,
+                adjudication_digest, created_at
+            ) VALUES (
+                :row_id, :task_id, :message_id, :message_digest,
+                :run_id, :run_digest, 'deterministic_fallback', 0,
+                NULL, NULL,
+                NULL, 'PLANNER_TIMEOUT', :empty_object,
+                :adjudication_digest, :created_at
+            )
+        """,
+        parameters={
+            **common,
+            "row_id": "tpa_" + "1" * 64,
+            "task_id": "tsk_" + "3" * 32,
+            "message_id": "msg_" + "4" * 32,
+            "run_id": "tpr_" + "5" * 64,
+            "run_digest": "6" * 64,
+            "empty_object": "{}",
+            "adjudication_digest": "8" * 64,
+        },
+        snapshot_statement="""
+            SELECT adjudication_id, run_id, outcome, adjudication_digest
+            FROM turn_planner_adjudications WHERE adjudication_id = :row_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM turn_planner_adjudications WHERE adjudication_id = :row_id"
+        ),
+    )
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0050_agent_graph_test_conditions",
+        insert_statement="""
+            INSERT INTO turn_plan_bindings (
+                binding_id, task_id, user_message_id, user_message_digest,
+                adjudication_id, adjudication_digest,
+                status, offer_id, offer_digest, plan_id, plan_generation,
+                plan_manifest_digest, contract_id, contract_version, contract_digest,
+                reason_code, manifest, binding_digest, created_at
+            ) VALUES (
+                :row_id, :task_id, :message_id, :message_digest,
+                :adjudication_id, :adjudication_digest,
+                'not_applicable', NULL, NULL, NULL, NULL,
+                NULL, NULL, NULL, NULL,
+                'PLANNER_TIMEOUT', :empty_object, :binding_digest, :created_at
+            )
+        """,
+        parameters={
+            **common,
+            "row_id": "tpb_" + "1" * 64,
+            "task_id": "tsk_" + "3" * 32,
+            "message_id": "msg_" + "4" * 32,
+            "adjudication_id": "tpa_" + "5" * 64,
+            "adjudication_digest": "6" * 64,
+            "empty_object": "{}",
+            "binding_digest": "9" * 64,
+        },
+        snapshot_statement="""
+            SELECT binding_id, adjudication_id, status, binding_digest
+            FROM turn_plan_bindings WHERE binding_id = :row_id
+        """,
+        cleanup_statement="DELETE FROM turn_plan_bindings WHERE binding_id = :row_id",
+    )
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0050_agent_graph_test_conditions",
+        insert_statement="""
+            INSERT INTO turn_routes (
+                task_id, conversation_id, user_message_id, decision,
+                route_id, route_version, route_manifest_digest,
+                candidate_digest, parameters, parameter_digest,
+                resolved_from_task_id, resolution_rule, resolution_digest,
+                turn_planner_run_id, turn_planning_reservation_digest,
+                turn_planning_adjudication_id, turn_plan_binding_id,
+                turn_plan_binding_digest,
+                turn_planning_provenance_digest,
+                reason_code, status, result_manifest, result_digest, error_code,
+                revision, created_at, updated_at
+            ) VALUES (
+                :row_id, :conversation_id, :message_id, 'unsupported',
+                NULL, NULL, NULL,
+                :digest, :empty_object, :digest,
+                NULL, NULL, NULL,
+                :run_id, :reservation_digest,
+                :adjudication_id, :binding_id, :binding_digest, :digest,
+                'PLANNER_TIMEOUT', 'not_applicable', NULL, NULL, NULL,
+                1, :created_at, :created_at
+            )
+        """,
+        parameters={
+            **common,
+            "row_id": "tsk_" + "1" * 32,
+            "conversation_id": "conv_" + "2" * 32,
+            "message_id": "msg_" + "3" * 32,
+            "run_id": "tpr_" + "7" * 64,
+            "reservation_digest": "8" * 64,
+            "adjudication_id": "tpa_" + "4" * 64,
+            "binding_id": "tpb_" + "5" * 64,
+            "binding_digest": "6" * 64,
+            "empty_object": "{}",
+        },
+        snapshot_statement="""
+            SELECT task_id, turn_planner_run_id, turn_planning_reservation_digest,
+                   turn_planning_adjudication_id,
+                   turn_plan_binding_id, turn_plan_binding_digest,
+                   turn_planning_provenance_digest
+            FROM turn_routes WHERE task_id = :row_id
+        """,
+        cleanup_statement="DELETE FROM turn_routes WHERE task_id = :row_id",
+    )
+
+    command.downgrade(config, "0050_agent_graph_test_conditions")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        tables = set(inspector.get_table_names())
+        route_columns = {
+            item["name"] for item in inspector.get_columns("turn_routes")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert not {
+        "turn_planning_offers",
+        "turn_planner_runs",
+        "turn_planner_adjudications",
+        "turn_plan_bindings",
+    } & tables
+    assert not {
+        "turn_planner_run_id",
+        "turn_planning_reservation_digest",
+        "turn_planning_adjudication_id",
+        "turn_plan_binding_id",
+        "turn_plan_binding_digest",
+        "turn_planning_provenance_digest",
+    } & route_columns
+    assert revision == "0050_agent_graph_test_conditions"
 
     command.upgrade(config, "head")
     command.check(config)

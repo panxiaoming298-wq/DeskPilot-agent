@@ -1,0 +1,8 @@
+{
+  "schema_version": "deskpilot.prompt-package.v1",
+  "package_id": "builtin.turn_planner",
+  "version": "1.0.0",
+  "renderer_version": 1,
+  "instruction_file": "turn_planner.txt",
+  "variables": []
+}

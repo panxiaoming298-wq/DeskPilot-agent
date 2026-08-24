@@ -54,6 +54,7 @@ const workbench = {
     { action: 'stop_execution', enabled: false, reason_code: 'EXECUTION_NOT_ACTIVE', explanation: '停止', effect_class: 'execution_control' },
   ],
   conversation: [{ message_id: 'msg_1', role: 'user', content: '生成可核验研究页', created_at: '2026-08-18T00:00:00Z' }],
+  turn_planning: null,
   planning: {}, contract: {}, plans: { plans: [] },
   executions: { runs: [{ run_id: `run_${'9'.repeat(64)}`, task_id: preview.task_id, status: 'succeeded', revision: 5, created_at: '2026-08-18T00:00:00Z', updated_at: '2026-08-18T00:00:01Z', invocations: [], model_turns: [
     { turn_id: `amt_${'1'.repeat(64)}`, turn_no: 1, status: 'succeeded', decision_kind: 'request_route', decision_digest: '2'.repeat(64), binding_id: `rbn_${'3'.repeat(64)}`, observation_digest: '4'.repeat(64) },
@@ -162,6 +163,104 @@ describe('ResearchArtifactWorkbench', () => {
     expect(wrapper.findAll('.run-card button')).toHaveLength(0)
   })
 
+  it('keeps polling a claimed interpretation and only renders minimized planner proof', async () => {
+    const unmatchedRoute = {
+      schema_version: 'deskpilot.turn-route.v1' as const,
+      task_id: preview.task_id,
+      conversation_id: `cnv_${'1'.repeat(64)}`,
+      user_message_id: `msg_${'2'.repeat(64)}`,
+      decision: 'unsupported' as const,
+      route_id: null,
+      route_version: null,
+      route_manifest_digest: null,
+      turn_planning_adjudication_id: null,
+      turn_plan_binding_id: null,
+      turn_planning_provenance_digest: null,
+      candidate_digest: '3'.repeat(64),
+      parameter_digest: '4'.repeat(64),
+      resolved_from_task_id: null,
+      resolution_rule: null,
+      resolution_digest: null,
+      reason_code: 'NO_ROUTE_MATCHED',
+      status: 'not_applicable' as const,
+      result_digest: null,
+      error_code: null,
+      revision: 1,
+      created_at: '2026-08-18T00:00:00Z',
+      updated_at: '2026-08-18T00:00:00Z',
+    }
+    const planning = {
+      schema_version: 'deskpilot.turn-planning-workbench-read.v1',
+      run: {
+        schema_version: 'deskpilot.turn-planner-run-workbench-summary.v1',
+        status: 'dispatching', request_digest: '7'.repeat(64), run_digest: '8'.repeat(64),
+        offer_count: 15, offer_set_digest: '6'.repeat(64), response_digest: null,
+        failure: null, revision: 2,
+      },
+      adjudication: null,
+      binding: null,
+      revision: 2,
+      planning_digest: '9'.repeat(64),
+    }
+    const interpreting = {
+      ...workbench,
+      stage: 'interpreting',
+      route: unmatchedRoute,
+      turn_planning: planning,
+      actions: [
+        { action: 'interpret_turn', enabled: false, reason_code: 'ACTION_CLAIMED', explanation: '后台解释中', effect_class: 'read_only' },
+        { action: 'stop_execution', enabled: true, reason_code: 'AVAILABLE', explanation: '停止', effect_class: 'execution_control' },
+      ],
+      delivery: null,
+      projection_digest: 'a'.repeat(64),
+    } as unknown as TaskWorkbench
+    const settled = {
+      ...interpreting,
+      stage: 'unsupported',
+      actions: [],
+      turn_planning: {
+        ...planning,
+        run: {
+          ...planning.run,
+          status: 'succeeded',
+          response_digest: 'b'.repeat(64),
+          run_digest: 'c'.repeat(64),
+          revision: 3,
+        },
+        adjudication: {
+          schema_version: 'deskpilot.turn-planner-adjudication-workbench-summary.v1',
+          outcome: 'unsupported', reason_code: 'PLANNER_UNSUPPORTED',
+          selected_offer_count: 0,
+          adjudication_digest: 'd'.repeat(64),
+        },
+        binding: {
+          schema_version: 'deskpilot.turn-plan-binding-workbench-summary.v1',
+          status: 'not_applicable', reason_code: 'PLANNER_UNSUPPORTED',
+          binding_digest: 'e'.repeat(64),
+        },
+        revision: 3,
+        planning_digest: 'f'.repeat(64),
+      },
+      projection_digest: '0'.repeat(64),
+    } as unknown as TaskWorkbench
+    vi.mocked(createConversationTurn).mockResolvedValue(interpreting)
+    vi.mocked(getTaskWorkbench).mockResolvedValueOnce(settled)
+
+    const wrapper = mount(ResearchArtifactWorkbench)
+    await wrapper.get('#agent-prompt').setValue('替我处理这份材料')
+    await wrapper.get('.agent-composer').trigger('submit')
+    await flushPromises()
+
+    expect(getTaskWorkbench).toHaveBeenCalledOnce()
+    expect(advanceTaskWorkbench).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('Turn Planner Proof')
+    expect(wrapper.text()).toContain('服务器裁决')
+    expect(wrapper.text()).toContain('PLANNER_UNSUPPORTED')
+    expect(wrapper.text()).toContain('不会自动重放')
+    expect(JSON.stringify(settled.turn_planning)).not.toContain('response_manifest')
+    expect(JSON.stringify(settled.turn_planning)).not.toContain('offers')
+  })
+
   it('shows clarification without inventing an executable run', async () => {
     const clarification = {
       ...workbench,
@@ -170,7 +269,9 @@ describe('ResearchArtifactWorkbench', () => {
         schema_version: 'deskpilot.turn-route.v1', task_id: preview.task_id,
         conversation_id: `cnv_${'1'.repeat(64)}`, user_message_id: `msg_${'2'.repeat(64)}`,
         decision: 'needs_clarification', route_id: null, route_version: null,
-        route_manifest_digest: null, candidate_digest: '3'.repeat(64), parameter_digest: '4'.repeat(64),
+        route_manifest_digest: null, turn_planning_adjudication_id: null,
+        turn_plan_binding_id: null, turn_planning_provenance_digest: null,
+        candidate_digest: '3'.repeat(64), parameter_digest: '4'.repeat(64),
         resolved_from_task_id: null, resolution_rule: null, resolution_digest: null,
         reason_code: 'AMBIGUOUS_GOAL', status: 'not_applicable', result_digest: null,
         error_code: null, revision: 1, created_at: '2026-08-18T00:00:00Z', updated_at: '2026-08-18T00:00:00Z',
@@ -196,7 +297,9 @@ describe('ResearchArtifactWorkbench', () => {
       schema_version: 'deskpilot.turn-route.v1' as const, task_id: preview.task_id,
       conversation_id: `cnv_${'1'.repeat(64)}`, user_message_id: `msg_${'2'.repeat(64)}`,
       decision: 'routed' as const, route_id: 'mcp_text_metrics' as const, route_version: '1' as const,
-      route_manifest_digest: '3'.repeat(64), candidate_digest: '4'.repeat(64), parameter_digest: '5'.repeat(64),
+      route_manifest_digest: '3'.repeat(64), turn_planning_adjudication_id: null,
+      turn_plan_binding_id: null, turn_planning_provenance_digest: null,
+      candidate_digest: '4'.repeat(64), parameter_digest: '5'.repeat(64),
       resolved_from_task_id: null, resolution_rule: null, resolution_digest: null,
       reason_code: 'ROUTE_MATCHED', status: 'needs_user_action' as const, result_digest: null,
       error_code: null, revision: 1, created_at: '2026-08-18T00:00:00Z', updated_at: '2026-08-18T00:00:00Z',
@@ -243,6 +346,8 @@ describe('ResearchArtifactWorkbench', () => {
       conversation_id: `cnv_${'1'.repeat(64)}`, user_message_id: `msg_${'2'.repeat(64)}`,
       decision: 'routed' as const, route_id: 'workspace_file_replace' as const,
       route_version: '1' as const, route_manifest_digest: '3'.repeat(64),
+      turn_planning_adjudication_id: null, turn_plan_binding_id: null,
+      turn_planning_provenance_digest: null,
       candidate_digest: '4'.repeat(64), parameter_digest: '5'.repeat(64),
       resolved_from_task_id: null, resolution_rule: null, resolution_digest: null,
       reason_code: 'WORKSPACE_FILE_REPLACE_MATCHED', status: 'needs_user_action' as const,
@@ -303,6 +408,8 @@ describe('ResearchArtifactWorkbench', () => {
       conversation_id: `cnv_${'1'.repeat(64)}`, user_message_id: `msg_${'2'.repeat(64)}`,
       decision: 'routed' as const, route_id: 'workspace_agent_patch_test' as const,
       route_version: '1' as const, route_manifest_digest: '3'.repeat(64),
+      turn_planning_adjudication_id: null, turn_plan_binding_id: null,
+      turn_planning_provenance_digest: null,
       candidate_digest: '4'.repeat(64), parameter_digest: '5'.repeat(64),
       resolved_from_task_id: null, resolution_rule: null, resolution_digest: null,
       reason_code: 'WORKSPACE_AGENT_PATCH_TEST_MATCHED', status: 'needs_user_action' as const,
@@ -355,6 +462,8 @@ describe('ResearchArtifactWorkbench', () => {
       conversation_id: `cnv_${'1'.repeat(64)}`, user_message_id: `msg_${'2'.repeat(64)}`,
       decision: 'routed' as const, route_id: 'workspace_patch_bundle' as const,
       route_version: '1' as const, route_manifest_digest: '3'.repeat(64),
+      turn_planning_adjudication_id: null, turn_plan_binding_id: null,
+      turn_planning_provenance_digest: null,
       candidate_digest: '4'.repeat(64), parameter_digest: '5'.repeat(64),
       resolved_from_task_id: null, resolution_rule: null, resolution_digest: null,
       reason_code: 'WORKSPACE_PATCH_BUNDLE_MATCHED', status: 'needs_user_action' as const,
@@ -452,6 +561,8 @@ describe('ResearchArtifactWorkbench', () => {
       conversation_id: `cnv_${'1'.repeat(64)}`, user_message_id: `msg_${'2'.repeat(64)}`,
       decision: 'routed' as const, route_id: 'workspace_file_create' as const,
       route_version: '1' as const, route_manifest_digest: '3'.repeat(64),
+      turn_planning_adjudication_id: null, turn_plan_binding_id: null,
+      turn_planning_provenance_digest: null,
       candidate_digest: '4'.repeat(64), parameter_digest: '5'.repeat(64),
       resolved_from_task_id: null, resolution_rule: null, resolution_digest: null,
       reason_code: 'WORKSPACE_FILE_CREATE_MATCHED', status: 'needs_user_action' as const,
@@ -532,7 +643,9 @@ describe('ResearchArtifactWorkbench', () => {
         schema_version: 'deskpilot.turn-route.v1', task_id: preview.task_id,
         conversation_id: `cnv_${'1'.repeat(64)}`, user_message_id: `msg_${'2'.repeat(64)}`,
         decision: 'routed', route_id: 'workspace_dynamic_patch_test', route_version: '1',
-        route_manifest_digest: '6'.repeat(64), candidate_digest: '7'.repeat(64),
+        route_manifest_digest: '6'.repeat(64), turn_planning_adjudication_id: null,
+        turn_plan_binding_id: null, turn_planning_provenance_digest: null,
+        candidate_digest: '7'.repeat(64),
         parameter_digest: '8'.repeat(64), resolved_from_task_id: null,
         resolution_rule: null, resolution_digest: null,
         reason_code: 'WORKSPACE_DYNAMIC_PATCH_TEST_MATCHED', status: 'needs_user_action',
@@ -714,7 +827,9 @@ describe('ResearchArtifactWorkbench', () => {
       schema_version: 'deskpilot.turn-route.v1' as const, task_id: preview.task_id,
       conversation_id: `cnv_${'1'.repeat(64)}`, user_message_id: `msg_${'2'.repeat(64)}`,
       decision: 'routed' as const, route_version: '1' as const,
-      route_manifest_digest: '3'.repeat(64), candidate_digest: '4'.repeat(64),
+      route_manifest_digest: '3'.repeat(64), turn_planning_adjudication_id: null,
+      turn_plan_binding_id: null, turn_planning_provenance_digest: null,
+      candidate_digest: '4'.repeat(64),
       parameter_digest: '5'.repeat(64), resolved_from_task_id: preview.task_id,
       resolution_rule: 'workspace_file_path', resolution_digest: '8'.repeat(64),
       status: 'succeeded' as const,
@@ -1020,6 +1135,9 @@ describe('ResearchArtifactWorkbench', () => {
         route_id: 'workspace_python_test' as const,
         route_version: '1' as const,
         route_manifest_digest: '3'.repeat(64),
+        turn_planning_adjudication_id: null,
+        turn_plan_binding_id: null,
+        turn_planning_provenance_digest: null,
         candidate_digest: '4'.repeat(64),
         parameter_digest: '5'.repeat(64),
         resolved_from_task_id: null,
@@ -1081,6 +1199,9 @@ describe('ResearchArtifactWorkbench', () => {
         route_id: 'workspace_node_test' as const,
         route_version: '1' as const,
         route_manifest_digest: '3'.repeat(64),
+        turn_planning_adjudication_id: null,
+        turn_plan_binding_id: null,
+        turn_planning_provenance_digest: null,
         candidate_digest: '4'.repeat(64),
         parameter_digest: '5'.repeat(64),
         resolved_from_task_id: null,

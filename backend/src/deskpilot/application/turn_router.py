@@ -8,7 +8,7 @@ from datetime import UTC, timedelta
 from typing import Any, Literal, Protocol, cast
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deskpilot.application.knowledge_base import (
@@ -20,6 +20,12 @@ from deskpilot.application.mcp_control_plane import (
     McpControlError,
     McpControlPlane,
     McpServerDisabledError,
+)
+from deskpilot.application.route_recipe_catalog import RouteRecipeCatalog
+from deskpilot.application.turn_planner_runtime import (
+    TurnPlannerProofRejectedError,
+    TurnPlannerRuntime,
+    turn_planning_provenance_digest,
 )
 from deskpilot.application.verified_edges import mark_verified_and_unlock
 from deskpilot.application.workspace_check_runtime import WorkspaceCheckError
@@ -39,6 +45,7 @@ from deskpilot.domain.task_workbench import (
     TurnRouteRead,
     TurnRouteStatus,
 )
+from deskpilot.domain.turn_planning import TurnPlanningRead
 from deskpilot.domain.workspace_files import (
     WorkspaceCheckRead,
     WorkspaceDirectoryRead,
@@ -60,6 +67,10 @@ from deskpilot.infrastructure.models import (
     ConversationMessageRecord,
     TaskExecutionNodeRecord,
     TaskExecutionRunRecord,
+    TurnPlanBindingRecord,
+    TurnPlannerAdjudicationRecord,
+    TurnPlannerRunRecord,
+    TurnPlanningOfferRecord,
     TurnRouteRecord,
     utc_now,
 )
@@ -83,6 +94,7 @@ RouteId = Literal[
     "workspace_node_test",
 ]
 CLASSIFIER_VERSION = "deskpilot.turn-router.rules.v5"
+MODEL_PLANNER_CLASSIFIER_VERSION = "deskpilot.turn-router.model-planner.v1"
 _LEGACY_CLASSIFIER_VERSIONS = (
     "deskpilot.turn-router.rules.v1",
     "deskpilot.turn-router.rules.v2",
@@ -1082,7 +1094,7 @@ class TurnRouter:
 
     @staticmethod
     def route_manifest_digest(route_id: RouteId) -> str:
-        return sha256_digest(_ROUTE_SPECS[route_id])
+        return RouteRecipeCatalog.digest(route_id, "1")
 
     async def create(
         self,
@@ -1166,6 +1178,11 @@ class TurnRouter:
             if message is None:
                 raise TurnRouteProofRejectedError("Turn Route user message is missing")
             self._validate_record(record, message.message_digest)
+            await self._validate_planning_provenance(
+                session,
+                record,
+                message.message_digest,
+            )
             await self._validate_resolution(session, record, message.message_digest)
             return self._read(record)
 
@@ -1191,6 +1208,11 @@ class TurnRouter:
             if message is None:
                 raise TurnRouteProofRejectedError("Turn Route user message is missing")
             self._validate_record(record, message.message_digest)
+            await self._validate_planning_provenance(
+                session,
+                record,
+                message.message_digest,
+            )
             await self._validate_resolution(session, record, message.message_digest)
             return self._validated_result(record)
 
@@ -1275,10 +1297,10 @@ class TurnRouter:
             if record is None:
                 raise TurnRouteConflictError("Workspace patch route is missing")
             parameters = cast(dict[str, str], record.parameters)
-        changes = self._decode_patch_changes(parameters["changes_json"])
         try:
+            changes = self._decode_patch_changes(parameters["changes_json"])
             preview = self._workspace_files.prepare_patch(task_id=task_id, changes=changes)
-        except WorkspaceFileError as error:
+        except (TurnRouteProofRejectedError, WorkspaceFileError) as error:
             await self._fail_preparation(task_id, error.code)
             raise TurnRouteConflictError(str(error)) from error
         async with self._database.session() as session, session.begin():
@@ -1712,6 +1734,11 @@ class TurnRouter:
             if message is None:
                 raise TurnRouteProofRejectedError("Route source message is missing")
             self._validate_record(route, message.message_digest)
+            await self._validate_planning_provenance(
+                session,
+                route,
+                message.message_digest,
+            )
             await self._validate_resolution(session, route, message.message_digest)
             if route.route_id != route_id:
                 raise TurnRouteProofRejectedError("Route identity changed before execution")
@@ -1877,13 +1904,24 @@ class TurnRouter:
 
     async def _fail_preparation(self, task_id: str, error_code: str) -> None:
         async with self._database.session() as session, session.begin():
-            route = await session.get(TurnRouteRecord, task_id)
-            if route is None:
-                return
-            route.status = TurnRouteStatus.FAILED.value
-            route.error_code = error_code
-            route.revision += 1
-            route.updated_at = utc_now()
+            # Elect the first preview failure as the stable terminal proof. This
+            # conditional update is idempotent on SQLite and PostgreSQL and must
+            # never overwrite a concurrently persisted preview or later Route.
+            await session.execute(
+                update(TurnRouteRecord)
+                .where(
+                    TurnRouteRecord.task_id == task_id,
+                    TurnRouteRecord.status == TurnRouteStatus.NEEDS_USER_ACTION.value,
+                    TurnRouteRecord.result_digest.is_(None),
+                    TurnRouteRecord.error_code.is_(None),
+                )
+                .values(
+                    status=TurnRouteStatus.FAILED.value,
+                    error_code=error_code,
+                    revision=TurnRouteRecord.revision + 1,
+                    updated_at=utc_now(),
+                )
+            )
 
     @staticmethod
     def _clear_claim(node: TaskExecutionNodeRecord) -> None:
@@ -1900,11 +1938,14 @@ class TurnRouter:
             raise TurnRouteProofRejectedError("Turn Route state is invalid") from error
         route_id = cast(RouteId | None, record.route_id)
         if decision is TurnRouteDecision.ROUTED:
-            if route_id not in _ROUTE_SPECS or record.route_version != "1":
+            if route_id not in _ROUTE_SPECS or record.route_version not in {"1", "2"}:
                 raise TurnRouteProofRejectedError("Turn Route binding is unknown")
-            expected_manifest = self.route_manifest_digest(route_id)
-            if record.route_manifest_digest != expected_manifest:
-                raise TurnRouteProofRejectedError("Turn Route manifest changed")
+            if record.route_version == "1":
+                expected_manifest = RouteRecipeCatalog.digest(route_id, "1")
+                if record.route_manifest_digest != expected_manifest:
+                    raise TurnRouteProofRejectedError("Turn Route manifest changed")
+            elif record.route_manifest_digest is None:
+                raise TurnRouteProofRejectedError("Model Route manifest is missing")
             if status is TurnRouteStatus.NOT_APPLICABLE:
                 raise TurnRouteProofRejectedError("Routed Turn cannot be non-executable")
         elif (
@@ -1917,6 +1958,44 @@ class TurnRouter:
             raise TurnRouteProofRejectedError("Non-routed Turn carries an execution binding")
         if record.parameter_digest != sha256_digest(record.parameters):
             raise TurnRouteProofRejectedError("Turn Route parameters changed")
+        reservation_values = (
+            record.turn_planner_run_id,
+            record.turn_planning_reservation_digest,
+        )
+        if any(value is not None for value in reservation_values) != all(
+            value is not None for value in reservation_values
+        ):
+            raise TurnRouteProofRejectedError(
+                "Turn Route Planner reservation anchor is incomplete"
+            )
+        if record.route_version == "1" and any(
+            value is not None for value in reservation_values
+        ):
+            raise TurnRouteProofRejectedError(
+                "A deterministic Route carries a Planner reservation anchor"
+            )
+        provenance_values = (
+            record.turn_planning_adjudication_id,
+            record.turn_plan_binding_id,
+            record.turn_plan_binding_digest,
+            record.turn_planning_provenance_digest,
+        )
+        if any(value is not None for value in provenance_values) != all(
+            value is not None for value in provenance_values
+        ):
+            raise TurnRouteProofRejectedError(
+                "Turn Route planning provenance binding is incomplete"
+            )
+        if record.route_version == "1" and any(value is not None for value in provenance_values):
+            raise TurnRouteProofRejectedError("A deterministic Route carries model provenance")
+        if record.route_version == "2" and not all(
+            value is not None for value in provenance_values
+        ):
+            raise TurnRouteProofRejectedError("A model Route lacks planning provenance")
+        if decision is not TurnRouteDecision.ROUTED and any(
+            value is not None for value in provenance_values
+        ):
+            raise TurnRouteProofRejectedError("A non-routed Turn carries model provenance")
         candidate_material = {
             "message_digest": message_digest,
             "decision": record.decision,
@@ -1924,9 +2003,14 @@ class TurnRouter:
             "parameters": record.parameters,
             "reason_code": record.reason_code,
         }
+        classifier_versions = (
+            (MODEL_PLANNER_CLASSIFIER_VERSION,)
+            if record.route_version == "2"
+            else (CLASSIFIER_VERSION, *_LEGACY_CLASSIFIER_VERSIONS)
+        )
         valid_candidate_digests = {
             sha256_digest({"classifier_version": version, **candidate_material})
-            for version in (CLASSIFIER_VERSION, *_LEGACY_CLASSIFIER_VERSIONS)
+            for version in classifier_versions
         }
         if record.candidate_digest not in valid_candidate_digests:
             raise TurnRouteProofRejectedError("Turn Route candidate changed")
@@ -1942,6 +2026,173 @@ class TurnRouter:
         if record.resolved_from_task_id is not None and decision is not TurnRouteDecision.ROUTED:
             raise TurnRouteProofRejectedError("Non-routed Turn carries a resolution binding")
         self._validated_result(record)
+
+    async def _validate_planning_provenance(
+        self,
+        session: AsyncSession,
+        record: TurnRouteRecord,
+        message_digest: str,
+    ) -> None:
+        if record.turn_planner_run_id is None:
+            orphan_run_id = await session.scalar(
+                select(TurnPlannerRunRecord.run_id).where(
+                    TurnPlannerRunRecord.task_id == record.task_id
+                )
+            )
+            if orphan_run_id is not None:
+                raise TurnRouteProofRejectedError(
+                    "Turn Planner Run lacks its stable Route anchor"
+                )
+            if record.route_version == "2":
+                raise TurnRouteProofRejectedError(
+                    "Model Route lacks its Planner reservation anchor"
+                )
+            return
+        run_record = await session.get(
+            TurnPlannerRunRecord,
+            record.turn_planner_run_id,
+        )
+        if run_record is None:
+            raise TurnRouteProofRejectedError(
+                "Turn Route Planner reservation is missing"
+            )
+        try:
+            anchored_run = TurnPlannerRuntime._run_from_record(run_record)
+        except TurnPlannerProofRejectedError as error:
+            raise TurnRouteProofRejectedError(
+                "Turn Route Planner reservation changed"
+            ) from error
+        if (
+            record.task_id != anchored_run.task_id
+            or record.user_message_id != anchored_run.user_message_id
+            or message_digest != anchored_run.user_message_digest
+            or record.turn_planning_reservation_digest
+            != anchored_run.reservation_digest
+            or (
+                record.route_version != "2"
+                and record.candidate_digest
+                != anchored_run.fallback_candidate_digest
+            )
+        ):
+            raise TurnRouteProofRejectedError(
+                "Turn Route Planner reservation binding changed"
+            )
+        if record.route_version != "2":
+            return
+        if (
+            record.turn_planning_adjudication_id is None
+            or record.turn_plan_binding_id is None
+            or record.turn_plan_binding_digest is None
+            or record.turn_planning_provenance_digest is None
+        ):
+            raise TurnRouteProofRejectedError("Model Route planning provenance is incomplete")
+        adjudication_record = await session.get(
+            TurnPlannerAdjudicationRecord,
+            record.turn_planning_adjudication_id,
+        )
+        binding_record = await session.get(
+            TurnPlanBindingRecord,
+            record.turn_plan_binding_id,
+        )
+        if adjudication_record is None or binding_record is None:
+            raise TurnRouteProofRejectedError("Model Route planning evidence is missing")
+        if adjudication_record.run_id != anchored_run.run_id:
+            raise TurnRouteProofRejectedError(
+                "Model Route adjudication changed Planner reservation"
+            )
+        try:
+            run = anchored_run
+            adjudication = TurnPlannerRuntime._adjudication_from_record(adjudication_record)
+            binding = TurnPlannerRuntime._binding_from_record(binding_record)
+            offer_records = tuple(
+                (
+                    await session.scalars(
+                        select(TurnPlanningOfferRecord).where(
+                            TurnPlanningOfferRecord.offer_id.in_(
+                                tuple(item.offer_id for item in run.offers)
+                            )
+                        )
+                    )
+                ).all()
+            )
+            offers_by_id = {
+                item.offer_id: TurnPlannerRuntime._offer_from_record(item) for item in offer_records
+            }
+            offers = tuple(offers_by_id[item.offer_id] for item in run.offers)
+            planning = TurnPlanningRead.build(
+                offers=offers,
+                run=run,
+                adjudication=adjudication,
+                binding=binding,
+            )
+            bound = TurnPlannerRuntime.bound_route(planning)
+        except (
+            KeyError,
+            ValidationError,
+            TurnPlannerProofRejectedError,
+        ) as error:
+            raise TurnRouteProofRejectedError("Model Route planning proof changed") from error
+        if (
+            bound is None
+            or binding.status != "bound"
+            or binding.offer is None
+            or binding.plan is None
+            or adjudication.outcome != "single_step"
+            or adjudication.proposal_digest is None
+            or adjudication.parameter_bindings_digest is None
+        ):
+            raise TurnRouteProofRejectedError(
+                "Model Route does not have a bound single-step adjudication"
+            )
+        offer = next(
+            (
+                item
+                for item in offers
+                if item.offer_id == binding.offer.offer_id
+                and item.offer_digest == binding.offer.offer_digest
+            ),
+            None,
+        )
+        if offer is None:
+            raise TurnRouteProofRejectedError("Model Route bound Offer is missing")
+        if (
+            record.user_message_id != run.user_message_id
+            or message_digest != run.user_message_digest
+            or record.turn_planning_adjudication_id != adjudication.adjudication_id
+            or record.turn_plan_binding_id != binding.binding_id
+            or record.turn_plan_binding_digest != binding.binding_digest
+            or record.route_id != bound.route_id
+            or record.route_version != bound.route_version
+            or record.route_manifest_digest != bound.route_manifest_digest
+            or record.parameters != bound.parameters
+            or record.parameter_digest != sha256_digest(bound.parameters)
+            or record.candidate_digest != bound.candidate_digest
+            or record.reason_code != bound.reason_code
+        ):
+            raise TurnRouteProofRejectedError("Model Route binding changed after adjudication")
+        expected_provenance = turn_planning_provenance_digest(
+            task_id=run.task_id,
+            user_message_id=run.user_message_id,
+            user_message_digest=run.user_message_digest,
+            deterministic_candidate_digest=run.fallback_candidate_digest,
+            planner_run_id=run.run_id,
+            planner_run_digest=run.run_digest,
+            adjudication_id=adjudication.adjudication_id,
+            adjudication_digest=adjudication.adjudication_digest,
+            binding_id=binding.binding_id,
+            binding_digest=binding.binding_digest,
+            offer_id=offer.offer_id,
+            offer_digest=offer.offer_digest,
+            recipe_digest=offer.trusted_recipe.route_manifest_digest,
+            parameter_bindings_digest=adjudication.parameter_bindings_digest,
+            contract_digest=offer.task_contract.digest,
+            plan_id=binding.plan.plan_id,
+            plan_manifest_digest=binding.plan.plan_manifest_digest,
+            model_candidate_digest=adjudication.proposal_digest,
+            candidate_digest=bound.candidate_digest,
+        )
+        if record.turn_planning_provenance_digest != expected_provenance:
+            raise TurnRouteProofRejectedError("Model Route full-lineage provenance changed")
 
     async def _validate_resolution(
         self,
@@ -1963,6 +2214,11 @@ class TurnRouter:
             if source_message is None:
                 raise TurnRouteProofRejectedError("Clarification source message is missing")
             self._validate_record(source, source_message.message_digest)
+            await self._validate_planning_provenance(
+                session,
+                source,
+                source_message.message_digest,
+            )
             if (
                 source.conversation_id != current.conversation_id
                 or not self._is_resolution_source(
@@ -2163,9 +2419,7 @@ class TurnRouter:
             if record.route_id == "workspace_dynamic_patch_test":
                 schema_version = record.result_manifest.get("schema_version")
                 if schema_version == "deskpilot.workspace-patch-preview.v1":
-                    dynamic_preview = WorkspacePatchPreview.model_validate(
-                        record.result_manifest
-                    )
+                    dynamic_preview = WorkspacePatchPreview.model_validate(record.result_manifest)
                     if record.result_digest != dynamic_preview.confirmation_digest:
                         raise TurnRouteProofRejectedError("Dynamic Patch approval proof changed")
                     return (
@@ -2247,13 +2501,16 @@ class TurnRouter:
             user_message_id=record.user_message_id,
             decision=TurnRouteDecision(record.decision),
             route_id=cast(RouteId | None, record.route_id),
-            route_version=cast(Literal["1"] | None, record.route_version),
+            route_version=cast(Literal["1", "2"] | None, record.route_version),
             route_manifest_digest=record.route_manifest_digest,
             candidate_digest=record.candidate_digest,
             parameter_digest=record.parameter_digest,
             resolved_from_task_id=record.resolved_from_task_id,
             resolution_rule=record.resolution_rule,
             resolution_digest=record.resolution_digest,
+            turn_planning_adjudication_id=record.turn_planning_adjudication_id,
+            turn_plan_binding_id=record.turn_plan_binding_id,
+            turn_planning_provenance_digest=(record.turn_planning_provenance_digest),
             reason_code=record.reason_code,
             status=TurnRouteStatus(record.status),
             result_digest=record.result_digest,

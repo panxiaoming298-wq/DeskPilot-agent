@@ -32,6 +32,7 @@ from deskpilot.domain.task_plans import (
     PlanningStateRead,
     TaskContractVersionRead,
 )
+from deskpilot.domain.turn_planning import TurnPlanningWorkbenchRead
 from deskpilot.domain.workspace_files import (
     WorkspaceCheckRead,
     WorkspaceDirectoryRead,
@@ -84,6 +85,7 @@ def artifact_export_receipt_digest(
 
 class WorkbenchStage(StrEnum):
     IDLE = "idle"
+    INTERPRETING = "interpreting"
     PLANNED = "planned"
     RESEARCHING = "researching"
     AWAITING_VERIFICATION = "awaiting_verification"
@@ -100,6 +102,7 @@ class WorkbenchStage(StrEnum):
 
 
 class WorkbenchAction(StrEnum):
+    INTERPRET_TURN = "interpret_turn"
     ACTIVATE_RESEARCH_PLAN = "activate_research_plan"
     START_EXECUTION = "start_execution"
     RUN_RESEARCH = "run_research"
@@ -159,13 +162,25 @@ class TurnRouteRead(BaseModel):
         ]
         | None
     )
-    route_version: Literal["1"] | None
+    route_version: Literal["1", "2"] | None
     route_manifest_digest: str | None = Field(default=None, pattern=DIGEST_PATTERN)
     candidate_digest: str = Field(pattern=DIGEST_PATTERN)
     parameter_digest: str = Field(pattern=DIGEST_PATTERN)
     resolved_from_task_id: str | None = Field(default=None, pattern=TASK_ID_PATTERN)
     resolution_rule: str | None = Field(default=None, min_length=1, max_length=64)
     resolution_digest: str | None = Field(default=None, pattern=DIGEST_PATTERN)
+    turn_planning_adjudication_id: str | None = Field(
+        default=None,
+        pattern=r"^tpa_[0-9a-f]{64}$",
+    )
+    turn_plan_binding_id: str | None = Field(
+        default=None,
+        pattern=r"^tpb_[0-9a-f]{64}$",
+    )
+    turn_planning_provenance_digest: str | None = Field(
+        default=None,
+        pattern=DIGEST_PATTERN,
+    )
     reason_code: str
     status: TurnRouteStatus
     result_digest: str | None = Field(default=None, pattern=DIGEST_PATTERN)
@@ -185,6 +200,19 @@ class TurnRouteRead(BaseModel):
             raise ValueError("Turn Route resolution binding must be complete")
         if self.resolved_from_task_id is not None and self.decision is not TurnRouteDecision.ROUTED:
             raise ValueError("Only routed Turns can resolve a clarification")
+        planning_values = (
+            self.turn_planning_adjudication_id,
+            self.turn_plan_binding_id,
+            self.turn_planning_provenance_digest,
+        )
+        if any(value is not None for value in planning_values) != all(
+            value is not None for value in planning_values
+        ):
+            raise ValueError("Turn Route planning provenance binding must be complete")
+        if self.turn_planning_adjudication_id is not None and (
+            self.decision is not TurnRouteDecision.ROUTED or self.route_version != "2"
+        ):
+            raise ValueError("Only a routed v2 Turn can carry planning provenance")
         return self
 
 
@@ -282,6 +310,7 @@ class TaskWorkbenchRead(BaseModel):
     actions: tuple[WorkbenchActionRead, ...]
     conversation: tuple[ConversationMessageRead, ...]
     route: TurnRouteRead | None
+    turn_planning: TurnPlanningWorkbenchRead | None
     planning: PlanningStateRead | None
     contract: TaskContractVersionRead | None
     plans: ExecutablePlanPage

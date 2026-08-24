@@ -1,4 +1,4 @@
-name: Phase 110 checkpoint gate
+name: Phase 111 turn planner gate
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  backend-checkpoint-gate:
+  backend-turn-planner-gate:
     runs-on: windows-latest
     timeout-minutes: 300
     defaults:
@@ -38,18 +38,18 @@ jobs:
           uv run ruff check src tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run mypy
-      - name: Verify the single Alembic head, checkpoint lineage, and schema drift
+      - name: Verify the single Alembic head, Phase 111 lineage, and schema drift
         run: |
           New-Item -ItemType Directory -Force data | Out-Null
-          # This workflow remains active after stage 110. Require one current head and
-          # prove that the accepted 0050 checkpoint is still in its migration lineage.
-          $headOutput = uv run python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; script=ScriptDirectory.from_config(Config('alembic.ini')); heads=script.get_heads(); assert len(heads) == 1, f'expected one Alembic head, got {heads}'; head=heads[0]; lineage={item.revision for item in script.iterate_revisions(head, 'base', inclusive=True)}; assert '0050_agent_graph_test_conditions' in lineage, f'current head {head} does not descend from the stage-110 checkpoint'; print(head)"
+          # Keep this gate reusable in later stages: the current tree may advance beyond
+          # 0051, but it must retain one head and the accepted Phase 111 migration.
+          $headOutput = uv run python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; script=ScriptDirectory.from_config(Config('alembic.ini')); heads=script.get_heads(); assert len(heads) == 1, f'expected one Alembic head, got {heads}'; head=heads[0]; lineage={item.revision for item in script.iterate_revisions(head, 'base', inclusive=True)}; assert '0051_turn_planning_offers' in lineage, f'current head {head} does not descend from Phase 111'; print(head)"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $currentHead = ($headOutput | Select-Object -Last 1).Trim()
           if ($currentHead -notmatch '^[0-9]{4}_[a-z0-9_]+$') {
             throw "Alembic returned an invalid current head: $currentHead"
           }
-          Write-Output "Alembic head: $currentHead (contains stage-110 checkpoint)"
+          Write-Output "Alembic head: $currentHead (contains Phase 111)"
           uv run alembic upgrade head
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run alembic current
@@ -75,7 +75,7 @@ jobs:
           $missingBaselines = @($requiredBaselines | Where-Object { $_ -notin $baselineNames })
           if ($missingBaselines.Count -ne 0) {
             $missingBaselines | Write-Error
-            throw "The stage-110 immutable baseline set is incomplete"
+            throw "The stage-111 immutable baseline set is incomplete"
           }
 
           uv run python -m deskpilot.evaluation_gate compare
@@ -91,7 +91,7 @@ jobs:
               }
           )
           if ($baselineBefore.Count -lt 17 -or $baselineAfter.Count -lt 17) {
-            throw "The stage-110 immutable evaluation baseline floor is incomplete"
+            throw "The stage-111 immutable evaluation baseline floor is incomplete"
           }
           $baselineChanges = @(Compare-Object $baselineBefore $baselineAfter)
           if ($baselineChanges.Count -ne 0) {
@@ -100,13 +100,11 @@ jobs:
           }
 
           git diff --exit-code -- tests/baselines/evaluations
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-          $untrackedBaselines = @(git ls-files --others --exclude-standard -- tests/baselines/evaluations)
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $untrackedBaselines = @(
+            git ls-files --others --exclude-standard -- tests/baselines/evaluations
+          )
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($untrackedBaselines.Count -ne 0) {
             $untrackedBaselines | Write-Error
             throw "Evaluation compare created untracked baseline files"
@@ -115,7 +113,14 @@ jobs:
         run: |
           uv build --wheel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          uv run python -c "from pathlib import Path; import zipfile; source=Path('src/deskpilot/agents/prompts'); expected={f'deskpilot/agents/prompts/{path.name}' for path in source.iterdir() if path.is_file() and path.suffix in {'.json', '.txt'}}; stems={'computer_observer','knowledge_researcher','task_synthesizer','web_researcher','web_researcher_loop','workspace_coordinator_loop','workspace_dynamic_coordinator_loop','workspace_patch_planner_loop','workspace_reader_loop','workspace_reader_loop_v2','workspace_tester_loop'}; required={f'deskpilot/agents/prompts/{stem}.{suffix}' for stem in stems for suffix in ('json','txt')}; absent=sorted(required - expected); assert not absent, f'stage-110 Agent Prompt set is incomplete: {absent}'; wheels=sorted(Path('dist').glob('*.whl'), key=lambda path: path.stat().st_mtime_ns); assert wheels, 'wheel was not built'; names=set(zipfile.ZipFile(wheels[-1]).namelist()); missing=sorted(expected - names); assert not missing, f'missing Agent Prompt resources: {missing}'; print(f'verified {len(expected)} Agent Prompt resources in {wheels[-1].name}')"
+          uv run python -c "from pathlib import Path; import zipfile; source=Path('src/deskpilot/agents/prompts'); expected={f'deskpilot/agents/prompts/{path.name}' for path in source.iterdir() if path.is_file() and path.suffix in {'.json', '.txt'}}; stems={'computer_observer','knowledge_researcher','task_synthesizer','turn_planner','web_researcher','web_researcher_loop','workspace_coordinator_loop','workspace_dynamic_coordinator_loop','workspace_patch_planner_loop','workspace_reader_loop','workspace_reader_loop_v2','workspace_tester_loop'}; required={f'deskpilot/agents/prompts/{stem}.{suffix}' for stem in stems for suffix in ('json','txt')}; absent=sorted(required - expected); assert not absent, f'stage-111 Agent Prompt set is incomplete: {absent}'; wheels=sorted(Path('dist').glob('*.whl'), key=lambda path: path.stat().st_mtime_ns); assert wheels, 'wheel was not built'; names=set(zipfile.ZipFile(wheels[-1]).namelist()); missing=sorted(expected - names); assert not missing, f'missing Agent Prompt resources: {missing}'; print(f'verified {len(expected)} Agent Prompt resources in {wheels[-1].name}')"
+      - name: Run Phase 111 focused tests
+        run: |
+          uv run pytest `
+            tests/test_turn_route_recipe_catalog.py `
+            tests/test_turn_planning_persistence.py `
+            tests/test_turn_planner_runtime.py `
+            tests/test_phase111_turn_planner_workbench.py
       - name: Run the default backend suite
         # Dedicated PostgreSQL and RabbitMQ tests require explicit local test services and
         # opt-in environment variables. The default suite reports them as skipped here;
@@ -163,8 +168,8 @@ jobs:
           )
           rabbitmq_cases, rabbitmq_skips = junit_cases("pytest-rabbitmq-integration.xml")
 
-          assert len(default_cases) >= 615, (
-              f"default suite dropped below the stage-110 floor of 615 tests; "
+          assert len(default_cases) == 653, (
+              f"stage-111 default suite must contain exactly 653 tests; "
               f"got {len(default_cases)}"
           )
           assert len(default_skips) == 12, (
@@ -193,7 +198,13 @@ jobs:
           assert expected_skips.issubset(default_cases), (
               "marker-derived skip allowlist is not present in the default suite"
           )
-          print("Verified exactly 11 PostgreSQL and 1 RabbitMQ integration skips")
+          assert len(default_cases - default_skips) == 641, (
+              "stage-111 default suite must contain exactly 641 non-skipped tests; "
+              f"got {len(default_cases - default_skips)}"
+          )
+          print(
+              "Verified exactly 653 backend tests: 641 passed and 12 external-service skips"
+          )
           '@
           $skipValidator | uv run python -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -216,7 +227,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git diff --check
 
-  frontend-checkpoint-gate:
+  frontend-turn-planner-gate:
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -244,9 +255,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
           $fileCount = @($report.testResults).Count
-          if ($fileCount -lt 22 -or [int]$report.numTotalTests -lt 154) {
+          if ($fileCount -ne 22 -or [int]$report.numTotalTests -ne 155) {
             throw (
-              "Frontend suite dropped below the stage-110 floor: " +
+              "Stage-111 frontend suite must contain exactly 22 files / 155 tests: " +
               "files=$fileCount tests=$($report.numTotalTests)"
             )
           }
@@ -258,7 +269,7 @@ jobs:
             throw "Frontend Vitest JSON report contains failed or non-passing tests"
           }
           Write-Output (
-            "Verified frontend floor: files=$fileCount tests=$($report.numTotalTests)"
+            "Verified stage-111 frontend suite: files=$fileCount tests=$($report.numTotalTests)"
           )
       - name: Run frontend type check
         run: pnpm type-check

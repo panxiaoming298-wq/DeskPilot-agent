@@ -64,6 +64,11 @@ from deskpilot.application.plan_compiler import (
 )
 from deskpilot.application.research_runtime import ResearchRuntime, ResearchRuntimeError
 from deskpilot.application.task_service import TaskNotFoundError, TaskService
+from deskpilot.application.turn_planner_runtime import (
+    BoundTurnRoute,
+    TurnPlannerRuntime,
+    TurnPlannerRuntimeError,
+)
 from deskpilot.application.turn_router import (
     FollowupResolution,
     RouteCandidate,
@@ -123,6 +128,7 @@ from deskpilot.domain.task_workbench import (
     WorkbenchActionRead,
     WorkbenchStage,
 )
+from deskpilot.domain.turn_planning import TurnPlanningRead, TurnPlanningWorkbenchRead
 from deskpilot.domain.workspace_files import (
     WorkspaceDirectoryRead,
     WorkspaceEditReceipt,
@@ -176,6 +182,7 @@ class TaskWorkbenchService:
         artifacts: ArtifactDeliveryRuntime,
         exports: ArtifactExportRuntime,
         router: TurnRouter,
+        turn_planner: TurnPlannerRuntime | None = None,
     ) -> None:
         self._database = database
         self._tasks = tasks
@@ -189,6 +196,7 @@ class TaskWorkbenchService:
         self._artifacts = artifacts
         self._exports = exports
         self._router = router
+        self._turn_planner = turn_planner
         self._auto_advance: WorkbenchAutoAdvancePort | None = None
 
     def bind_auto_advance(self, auto_advance: WorkbenchAutoAdvancePort) -> None:
@@ -196,11 +204,22 @@ class TaskWorkbenchService:
             raise RuntimeError("Task Workbench auto-advance runtime is already bound")
         self._auto_advance = auto_advance
 
+    async def turn_planner_recoverable_task_ids(
+        self,
+        *,
+        limit: int = 1_000,
+    ) -> tuple[str, ...]:
+        if self._turn_planner is None:
+            return ()
+        return await self._turn_planner.recoverable_task_ids(limit=limit)
+
     @staticmethod
     def automatic_action(workbench: TaskWorkbenchRead) -> WorkbenchAction | None:
         """Return only an action the server may run without fresh user authority."""
 
         allowed = {
+            WorkbenchAction.INTERPRET_TURN,
+            WorkbenchAction.START_EXECUTION,
             WorkbenchAction.RUN_RESEARCH,
             WorkbenchAction.VERIFY_CLAIMS,
             WorkbenchAction.BUILD_ARTIFACT,
@@ -251,6 +270,18 @@ class TaskWorkbenchService:
         self, task_id: str, command: ContinueConversationTurn
     ) -> TaskWorkbenchRead:
         previous = await self.get(task_id)
+        if previous.turn_planning is not None and previous.turn_planning.run.status in {
+            "prepared",
+            "dispatching",
+        }:
+            if self._auto_advance is not None:
+                await self._auto_advance.cancel(previous.task.task_id)
+            if self._turn_planner is not None:
+                await self._turn_planner.cancel(previous.task.task_id)
+            await self._add_assistant_message(
+                previous.task.task_id,
+                "收到新的任务要求。我已封存旧解释租约；迟到的模型结果不能再绑定路线。",
+            )
         conversation_id = previous.task.conversation_id
         if conversation_id is None:
             raise TaskWorkbenchConflictError("Task has no conversation to continue")
@@ -335,6 +366,7 @@ class TaskWorkbenchService:
         resolution: FollowupResolution | None = None,
     ) -> TaskWorkbenchRead:
         candidate = candidate or self._router.classify(goal)
+        rules_routed = candidate.decision is TurnRouteDecision.ROUTED
         if candidate.route_id == "research_to_html" and not self._research_enabled():
             candidate = RouteCandidate(
                 decision=TurnRouteDecision.UNSUPPORTED,
@@ -365,19 +397,21 @@ class TaskWorkbenchService:
             "workspace_patch_bundle",
             "workspace_agent_patch_test",
             "workspace_dynamic_patch_test",
-        } and not (
-            self._router.workspace_patch_enabled
-        ):
+        } and not (self._router.workspace_patch_enabled):
             candidate = RouteCandidate(
                 decision=TurnRouteDecision.UNSUPPORTED,
                 route_id=None,
                 parameters={},
                 reason_code="WORKSPACE_RUNTIME_DISABLED",
             )
-        if candidate.route_id in {
-            "workspace_agent_patch_test",
-            "workspace_dynamic_patch_test",
-        } and self._workspace_agents is None:
+        if (
+            candidate.route_id
+            in {
+                "workspace_agent_patch_test",
+                "workspace_dynamic_patch_test",
+            }
+            and self._workspace_agents is None
+        ):
             candidate = RouteCandidate(
                 decision=TurnRouteDecision.UNSUPPORTED,
                 route_id=None,
@@ -501,7 +535,7 @@ class TaskWorkbenchService:
             status = TurnRouteStatus.NEEDS_USER_ACTION
         else:
             status = TurnRouteStatus.READY
-        await self._router.create(
+        fallback_route = await self._router.create(
             task_id=task.task_id,
             conversation_id=conversation_id,
             user_message_id=user_message.message_id,
@@ -510,6 +544,20 @@ class TaskWorkbenchService:
             status=status,
             resolution=resolution,
         )
+        interpreting = False
+        if not rules_routed and self._turn_planner is not None and self._turn_planner.enabled:
+            try:
+                await self._turn_planner.prepare(
+                    task.task_id,
+                    user_message.message_id,
+                    fallback_route,
+                    eligible_variant_keys=self._turn_planner_variant_keys(),
+                )
+                interpreting = True
+            except TurnPlannerRuntimeError:
+                # Preparation happens before dispatch. If no safe local Offer can
+                # be reserved, preserve the exact deterministic fallback.
+                interpreting = False
         preparation_error: str | None = None
         if candidate.route_id == "workspace_file_replace":
             try:
@@ -526,7 +574,11 @@ class TaskWorkbenchService:
                 await self._router.prepare_workspace_path_operation(task.task_id)
             except TurnRouterError as error:
                 preparation_error = str(error)
-        if candidate.decision is TurnRouteDecision.ROUTED and preparation_error is None:
+        if (
+            not interpreting
+            and candidate.decision is TurnRouteDecision.ROUTED
+            and preparation_error is None
+        ):
             await self._activate_route(task.task_id, candidate.route_id, candidate.parameters)
             await self._execution.start(task.task_id)
         await self._add_assistant_message(
@@ -534,7 +586,12 @@ class TaskWorkbenchService:
             (
                 f"工作区写入预览被拒绝：{preparation_error}。文件没有发生变化。"
                 if preparation_error is not None
-                else self._route_acceptance_message(candidate, status)
+                else (
+                    "确定性规则未命中。我已持久化本地 Capability Offer，正在进行一次"
+                    "不可重放的任务解释；模型只能引用 opaque offer_key，不能授予权限。"
+                    if interpreting
+                    else self._route_acceptance_message(candidate, status)
+                )
             ),
         )
         return await self.get(task.task_id)
@@ -579,10 +636,144 @@ class TaskWorkbenchService:
         )
         return await self.get(task.task_id)
 
+    async def interpret_turn(self, task_id: str) -> TaskWorkbenchRead:
+        """Run or recover the one-shot local interpretation for an unrouted Turn."""
+
+        if self._turn_planner is None:
+            raise TaskWorkbenchConflictError("Turn Planner runtime is unavailable")
+        before = await self.get(task_id)
+        action_enabled = any(
+            item.action is WorkbenchAction.INTERPRET_TURN and item.enabled
+            for item in before.actions
+        )
+        if not action_enabled:
+            recoverable = task_id in await self._turn_planner.recoverable_task_ids(
+                limit=1_000
+            )
+            crash_window = before.turn_planning is None or (
+                before.turn_planning.run.status == "dispatching"
+            )
+            if not recoverable or not crash_window:
+                return before
+        try:
+            planning = await self._turn_planner.interpret_turn(task_id)
+        except TurnPlannerRuntimeError as error:
+            raise TaskWorkbenchConflictError(str(error)) from error
+        bound = self._turn_planner.bound_route(planning)
+        if bound is not None:
+            preparation_error = await self._prepare_planner_route(task_id, bound)
+            if preparation_error is None:
+                try:
+                    runs = await self._execution.list_for_task(task_id)
+                    if not runs.runs:
+                        await self._execution.start(task_id)
+                except (AgentRuntimeError, AgentSupervisorError) as error:
+                    # A concurrent caller may have started the exact bound Plan.
+                    runs = await self._execution.list_for_task(task_id)
+                    if not runs.runs:
+                        raise TaskWorkbenchConflictError(str(error)) from error
+            candidate = RouteCandidate(
+                decision=TurnRouteDecision.ROUTED,
+                route_id=bound.route_id,
+                parameters=bound.parameters,
+                reason_code=bound.reason_code,
+            )
+            await self._add_assistant_message(
+                task_id,
+                (
+                    f"本地提案选择的工作区预览被拒绝：{preparation_error}。文件没有发生变化。"
+                    if preparation_error is not None
+                    else self._route_acceptance_message(candidate, bound.status)
+                ),
+            )
+        else:
+            await self._add_assistant_message(
+                task_id,
+                self._turn_planning_outcome_message(planning),
+            )
+        return await self.get(task_id)
+
+    async def _prepare_planner_route(
+        self,
+        task_id: str,
+        bound: BoundTurnRoute,
+    ) -> str | None:
+        try:
+            if bound.route_id == "workspace_file_replace":
+                await self._router.prepare_workspace_edit(task_id)
+            elif bound.route_id == "workspace_patch_bundle":
+                await self._router.prepare_workspace_patch(task_id)
+            elif bound.route_id in {"workspace_file_create", "workspace_file_rename"}:
+                await self._router.prepare_workspace_path_operation(task_id)
+        except TurnRouterError as error:
+            return str(error)
+        return None
+
+    @staticmethod
+    def _turn_planning_outcome_message(planning: TurnPlanningRead) -> str:
+        adjudication = planning.adjudication
+        if adjudication is None:
+            return "本地任务解释仍在进行，尚未形成可执行绑定。"
+        if adjudication.outcome == "multi_step_deferred":
+            return (
+                "本地 Planner 提出了多步骤任务。阶段 111 已将它保存为 "
+                "MULTI_STEP_PLAN_DEFERRED，不会拆成多个隐式执行；通用循环将在阶段 112 接管。"
+            )
+        if adjudication.outcome == "needs_user_input":
+            return "本地 Planner 判断当前消息缺少完成安全绑定所需的参数，请补充对象和期望结果。"
+        if adjudication.outcome == "unsupported":
+            return "本地 Planner 未找到可安全绑定的服务器 Capability Offer，因此没有建立执行运行。"
+        failure_code = planning.run.failure.error_code if planning.run.failure is not None else None
+        if failure_code is not None:
+            return (
+                f"本地 Planner 以 {failure_code} 终止；失败证明已保存，"
+                "不会自动重放模型调用，确定性结果保持不变。"
+            )
+        return "本地 Planner 没有形成可执行的单步骤绑定，确定性结果保持不变。"
+
     async def advance(self, task_id: str) -> TaskWorkbenchRead:
         """Advance exactly one server-authorized safe step."""
 
         workbench = await self.get(task_id)
+        if any(
+            item.action is WorkbenchAction.INTERPRET_TURN and item.enabled
+            for item in workbench.actions
+        ):
+            return await self.interpret_turn(task_id)
+        if any(
+            item.action is WorkbenchAction.START_EXECUTION and item.enabled
+            for item in workbench.actions
+        ):
+            if (
+                self._turn_planner is not None
+                and workbench.turn_planning is not None
+                and workbench.route is not None
+                and workbench.route.result_digest is None
+            ):
+                try:
+                    internal_planning = await self._turn_planner.get(task_id)
+                except TurnPlannerRuntimeError as error:
+                    raise TaskWorkbenchConflictError(str(error)) from error
+                if internal_planning is None:
+                    raise TaskWorkbenchConflictError(
+                        "Turn planning proof disappeared before execution"
+                    )
+                bound = self._turn_planner.bound_route(internal_planning)
+                if bound is not None:
+                    preparation_error = await self._prepare_planner_route(task_id, bound)
+                    if preparation_error is not None:
+                        await self._add_assistant_message(
+                            task_id,
+                            f"恢复任务时工作区预览被拒绝：{preparation_error}。文件没有发生变化。",
+                        )
+                        return await self.get(task_id)
+            try:
+                await self._execution.start(task_id)
+            except (AgentRuntimeError, AgentSupervisorError) as error:
+                runs = await self._execution.list_for_task(task_id)
+                if not runs.runs:
+                    raise TaskWorkbenchConflictError(str(error)) from error
+            return await self.get(task_id)
         if any(
             item.action is WorkbenchAction.REPLAN_FAILED_EXECUTION and item.enabled
             for item in workbench.actions
@@ -643,8 +834,7 @@ class TaskWorkbenchService:
                             if (
                                 settled.route is not None
                                 and settled.route.status is TurnRouteStatus.FAILED
-                                and settled.route.error_code
-                                == "AGENT_GRAPH_TEST_CONDITION_NOT_MET"
+                                and settled.route.error_code == "AGENT_GRAPH_TEST_CONDITION_NOT_MET"
                                 and settled_run.status is ExecutionRunStatus.FAILED
                             ):
                                 return settled
@@ -664,8 +854,7 @@ class TaskWorkbenchService:
                             if (
                                 settled.route is not None
                                 and settled.route.status is TurnRouteStatus.FAILED
-                                and settled.route.error_code
-                                == "AGENT_GRAPH_TEST_CONDITION_NOT_MET"
+                                and settled.route.error_code == "AGENT_GRAPH_TEST_CONDITION_NOT_MET"
                                 and settled_run.status is ExecutionRunStatus.FAILED
                             ):
                                 return settled
@@ -681,9 +870,7 @@ class TaskWorkbenchService:
                                 raise first_error
                             raise TaskWorkbenchConflictError(str(first_error))
                         outcomes = tuple(
-                            item
-                            for item in wave_results
-                            if isinstance(item, WorkspaceAgentOutcome)
+                            item for item in wave_results if isinstance(item, WorkspaceAgentOutcome)
                         )
                         if len(outcomes) != len(wave_results):
                             raise TaskWorkbenchConflictError(
@@ -1032,9 +1219,7 @@ class TaskWorkbenchService:
             )
         else:
             try:
-                receipt = await self._router.commit_workspace_patch(
-                    task_id, confirmation_digest
-                )
+                receipt = await self._router.commit_workspace_patch(task_id, confirmation_digest)
             except TurnRouterError as error:
                 raise TaskWorkbenchConflictError(str(error)) from error
             await self._add_assistant_message(
@@ -1086,6 +1271,23 @@ class TaskWorkbenchService:
             for item in workbench.actions
         ):
             return workbench
+        if workbench.turn_planning is not None and workbench.turn_planning.run.status in {
+            "prepared",
+            "dispatching",
+        }:
+            if self._auto_advance is not None:
+                await self._auto_advance.cancel(task_id)
+            if self._turn_planner is None:
+                raise TaskWorkbenchConflictError("Turn Planner runtime is unavailable")
+            try:
+                await self._turn_planner.cancel(task_id)
+            except TurnPlannerRuntimeError as error:
+                raise TaskWorkbenchConflictError(str(error)) from error
+            await self._add_assistant_message(
+                task_id,
+                "任务解释已停止，Planner 租约和 fencing token 已失效；迟到结果不会被采用。",
+            )
+            return await self.get(task_id)
         run = workbench.executions.runs[-1] if workbench.executions.runs else None
         if run is None:
             raise TaskWorkbenchConflictError("Task has no execution run")
@@ -1342,6 +1544,43 @@ class TaskWorkbenchService:
             and self._capabilities.resolve_preferred("research.read.v1").runtime_enabled
         )
 
+    def _turn_planner_variant_keys(self) -> frozenset[str]:
+        """Return only variants backed by the currently configured runtimes."""
+
+        variants = {"knowledge_lookup", "mcp_text_metrics"}
+        if self._research_enabled():
+            variants.add("research_to_html")
+        if not self._router.workspace_enabled:
+            return frozenset(variants)
+        variants.update({"workspace_file_read", "workspace_directory_list"})
+        if self._workspace_agents is not None:
+            variants.add("workspace_directory_analyze")
+        if self._router.workspace_patch_enabled:
+            variants.update({"workspace_file_replace", "workspace_patch_bundle"})
+        if self._router.workspace_path_operation_enabled:
+            variants.update({"workspace_file_create", "workspace_file_rename"})
+        if self._router.workspace_check_enabled:
+            variants.add("workspace_snapshot_check")
+        if self._router.workspace_python_test_enabled:
+            variants.add("workspace_python_test")
+            if self._router.workspace_patch_enabled and self._workspace_agents is not None:
+                variants.update(
+                    {
+                        "workspace_agent_patch_test:python",
+                        "workspace_dynamic_patch_test:python",
+                    }
+                )
+        if self._router.workspace_node_test_enabled:
+            variants.add("workspace_node_test")
+            if self._router.workspace_patch_enabled and self._workspace_agents is not None:
+                variants.update(
+                    {
+                        "workspace_agent_patch_test:node",
+                        "workspace_dynamic_patch_test:node",
+                    }
+                )
+        return frozenset(variants)
+
     async def get(self, task_id: str) -> TaskWorkbenchRead:
         # The projection is assembled from several independently verified
         # aggregates. A background Coordinator can commit between those reads,
@@ -1377,6 +1616,12 @@ class TaskWorkbenchService:
                 route = None
             else:
                 raise TaskWorkbenchConflictError(str(error)) from error
+        try:
+            turn_planning = (
+                await self._turn_planner.get(task_id) if self._turn_planner is not None else None
+            )
+        except TurnPlannerRuntimeError as error:
+            raise TaskWorkbenchConflictError(str(error)) from error
         try:
             planning = await self._planning.get_state(task_id)
             contract = await self._planning.get_current_contract(task_id)
@@ -1448,7 +1693,14 @@ class TaskWorkbenchService:
             and route.route_id == "mcp_text_metrics"
             and await self._router.mcp_enabled()
         )
-        stage = self._stage(executions, planning, delivery, exports, route)
+        stage = self._stage(
+            executions,
+            planning,
+            delivery,
+            exports,
+            route,
+            turn_planning,
+        )
         repair_loop = self._repair_loop_status(executions, contract, route)
         actions = self._actions(
             executions,
@@ -1457,6 +1709,7 @@ class TaskWorkbenchService:
             route,
             mcp_enabled,
             repair_loop,
+            turn_planning,
         )
         material = {
             "schema_version": "deskpilot.task-workbench.v1",
@@ -1465,6 +1718,11 @@ class TaskWorkbenchService:
             "actions": actions,
             "conversation": conversation,
             "route": route,
+            "turn_planning": (
+                TurnPlanningWorkbenchRead.from_internal(turn_planning)
+                if turn_planning is not None
+                else None
+            ),
             "planning": planning,
             "contract": contract,
             "plans": plans,
@@ -1582,7 +1840,17 @@ class TaskWorkbenchService:
         delivery: DeliveryManifestRead | None,
         exports: tuple[ArtifactExportRead, ...],
         route: TurnRouteRead | None,
+        turn_planning: TurnPlanningRead | None,
     ) -> WorkbenchStage:
+        if turn_planning is not None:
+            if turn_planning.run.status in {"prepared", "dispatching"}:
+                return WorkbenchStage.INTERPRETING
+            adjudication = turn_planning.adjudication
+            if adjudication is not None:
+                if adjudication.outcome == "needs_user_input":
+                    return WorkbenchStage.NEEDS_CLARIFICATION
+                if adjudication.outcome in {"multi_step_deferred", "unsupported"}:
+                    return WorkbenchStage.UNSUPPORTED
         if route is not None:
             if route.decision is TurnRouteDecision.NEEDS_CLARIFICATION:
                 return WorkbenchStage.NEEDS_CLARIFICATION
@@ -1651,20 +1919,15 @@ class TaskWorkbenchService:
             or route is None
             or route.route_id != "workspace_dynamic_patch_test"
             or contract is None
-            or BOUNDED_PATCH_REPAIR_LOOP_CONSTRAINT
-            not in contract.contract.constraints
+            or BOUNDED_PATCH_REPAIR_LOOP_CONSTRAINT not in contract.contract.constraints
         ):
             return None
-        maximum_plan_generations = condition_replan_generation_limit(
-            contract.contract.constraints
-        )
+        maximum_plan_generations = condition_replan_generation_limit(contract.contract.constraints)
         if maximum_plan_generations is None:
             raise TaskWorkbenchConflictError(
                 "Patch repair-loop Contract constraints are incomplete"
             )
-        budget_limit = AgentReplanBudgetTotals.from_task_budget(
-            contract.contract.budget
-        )
+        budget_limit = AgentReplanBudgetTotals.from_task_budget(contract.contract.budget)
         budget_allocated = AgentReplanBudgetTotals.from_plan_budgets(
             node.budget
             for execution in executions.runs
@@ -1688,8 +1951,7 @@ class TaskWorkbenchService:
             maximum_plan_generations - run.plan_generation,
         )
         next_replan_available = bool(
-            remaining_replans > 0
-            and budget_remaining.contains(next_plan_allocation)
+            remaining_replans > 0 and budget_remaining.contains(next_plan_allocation)
         )
         reason_code = (
             "AVAILABLE"
@@ -1725,6 +1987,7 @@ class TaskWorkbenchService:
         route: TurnRouteRead | None,
         mcp_enabled: bool,
         repair_loop: AgentRepairLoopStatus | None,
+        turn_planning: TurnPlanningRead | None,
     ) -> tuple[WorkbenchActionRead, ...]:
         run = executions.runs[-1] if executions.runs else None
         nodes = {item.local_key: item for item in run.nodes} if run else {}
@@ -1753,12 +2016,26 @@ class TaskWorkbenchService:
             and contract.contract.workspace.allow_user_path_export
         )
         conditions = {
+            WorkbenchAction.INTERPRET_TURN: (
+                bool(turn_planning is not None and turn_planning.run.status == "prepared"),
+                "TURN_INTERPRETATION_NOT_PREPARED",
+            ),
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: (
                 is_research and route is None and not has_plan,
                 "TASK_ALREADY_PLANNED_OR_NOT_RESEARCH",
             ),
             WorkbenchAction.START_EXECUTION: (
-                has_plan and run is None,
+                bool(
+                    has_plan
+                    and run is None
+                    and (
+                        route is None
+                        or (
+                            route.decision is TurnRouteDecision.ROUTED
+                            and route.status is not TurnRouteStatus.FAILED
+                        )
+                    )
+                ),
                 "EXECUTION_ALREADY_STARTED",
             ),
             WorkbenchAction.RUN_RESEARCH: (
@@ -1856,14 +2133,10 @@ class TaskWorkbenchService:
                         )
                         or (
                             route.route_id == "workspace_dynamic_patch_test"
-                            and route.error_code
-                            == "AGENT_GRAPH_TEST_CONDITION_NOT_MET"
+                            and route.error_code == "AGENT_GRAPH_TEST_CONDITION_NOT_MET"
                             and contract is not None
                             and (
-                                (
-                                    repair_loop is not None
-                                    and repair_loop.next_replan_available
-                                )
+                                (repair_loop is not None and repair_loop.next_replan_available)
                                 or (
                                     repair_loop is None
                                     and condition_replan_generation_limit(
@@ -1879,8 +2152,7 @@ class TaskWorkbenchService:
                     and run is not None
                     and run.status is ExecutionRunStatus.FAILED
                     and (
-                        route.route_id == "workspace_dynamic_patch_test"
-                        or run.plan_generation == 1
+                        route.route_id == "workspace_dynamic_patch_test" or run.plan_generation == 1
                     )
                 ),
                 "FAILURE_NOT_REPLAN_ELIGIBLE_OR_LIMIT_REACHED",
@@ -1904,7 +2176,8 @@ class TaskWorkbenchService:
             WorkbenchAction.COMMIT_WORKSPACE_PATCH: (
                 bool(
                     route is not None
-                    and route.route_id in {
+                    and route.route_id
+                    in {
                         "workspace_patch_bundle",
                         "workspace_agent_patch_test",
                         "workspace_dynamic_patch_test",
@@ -1958,13 +2231,22 @@ class TaskWorkbenchService:
             ),
             WorkbenchAction.STOP_EXECUTION: (
                 bool(
-                    run is not None
-                    and run.status.value in {"active", "awaiting_verification", "paused"}
+                    (
+                        run is not None
+                        and run.status.value in {"active", "awaiting_verification", "paused"}
+                    )
+                    or (
+                        turn_planning is not None
+                        and turn_planning.run.status in {"prepared", "dispatching"}
+                    )
                 ),
                 "EXECUTION_NOT_ACTIVE",
             ),
         }
         explanations = {
+            WorkbenchAction.INTERPRET_TURN: (
+                "运行一次本地 Turn Planner，只能选择服务器预编译的 opaque Offer。"
+            ),
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: "启用受信 research_to_html 计划。",
             WorkbenchAction.START_EXECUTION: "创建绑定当前计划的执行运行。",
             WorkbenchAction.RUN_RESEARCH: "运行受控搜索与页面读取。",
@@ -1985,6 +2267,7 @@ class TaskWorkbenchService:
             WorkbenchAction.STOP_EXECUTION: "立即停止运行并使未完成领取凭证失效。",
         }
         effects = {
+            WorkbenchAction.INTERPRET_TURN: "read_only",
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: "read_only",
             WorkbenchAction.START_EXECUTION: "read_only",
             WorkbenchAction.RUN_RESEARCH: "read_only",

@@ -4901,7 +4901,7 @@ def test_turn_router_runs_different_trusted_capabilities_in_one_conversation(
     assert research_body["delivery"] is not None
 
 
-def test_turn_router_requires_clarification_and_does_not_default_to_research(
+def test_turn_router_preserves_fallback_and_offers_unmatched_turn_to_planner(
     workbench_client: TestClient,
 ) -> None:
     clarified = workbench_client.post(
@@ -4911,7 +4911,8 @@ def test_turn_router_requires_clarification_and_does_not_default_to_research(
     assert clarified.status_code == 201, clarified.text
     body = clarified.json()
     assert body["route"]["decision"] == "needs_clarification"
-    assert body["stage"] == "needs_clarification"
+    assert body["stage"] == "interpreting"
+    assert body["turn_planning"]["run"]["status"] == "prepared"
     assert body["planning"] is None
     assert body["executions"]["runs"] == []
     assert not _enabled(body, "run_research")
@@ -4923,7 +4924,8 @@ def test_turn_router_requires_clarification_and_does_not_default_to_research(
     assert unsupported.status_code == 201, unsupported.text
     unsupported_body = unsupported.json()
     assert unsupported_body["route"]["decision"] == "unsupported"
-    assert unsupported_body["stage"] == "unsupported"
+    assert unsupported_body["stage"] == "interpreting"
+    assert unsupported_body["turn_planning"]["run"]["status"] == "prepared"
     assert unsupported_body["planning"] is None
     assert unsupported_body["executions"]["runs"] == []
 

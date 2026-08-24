@@ -261,6 +261,25 @@ class ModelGateway:
             budget=self._effective_budget(request.execution_budget),
         )
 
+    def select_provider_snapshot(self, request: ModelRequest) -> ModelProvider:
+        """Select an exact configured route without consulting transient health.
+
+        This is only a reservation-time snapshot.  It deliberately ignores
+        circuit, Retry-After, half-open, and observed-latency state; callers
+        must still use :meth:`select_provider` or :meth:`complete` before an
+        actual dispatch.  Privacy, capabilities, configured ordering, and the
+        effective cost budget remain enforced.
+        """
+
+        self.validate_configuration()
+        budget = self._effective_budget(request.execution_budget)
+        with self._state_lock:
+            candidates = self._eligible_provider_candidates(
+                request,
+                budget=budget,
+            )
+            return self._sort_snapshot_candidates(candidates, request)[0]
+
     async def complete(self, request: ModelRequest) -> ModelResponse:
         budget = self._effective_budget(request.execution_budget)
         deadline = self._monotonic() + request.timeout_seconds
@@ -637,32 +656,8 @@ class ModelGateway:
         self.validate_configuration()
         now = self._monotonic()
         with self._state_lock:
-            candidates = self._base_candidates(request)
-            privacy_candidates = [
-                provider
-                for provider in candidates
-                if self._privacy_allows(provider.descriptor, request)
-            ]
-            if not privacy_candidates:
-                raise ModelPrivacyRouteError(
-                    "No approved model route satisfies the request privacy mode",
-                    provider_id=request.provider_hint,
-                )
-
-            capable = [
-                provider
-                for provider in privacy_candidates
-                if self._supports(provider.descriptor, request.requirements)
-            ]
-            if not capable:
-                raise ModelCapabilityUnavailableError(
-                    "No model provider satisfies the requested capabilities",
-                    provider_id=request.provider_hint,
-                )
-
-            budget_candidates = self._budget_candidates(
+            budget_candidates = self._eligible_provider_candidates(
                 request,
-                capable,
                 budget=budget,
             )
 
@@ -699,6 +694,36 @@ class ModelGateway:
                 ):
                     raise self._route_temporarily_unavailable(available, now=now)
             return provider
+
+    def _eligible_provider_candidates(
+        self,
+        request: ModelRequest,
+        *,
+        budget: _EffectiveBudget,
+    ) -> list[ModelProvider]:
+        candidates = self._base_candidates(request)
+        privacy_candidates = [
+            provider
+            for provider in candidates
+            if self._privacy_allows(provider.descriptor, request)
+        ]
+        if not privacy_candidates:
+            raise ModelPrivacyRouteError(
+                "No approved model route satisfies the request privacy mode",
+                provider_id=request.provider_hint,
+            )
+
+        capable = [
+            provider
+            for provider in privacy_candidates
+            if self._supports(provider.descriptor, request.requirements)
+        ]
+        if not capable:
+            raise ModelCapabilityUnavailableError(
+                "No model provider satisfies the requested capabilities",
+                provider_id=request.provider_hint,
+            )
+        return self._budget_candidates(request, capable, budget=budget)
 
     def _base_candidates(self, request: ModelRequest) -> list[ModelProvider]:
         if request.provider_hint is not None:
@@ -807,6 +832,29 @@ class ModelGateway:
             candidates,
             key=lambda provider: (
                 location_key(provider),
+                position[provider.descriptor.provider_id],
+            ),
+        )
+
+    @staticmethod
+    def _sort_snapshot_candidates(
+        candidates: list[ModelProvider],
+        request: ModelRequest,
+    ) -> list[ModelProvider]:
+        """Preserve configured priority without reading observed latency."""
+
+        position = {
+            provider.descriptor.provider_id: index
+            for index, provider in enumerate(candidates)
+        }
+        return sorted(
+            candidates,
+            key=lambda provider: (
+                bool(
+                    request.privacy_mode == "local_preferred"
+                    and request.cloud_fallback_approved
+                    and provider.descriptor.location is not ModelLocation.LOCAL
+                ),
                 position[provider.descriptor.provider_id],
             ),
         )

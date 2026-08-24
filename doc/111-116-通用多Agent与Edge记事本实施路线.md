@@ -19,6 +19,8 @@
 
 ## 2. 阶段 111：通用任务提案与 Capability Offer
 
+> 实施状态（2026-08-24）：阶段 111 代码、`0051` 迁移、前端投影和 CI 已完成，本地全量门禁取得统一退出 0；精确结果见[阶段 111：通用任务提案与 Capability Offer](111-通用任务提案与Capability-Offer.md)。完成中文阶段提交并建立 `codex/stage-112` 后，按本路线进入 112A。
+
 ### 2.1 路由与运行时
 
 - 保留现有 15 条确定性 Route；规则成功路由时完全跳过模型，旧 route manifest digest 与行为保持兼容。
@@ -51,6 +53,8 @@
 - Turn Route 的可空 planner provenance。
 
 现有写 API 保持兼容。Workbench 增加 `interpreting`、`interpret_turn` 与可空 `turn_planning` 投影。Planner timeout、Schema 错误、unknown offer、Provider 不可用或绑定漂移时，必须保存失败证明并原样回退确定性结果；不自动重放模型调用。
+
+公开 Workbench 投影必须与内部 proof 模型分离，只展示状态、数量、opaque digest 和稳定原因；不得向 API/前端泄露完整 Offer、用户参数、模型 response/proposal manifest、claim owner、Provider 私有配置或预编译计划正文。
 
 ## 3. 阶段 112：通用持久任务循环
 

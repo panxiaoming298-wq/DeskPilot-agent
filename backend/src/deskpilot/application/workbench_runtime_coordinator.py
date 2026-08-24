@@ -127,9 +127,7 @@ class WorkbenchRuntimeStore:
                         status="cancelled",
                         revision=WorkbenchRuntimeItemRecord.revision + 1,
                         claim_owner_id=None,
-                        claim_fencing_token=(
-                            WorkbenchRuntimeItemRecord.claim_fencing_token + 1
-                        ),
+                        claim_fencing_token=(WorkbenchRuntimeItemRecord.claim_fencing_token + 1),
                         claim_acquired_at=None,
                         claim_heartbeat_at=None,
                         claim_expires_at=None,
@@ -185,11 +183,9 @@ class WorkbenchRuntimeStore:
                     result = await session.execute(
                         update(WorkbenchRuntimeItemRecord)
                         .where(
-                            WorkbenchRuntimeItemRecord.work_item_id
-                            == candidate.work_item_id,
+                            WorkbenchRuntimeItemRecord.work_item_id == candidate.work_item_id,
                             WorkbenchRuntimeItemRecord.revision == revision,
-                            WorkbenchRuntimeItemRecord.claim_fencing_token
-                            == previous_fence,
+                            WorkbenchRuntimeItemRecord.claim_fencing_token == previous_fence,
                             ready,
                         )
                         .values(
@@ -214,9 +210,7 @@ class WorkbenchRuntimeStore:
                             claim_owner_id=owner_id,
                             claim_fencing_token=next_fence,
                             attempt_count=candidate.attempt_count + 1,
-                            consecutive_failure_count=(
-                                candidate.consecutive_failure_count
-                            ),
+                            consecutive_failure_count=(candidate.consecutive_failure_count),
                         )
                     )
         return tuple(claims)
@@ -319,8 +313,7 @@ class WorkbenchRuntimeStore:
                 WorkbenchRuntimeItemRecord.work_item_id == claim.work_item_id,
                 WorkbenchRuntimeItemRecord.status == "processing",
                 WorkbenchRuntimeItemRecord.claim_owner_id == claim.claim_owner_id,
-                WorkbenchRuntimeItemRecord.claim_fencing_token
-                == claim.claim_fencing_token,
+                WorkbenchRuntimeItemRecord.claim_fencing_token == claim.claim_fencing_token,
                 WorkbenchRuntimeItemRecord.claim_expires_at > now,
             )
             .execution_options(synchronize_session=False)
@@ -342,7 +335,16 @@ class WorkbenchRuntimeCoordinator:
         max_failures: int,
         retry_base_seconds: float,
         retry_max_seconds: float,
+        planner_recovery_scan_interval_seconds: float | None = None,
+        planner_recovery_scan_limit: int = 100,
     ) -> None:
+        if planner_recovery_scan_interval_seconds is not None and (
+            planner_recovery_scan_interval_seconds <= 0
+            or planner_recovery_scan_interval_seconds > 3_600
+        ):
+            raise ValueError("Turn Planner recovery scan interval is invalid")
+        if not 1 <= planner_recovery_scan_limit <= 1_000:
+            raise ValueError("Turn Planner recovery scan limit is invalid")
         self._store = WorkbenchRuntimeStore(database)
         self._database = database
         self._workbench = workbench
@@ -353,6 +355,12 @@ class WorkbenchRuntimeCoordinator:
         self._max_failures = max_failures
         self._retry_base_seconds = retry_base_seconds
         self._retry_max_seconds = retry_max_seconds
+        self._planner_recovery_scan_interval_seconds = (
+            planner_recovery_scan_interval_seconds
+            if planner_recovery_scan_interval_seconds is not None
+            else max(1.0, min(60.0, poll_interval_seconds * 100))
+        )
+        self._planner_recovery_scan_limit = planner_recovery_scan_limit
         self._wake = asyncio.Event()
         self._runner: asyncio.Task[None] | None = None
         self._stopping = False
@@ -410,9 +418,7 @@ class WorkbenchRuntimeCoordinator:
                     await session.scalars(
                         select(TaskExecutionRunRecord.task_id)
                         .where(
-                            TaskExecutionRunRecord.status.in_(
-                                ("active", "awaiting_verification")
-                            )
+                            TaskExecutionRunRecord.status.in_(("active", "awaiting_verification"))
                         )
                         .distinct()
                         .order_by(TaskExecutionRunRecord.task_id)
@@ -420,8 +426,11 @@ class WorkbenchRuntimeCoordinator:
                     )
                 ).all()
             )
+        planner_task_ids = await self._workbench.turn_planner_recoverable_task_ids(limit=limit)
+        planner_task_id_set = set(planner_task_ids)
+        recoverable_task_ids = tuple(dict.fromkeys((*task_ids, *planner_task_ids)))
         recovered = 0
-        for task_id in task_ids:
+        for task_id in recoverable_task_ids:
             try:
                 workbench = await self._workbench.get(task_id)
             except TaskWorkbenchError:
@@ -430,14 +439,73 @@ class WorkbenchRuntimeCoordinator:
                     task_id,
                 )
                 continue
+            directly_recovered = False
+            if (
+                self._workbench.automatic_action(workbench) is None
+                and task_id in planner_task_id_set
+            ):
+                try:
+                    workbench = await self._workbench.interpret_turn(task_id)
+                    directly_recovered = True
+                except TaskWorkbenchError:
+                    logger.exception(
+                        "Turn Planner startup recovery rejected task %s",
+                        task_id,
+                    )
+                    continue
             if self._workbench.automatic_action(workbench) is None:
+                recovered += 1 if directly_recovered else 0
                 continue
             await self._store.enqueue(task_id, workbench.projection_digest)
             recovered += 1
-        if len(task_ids) == limit:
+        if len(task_ids) == limit or len(planner_task_ids) == limit:
             logger.warning(
                 "Workbench startup recovery reached its bounded %s-task scan limit",
                 limit,
+            )
+        return recovered
+
+    async def recover_turn_planner_tasks(self, *, limit: int | None = None) -> int:
+        """Recover a bounded Planner batch after leases become eligible."""
+
+        scan_limit = self._planner_recovery_scan_limit if limit is None else limit
+        if not 1 <= scan_limit <= 1_000:
+            raise ValueError("Turn Planner recovery scan limit is invalid")
+        task_ids = await self._workbench.turn_planner_recoverable_task_ids(
+            limit=scan_limit
+        )
+        recovered = 0
+        for task_id in task_ids:
+            if self._stopping:
+                break
+            try:
+                before = await self._workbench.get(task_id)
+                if self._workbench.automatic_action(before) is not None:
+                    await self._store.enqueue(task_id, before.projection_digest)
+                    recovered += 1
+                    continue
+                if (
+                    before.turn_planning is not None
+                    and before.turn_planning.run.status != "dispatching"
+                ):
+                    # A terminal bound Route without a safe automatic action is
+                    # not a Planner crash window. In particular, do not repeat
+                    # failed workspace preparation or its conversation message.
+                    continue
+                workbench = await self._workbench.interpret_turn(task_id)
+            except TaskWorkbenchError:
+                logger.exception(
+                    "Periodic Turn Planner recovery rejected task %s",
+                    task_id,
+                )
+                continue
+            if self._workbench.automatic_action(workbench) is not None:
+                await self._store.enqueue(task_id, workbench.projection_digest)
+            recovered += 1
+        if len(task_ids) == scan_limit:
+            logger.warning(
+                "Periodic Turn Planner recovery reached its bounded %s-task scan limit",
+                scan_limit,
             )
         return recovered
 
@@ -550,8 +618,20 @@ class WorkbenchRuntimeCoordinator:
             await self.recover_runnable_tasks()
         except Exception:
             logger.exception("Unexpected Workbench startup recovery failure")
+        loop = asyncio.get_running_loop()
+        next_planner_recovery_scan_at = (
+            loop.time() + self._planner_recovery_scan_interval_seconds
+        )
         while True:
             self._wake.clear()
+            if loop.time() >= next_planner_recovery_scan_at:
+                try:
+                    await self.recover_turn_planner_tasks()
+                except Exception:
+                    logger.exception("Unexpected periodic Turn Planner recovery failure")
+                next_planner_recovery_scan_at = (
+                    loop.time() + self._planner_recovery_scan_interval_seconds
+                )
             try:
                 result = await self.advance_pending()
             except Exception:
@@ -561,10 +641,14 @@ class WorkbenchRuntimeCoordinator:
                 return
             if result.claimed >= self._concurrency:
                 continue
+            wait_seconds = min(
+                self._poll_interval_seconds,
+                max(0.0, next_planner_recovery_scan_at - loop.time()),
+            )
             try:
                 await asyncio.wait_for(
                     self._wake.wait(),
-                    timeout=self._poll_interval_seconds,
+                    timeout=wait_seconds,
                 )
             except TimeoutError:
                 pass
