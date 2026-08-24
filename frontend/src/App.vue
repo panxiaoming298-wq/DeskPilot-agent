@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
-import { createTask } from './api'
+import { createTask, listTasks } from './api'
 import ApprovalCard from './components/ApprovalCard.vue'
 import EffectRuntimeOperations from './components/EffectRuntimeOperations.vue'
 import KnowledgeBase from './components/KnowledgeBase.vue'
@@ -15,10 +15,8 @@ import ReconciliationEvidenceCard from './components/ReconciliationEvidenceCard.
 import ReconciliationCenter from './components/ReconciliationCenter.vue'
 import TaskControls from './components/TaskControls.vue'
 import TaskEventItem from './components/TaskEventItem.vue'
-import { useTaskControl } from './composables/useTaskControl'
-import { useTaskApproval } from './composables/useTaskApproval'
-import { useTaskEvents } from './composables/useTaskEvents'
-import { useTaskReconciliation } from './composables/useTaskReconciliation'
+import { useTaskRuntimeCollection } from './composables/useTaskRuntimeCollection'
+import { syncDesktopActiveTaskCount } from './desktopRuntime'
 import { deriveTaskStatus } from './taskState'
 import type {
   ApprovalAction,
@@ -26,6 +24,7 @@ import type {
   Task,
   TaskControlAction,
   TaskCreate,
+  TaskEvent,
   TaskStatus,
 } from './types'
 
@@ -195,47 +194,115 @@ const activeView = ref<ActiveView>('tasks')
 const privacyMode = ref<TaskCreate['privacy_mode']>('local_only')
 const submitting = ref(false)
 const submitError = ref<string | null>(null)
-const task = ref<Task | null>(null)
+const {
+  capacity: taskCapacity,
+  selectedRuntime,
+  taskCards,
+  activeTaskCount,
+  hasTaskCapacity,
+  selectTask,
+  trackTask,
+} = useTaskRuntimeCollection()
 
-const {
-  events,
-  connected,
-  streamError,
-  connectionState,
-  recoveryMessage,
-  reconnectAttempt,
-  retryDelayMs,
-  connect,
-  reconnectNow,
-  reset,
-} = useTaskEvents()
-const {
-  activeAction,
-  controlMessage,
-  controlError,
-  runControl,
-  reset: resetControl,
-} = useTaskControl(task)
-const {
-  approval,
-  loading: approvalLoading,
-  activeAction: approvalAction,
-  approvalMessage,
-  approvalError,
-  runApproval,
-  reset: resetApproval,
-} = useTaskApproval(task, events)
-const {
-  reconciliation,
-  loading: reconciliationLoading,
-  refreshing: reconciliationRefreshing,
-  compensating: reconciliationCompensating,
-  message: reconciliationMessage,
-  error: reconciliationError,
-  refreshEvidence,
-  createCompensation,
-  reset: resetReconciliation,
-} = useTaskReconciliation(task, events)
+const recoverableTaskStatuses = new Set<TaskStatus>([
+  'created',
+  'classifying',
+  'running',
+  'waiting_approval',
+  'waiting_reconciliation',
+  'paused',
+])
+
+async function restoreActiveTasks(): Promise<void> {
+  try {
+    const history = await listTasks(undefined, 100, 0)
+    const recoverable = history.items
+      .filter((snapshot) => recoverableTaskStatuses.has(snapshot.status))
+      .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+      .slice(0, taskCapacity)
+      .reverse()
+    for (const snapshot of recoverable) trackTask(snapshot)
+  } catch (error) {
+    submitError.value = error instanceof Error
+      ? `未能恢复未完成任务：${error.message}`
+      : '未能恢复未完成任务。'
+  }
+}
+
+onMounted(() => {
+  void restoreActiveTasks()
+})
+
+watch(
+  activeTaskCount,
+  (count) => {
+    void syncDesktopActiveTaskCount(count)
+  },
+  { immediate: true },
+)
+
+const task = computed<Task | null>(() => selectedRuntime.value?.task.value ?? null)
+const events = computed<TaskEvent[]>(() => (
+  selectedRuntime.value?.eventsRuntime.events.value ?? []
+))
+const connected = computed(() => selectedRuntime.value?.eventsRuntime.connected.value ?? false)
+const streamError = computed(() => (
+  selectedRuntime.value?.eventsRuntime.streamError.value ?? null
+))
+const connectionState = computed(() => (
+  selectedRuntime.value?.eventsRuntime.connectionState.value ?? 'idle'
+))
+const recoveryMessage = computed(() => (
+  selectedRuntime.value?.eventsRuntime.recoveryMessage.value ?? null
+))
+const reconnectAttempt = computed(() => (
+  selectedRuntime.value?.eventsRuntime.reconnectAttempt.value ?? 0
+))
+const retryDelayMs = computed(() => (
+  selectedRuntime.value?.eventsRuntime.retryDelayMs.value ?? 0
+))
+const activeAction = computed(() => (
+  selectedRuntime.value?.controlRuntime.activeAction.value ?? null
+))
+const controlMessage = computed(() => (
+  selectedRuntime.value?.controlRuntime.controlMessage.value ?? null
+))
+const controlError = computed(() => (
+  selectedRuntime.value?.controlRuntime.controlError.value ?? null
+))
+const approval = computed(() => (
+  selectedRuntime.value?.approvalRuntime.approval.value ?? null
+))
+const approvalLoading = computed(() => (
+  selectedRuntime.value?.approvalRuntime.loading.value ?? false
+))
+const approvalAction = computed(() => (
+  selectedRuntime.value?.approvalRuntime.activeAction.value ?? null
+))
+const approvalMessage = computed(() => (
+  selectedRuntime.value?.approvalRuntime.approvalMessage.value ?? null
+))
+const approvalError = computed(() => (
+  selectedRuntime.value?.approvalRuntime.approvalError.value ?? null
+))
+const reconciliation = computed(() => (
+  selectedRuntime.value?.reconciliationRuntime.reconciliation.value ?? null
+))
+const reconciliationLoading = computed(() => (
+  selectedRuntime.value?.reconciliationRuntime.loading.value ?? false
+))
+const reconciliationRefreshing = computed(() => (
+  selectedRuntime.value?.reconciliationRuntime.refreshing.value ?? false
+))
+const reconciliationCompensating = computed(() => (
+  selectedRuntime.value?.reconciliationRuntime.compensating.value ?? false
+))
+const reconciliationMessage = computed(() => (
+  selectedRuntime.value?.reconciliationRuntime.message.value ?? null
+))
+const reconciliationError = computed(() => (
+  selectedRuntime.value?.reconciliationRuntime.error.value ?? null
+))
 
 const status = computed<TaskStatus | null>(() => deriveTaskStatus(task.value, events.value))
 
@@ -266,25 +333,27 @@ const branchDecision = computed(() => {
   }
 })
 
-const statusLabel = computed(() => {
-  const labels: Partial<Record<TaskStatus, string>> = {
-    created: '已创建',
-    classifying: '正在分类',
-    running: '执行中',
-    waiting_approval: '等待审批',
-    waiting_reconciliation: '等待对账恢复',
-    succeeded: '已完成',
-    failed: '失败',
-    cancelled: '已取消',
-    paused: '已暂停',
-  }
-  return status.value ? labels[status.value] : '等待任务'
-})
+const taskStatusLabels: Record<TaskStatus, string> = {
+  created: '已创建',
+  classifying: '正在分类',
+  running: '执行中',
+  waiting_approval: '等待审批',
+  waiting_reconciliation: '等待对账恢复',
+  succeeded: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+  paused: '已暂停',
+}
+const statusLabel = computed(() => status.value ? taskStatusLabels[status.value] : '等待任务')
+
+function formatTokenUsage(tokens: number): string {
+  if (tokens < 1_000) return `${tokens} token`
+  return `${(tokens / 1_000).toFixed(tokens < 10_000 ? 1 : 0)}k token`
+}
 
 const terminal = computed(() =>
   status.value === 'succeeded' || status.value === 'failed' || status.value === 'cancelled',
 )
-const taskInProgress = computed(() => task.value !== null && !terminal.value)
 const fileMoveInputsValid = computed(() => {
   const source = sourcePath.value.trim()
   const destination = destinationPath.value.trim()
@@ -298,7 +367,7 @@ const diskPressureThresholdValid = computed(() =>
 const canSubmit = computed(() =>
   goal.value.trim().length > 0 &&
   !submitting.value &&
-  !taskInProgress.value &&
+  hasTaskCapacity.value &&
   (
     taskKind.value === 'disk_usage' ||
     (
@@ -335,6 +404,10 @@ const reconnectDetail = computed(() => {
   const seconds = Math.max(1, Math.ceil(retryDelayMs.value / 1_000))
   return `第 ${reconnectAttempt.value} 次恢复 · 最长 ${seconds} 秒后重试`
 })
+
+function reconnectNow(): void {
+  selectedRuntime.value?.eventsRuntime.reconnectNow()
+}
 
 function switchView(nextView: ActiveView): void {
   if (activeView.value === nextView || viewTransitioning.value) return
@@ -467,12 +540,9 @@ async function submitTask() {
             }
         : undefined,
     })
-    reset()
-    resetControl()
-    resetApproval()
-    resetReconciliation()
-    task.value = createdTask
-    connect(createdTask.task_id)
+    if (!trackTask(createdTask)) {
+      submitError.value = '三个活动任务槽位已占用；请等待任一任务结束后再创建。'
+    }
   } catch (error) {
     submitError.value = error instanceof Error ? error.message : '创建任务失败'
   } finally {
@@ -481,40 +551,28 @@ async function submitTask() {
 }
 
 function handleTaskControl(action: TaskControlAction): void {
-  void runControl(action)
+  void selectedRuntime.value?.controlRuntime.runControl(action)
 }
 
 function handleApproval(action: ApprovalAction, reason?: string): void {
-  void runApproval(action, reason)
+  void selectedRuntime.value?.approvalRuntime.runApproval(action, reason)
 }
 
 function handleEvidenceRefresh(): void {
-  void refreshEvidence()
+  void selectedRuntime.value?.reconciliationRuntime.refreshEvidence()
 }
 
 async function handleCompensation(): Promise<void> {
-  const compensationTask = await createCompensation()
+  const compensationTask = await selectedRuntime.value?.reconciliationRuntime.createCompensation()
   if (!compensationTask) return
-  reset()
-  resetControl()
-  resetApproval()
-  resetReconciliation()
-  task.value = compensationTask
-  connect(compensationTask.task_id)
+  if (!trackTask(compensationTask)) {
+    submitError.value = '三个活动任务槽位已占用，无法打开补偿任务。'
+  }
 }
 
 function handleOpenHistoricalTask(snapshot: Task): void {
-  if (
-    taskInProgress.value &&
-    task.value?.task_id !== snapshot.task_id
-  ) return
-  reset()
-  resetControl()
-  resetApproval()
-  resetReconciliation()
-  task.value = snapshot
+  if (!trackTask(snapshot)) return
   activeView.value = 'tasks'
-  connect(snapshot.task_id)
 }
 </script>
 
@@ -663,10 +721,54 @@ function handleOpenHistoricalTask(snapshot: Task): void {
       </header>
 
       <template v-if="activeView === 'tasks'">
+      <section
+        v-if="taskCards.length"
+        class="task-runtime-deck motion-section"
+        data-testid="task-runtime-deck"
+        aria-label="后台任务"
+      >
+        <header class="task-runtime-header">
+          <div>
+            <h2>后台任务</h2>
+            <p>切换焦点不会停止事件流；每个任务保留自己的 cursor、审批和控制状态。</p>
+          </div>
+          <span>{{ activeTaskCount }} / {{ taskCapacity }} 运行中</span>
+        </header>
+        <div class="task-runtime-list" role="group" aria-label="选择任务">
+          <button
+            v-for="card in taskCards"
+            :key="card.task.task_id"
+            class="task-runtime-card"
+            :class="{ selected: card.selected, attention: card.pending_approval || card.pending_input || card.pending_reconciliation }"
+            :data-status="card.status"
+            :data-testid="`task-runtime-${card.slot_id}`"
+            type="button"
+            :aria-pressed="card.selected"
+            @click="selectTask(card.task.task_id)"
+          >
+            <span class="task-runtime-card-top">
+              <span class="task-runtime-state"><i />{{ taskStatusLabels[card.status] }}</span>
+              <span class="task-runtime-slot">SLOT {{ card.slot_id }}</span>
+            </span>
+            <strong>{{ card.task.goal }}</strong>
+            <span class="task-runtime-meta">
+              <span>#{{ card.event_cursor }}</span>
+              <span v-if="card.token_usage > 0">{{ formatTokenUsage(card.token_usage) }}</span>
+              <span>{{ card.connected ? 'LIVE' : card.connection_state.toUpperCase() }}</span>
+            </span>
+            <span v-if="card.pending_approval || card.pending_input || card.pending_reconciliation || card.unread_count" class="task-runtime-attention">
+              <span v-if="card.pending_approval">待审批</span>
+              <span v-if="card.pending_input">待输入</span>
+              <span v-if="card.pending_reconciliation">待对账</span>
+              <span v-if="card.unread_count">{{ card.unread_count }} 条未读</span>
+            </span>
+          </button>
+        </div>
+      </section>
       <section class="composer motion-section" aria-labelledby="task-heading">
         <div class="composer-copy">
           <span class="eyebrow">NEW TASK</span>
-          <h2 id="task-heading">创建可暂停的任务闭环</h2>
+          <h2 id="task-heading">创建可并行的任务闭环</h2>
           <p v-if="taskKind === 'disk_usage'">默认使用离线 Fake 模型与只读工具，不会联网或修改电脑。</p>
           <p v-else-if="taskKind === 'file_move'">文件移动使用固定应用计划；只有审批卡中的单个源和目标会进入受控提交。</p>
           <p v-else>先读取目标磁盘使用率，由受信条件证明决定进入移动审批或安全推迟分支。</p>
@@ -748,7 +850,7 @@ function handleOpenHistoricalTask(snapshot: Task): void {
               type="submit"
               :disabled="!canSubmit"
             >
-              {{ submitting ? '创建中…' : taskInProgress ? '当前任务进行中' : '开始任务' }}
+              {{ submitting ? '创建中…' : !hasTaskCapacity ? '三个任务槽位均已占用' : '开始任务' }}
             </button>
           </div>
           <p v-if="submitError" class="form-error" role="alert">{{ submitError }}</p>
@@ -870,7 +972,7 @@ function handleOpenHistoricalTask(snapshot: Task): void {
       <ReconciliationCenter
         v-else-if="activeView === 'reconciliations'"
         :active-task-id="task?.task_id ?? null"
-        :task-switch-locked="taskInProgress"
+        :task-switch-locked="!hasTaskCapacity"
         @open-task="handleOpenHistoricalTask"
       />
       <KnowledgeBase v-else-if="activeView === 'knowledge'" />

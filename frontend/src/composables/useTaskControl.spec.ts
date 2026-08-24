@@ -57,6 +57,7 @@ describe('useTaskControl', () => {
     await control.runControl('pause', '  用户暂时离开  ')
 
     expect(controlTaskMock).toHaveBeenCalledWith('task-a', 'pause', {
+      expected_last_event_seq: 1,
       reason: '用户暂时离开',
     })
     expect(task.value).toStrictEqual(paused)

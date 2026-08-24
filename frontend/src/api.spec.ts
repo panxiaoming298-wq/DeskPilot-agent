@@ -96,9 +96,15 @@ describe('task API', () => {
     const taskId = task.task_id
 
     await getTask(taskId)
-    await pauseTask(taskId, { reason: '  operator requested  ' })
-    await resumeTask(taskId, { reason: '   ' })
-    await cancelTask(taskId)
+    await pauseTask(taskId, {
+      expected_last_event_seq: task.last_event_seq,
+      reason: '  operator requested  ',
+    })
+    await resumeTask(taskId, {
+      expected_last_event_seq: task.last_event_seq,
+      reason: '   ',
+    })
+    await cancelTask(taskId, { expected_last_event_seq: task.last_event_seq })
 
     expect(buildTaskSocketUrl(taskId, 7)).toContain(
       '/api/v1/ws/tasks/task%2Fwith%20spaces%3F%23?after_seq=7',
@@ -130,7 +136,10 @@ describe('task API', () => {
       `/api/v1/tasks/${encodedId}:pause`,
       'POST',
     )
-    expect(pauseInit.body).toBe(JSON.stringify({ reason: 'operator requested' }))
+    expect(pauseInit.body).toBe(JSON.stringify({
+      expected_last_event_seq: task.last_event_seq,
+      reason: 'operator requested',
+    }))
     expect(new Headers(pauseInit.headers).get('Content-Type')).toBe('application/json')
 
     const resumeInit = expectAuthenticatedRequest(
@@ -139,8 +148,10 @@ describe('task API', () => {
       `/api/v1/tasks/${encodedId}:resume`,
       'POST',
     )
-    expect(resumeInit.body).toBeUndefined()
-    expect(new Headers(resumeInit.headers).has('Content-Type')).toBe(false)
+    expect(resumeInit.body).toBe(JSON.stringify({
+      expected_last_event_seq: task.last_event_seq,
+    }))
+    expect(new Headers(resumeInit.headers).get('Content-Type')).toBe('application/json')
 
     const cancelInit = expectAuthenticatedRequest(
       fetchMock,
@@ -148,8 +159,10 @@ describe('task API', () => {
       `/api/v1/tasks/${encodedId}:cancel`,
       'POST',
     )
-    expect(cancelInit.body).toBeUndefined()
-    expect(new Headers(cancelInit.headers).has('Content-Type')).toBe(false)
+    expect(cancelInit.body).toBe(JSON.stringify({
+      expected_last_event_seq: task.last_event_seq,
+    }))
+    expect(new Headers(cancelInit.headers).get('Content-Type')).toBe('application/json')
   })
 
   it('does not replay a control request after a network TypeError', async () => {
@@ -162,7 +175,10 @@ describe('task API', () => {
 
     const { pauseTask } = await import('./api')
 
-    await expect(pauseTask('task-1', { reason: 'pause once' })).rejects.toBe(networkError)
+    await expect(pauseTask('task-1', {
+      expected_last_event_seq: 1,
+      reason: 'pause once',
+    })).rejects.toBe(networkError)
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expectAuthenticatedRequest(fetchMock, 1, '/api/v1/tasks/task-1:pause', 'POST')
   })

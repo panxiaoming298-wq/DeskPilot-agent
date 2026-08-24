@@ -1,4 +1,4 @@
-# 阶段 111～116：通用多 Agent 与 Edge / 记事本实施路线
+# 阶段 111～117：通用多 Agent、Codex 纵切与 Edge / 记事本实施路线
 
 ## 1. 固定执行顺序
 
@@ -9,8 +9,9 @@
   → 112 通用持久任务循环
   → 113 Codex 类安全编码工具
   → 114 并行任务与窗口后台运行
-  → 115 Cloud 候选生命周期 / Calibration v3
-  → 116 Edge + Windows 记事本安全纵切
+  → 115 真实 Cloud Agent / Calibration v3 / Production Admission
+  → 116 Codex 类真实仓库长循环
+  → 117 Edge + Windows 记事本安全纵切
 ```
 
 每阶段从上一阶段已通过的提交建立独立 `codex/stage-NNN` 分支。阶段结束必须重新取得默认后端全量、Phase75、前端和受影响外部/Windows 门禁的一次完整退出 0，使用中文本地提交，不自动 push。
@@ -112,6 +113,8 @@
 
 ## 5. 阶段 114：并行任务与窗口后台运行
 
+> 实施状态（2026-08-25）：阶段 114 已完成并通过总门禁。三槽位 Task runtime collection、独立 cursor/连接/审批/未读/预算投影、持久 control reservation 绑定的 exact Task/revision 控制、重启恢复、Tauri 托盘和受监督冻结 sidecar 均已落地；默认后端 `763 passed + 12 skipped`、前端 24 文件 / 165 项、Rust/sidecar/NSIS、PostgreSQL 11/11 与 RabbitMQ 1/1 全部通过。实际边界和验收记录见[阶段 114：并行任务与窗口后台运行](114-并行任务与窗口后台运行.md)。按用户指令，本次在阶段 114 checkpoint 停止，不执行 115～117。
+
 - 前端从单一 `task` 状态升级为按 Task ID 管理的任务集合。
 - 每个 Task 拥有独立事件 cursor、连接、预算、待审批、待输入与未读状态。
 - 至少三个 Task 可并行；切换焦点不停止后台任务。
@@ -125,25 +128,62 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 本阶段不实现 Windows Service，也不承诺机器重启后无人值守继续。验收增加 Rust `fmt/clippy/test`、Tauri/NSIS build 和三任务断线重连。
 
-## 6. 阶段 115：Cloud 候选与 Calibration v3
+## 6. 阶段 115：真实 Cloud Agent 与 Calibration v3
+
+阶段 115 不再以“生命周期和合成证据已经实现”作为完成条件。它必须把至少一个真实三角色 cohort 安全激活到生产运行时，证明后续 Codex 纵切使用的不是 Fake、recorded 或未校准候选。
+
+### 115A：Release lifecycle 与三角色身份
 
 - 新增独立 Agent Release Manifest 与显式 activation channel；最高 SemVer 不再自动成为 preferred。
 - 新增不可原地修改的 cloud-only 通用 Turn Planner、Dynamic Coordinator 与 Patch Planner 版本。
 - Calibration v3 从固定两角色升级为显式三角色 cohort，并保持 v1/v2 工件完整兼容。
+- Release、rollback、disable、expiry 与 replacement 都必须产生不可变审计事件；旧 Agent 版本继续支持既有 Run 收尾，但不能被静默提升为 preferred。
 
-只有以下条件同时成立才可激活 cloud 候选：
+### 115B：真实校准与 Production Admission
 
-1. exact 三角色 identity；
-2. 闭合 Handoff companion；
-3. Phase109 Admission；
-4. cloud Task Contract；
-5. 用户对数据出站的显式同意。
+真实 capture 只能在用户明确选择 Provider/model、允许的数据分类与出站范围、费用上限和真人评审安排后执行。授权具备后必须完成：
 
-没有 Admission 时所有候选保持 disabled，本地稳定版本仍是 preferred。本阶段先完成生命周期、v3 Schema、固定测试与合成证据回放；真实 Provider/Judge capture、费用、真人评审与 production Admission 到达外部授权点后暂停。不得提交凭据或 Fake 生产证据。真实 cohort 未完成不阻塞阶段 116 的本地能力开发。
+1. exact Planner、Coordinator、Patch Planner identity 与闭合 Handoff companion；
+2. 使用生产请求构造器执行真实 Provider capture，不以 Fake/recorded 输出替代；
+3. 独立 Judge 盲审、两名真人主审与必要的第三仲裁；
+4. Calibration v3 baseline compare、Phase109 Admission 与最长 90 天有效期；
+5. cloud Task Contract、逐 Turn Provider authority 与用户对当前任务数据出站的显式同意；
+6. 激活、进程重启后恢复、禁用、过期和回滚的运行时验收。
 
-## 7. 阶段 116：Edge + 记事本安全纵向切片
+没有 Admission 时所有候选保持 disabled，本地稳定版本仍是 preferred。若真实 Provider、费用或真人评审尚未获得授权，可以完成 115A 并形成内部 checkpoint，但**不得把阶段 115 标记为完成，也不得宣称 cloud Agent 已达到生产质量**。不得提交凭据、原始敏感样本或 Fake 生产证据。
 
-### 116A：Browser Agent
+阶段 115 的发布门禁除既有 Phase75 零容忍项外，必须证明真实 cohort 没有 unauthorized effect、identity drift、未授权数据出站或 Judge 替代人工授权。
+
+## 7. 阶段 116：Codex 类真实仓库长循环
+
+阶段 116 的唯一目标是闭合一个用户可感知的 Codex 纵向切片：用户在同一会话持续提出、补充和修订编码目标，系统在真实 Python/Node 仓库中完成调查、计划、多 Agent 协作、修改、测试、失败修复和证据交付。
+
+### 116A：受控编码工具面
+
+- 保留项目根、symlink/reparse、预算、Policy 与 Approval 边界，把搜索/批读、精确 Patch、固定测试扩展为同一隔离 Workspace 内的多文件编辑闭环。
+- 新增服务器编译的 `WorkspaceCommandPlan`。模型只能选择注册操作和结构化目标，不能提供 executable、任意 argv、cwd、环境变量或 shell 字符串。
+- 支持受控本地 Git branch、status、diff 与 commit；branch/commit 必须绑定 exact workspace revision、diff digest、测试证据和用户确认，继续禁止自动 push、force、reset-hard 与修改 hooks/config。
+- 依赖变更必须先生成 manifest/lockfile/egress preview，再经独立审批；安装只在隔离快照、允许的 registry 和费用/网络预算内执行，不能静默修改原仓库或全局工具链。
+- 支持 staged create/rename 与精确文件删除；删除只在可丢弃快照中执行，写回前必须展示清单并取得新确认，禁止递归目录删除。
+
+### 116B：持久多 Agent 编码循环
+
+- Turn Planner、Dynamic Coordinator、Explorer/Reader、Patch Planner、Test Runner 与独立 Verifier 通过版本化 Contract/Handoff 协作；至少证明两个独立 Child 并行调查和一个依赖 verified ResultRef 的 join。
+- 同一会话的新用户消息可以补充约束、纠正方向或要求停止；服务器封存旧 generation/lease，生成新的不可变计划代，不把迟到结果绑定到新计划。
+- 执行循环覆盖 `Inspect → Plan → Delegate → Patch → Test → Repair → Verify → Deliver`，测试失败只能在总预算、最大计划代和 no-progress 约束内继续。
+- 关闭窗口、事件流断线、API/sidecar 重启后从持久 checkpoint 续接；outcome unknown 的写入、安装或 Git 操作不得透明重放。
+- 最终交付必须包含 diff、变更文件清单、执行过的测试、失败/修复历史、剩余风险和可回滚点；模型总结不能替代这些证据。
+
+### 116C：真实仓库黄金任务与验收
+
+- 建立至少 20 个版本化真实仓库任务，覆盖 Python/Node、单/多文件修改、测试失败修复、用户中途改意、重启恢复和多 Agent 并行调查。
+- capture 前冻结模型、Agent identity、Prompt、工具版本、任务输入、重复次数和成功阈值；默认质量门槛为端到端任务成功率不低于 80%。
+- `false-success=0`、`unauthorized-effect=0`、越界路径/网络/Git 写入为零容忍；失败必须以可检查终态交付，禁止靠隐藏重试或人工改库通过。
+- 至少一条桌面端验收从自然语言目标开始，连续多轮完成真实仓库修复，并在明确批准后写回与创建本地 commit；不自动 push。
+
+## 8. 阶段 117：Edge + 记事本安全纵向切片
+
+### 117A：Browser Agent
 
 - 使用独立 DeskPilot Microsoft Edge Profile，用户只在可见窗口手动登录。
 - 默认域名 allowlist 为空；自动验收使用本地 loopback 页面。
@@ -151,7 +191,7 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 - `submit / upload / download / publish` 分别要求绑定 origin、目标与内容摘要的新审批。
 - Cookie、密码、验证码与 2FA 不进入模型；验证码或权限弹窗立即进入等待用户。
 
-### 116B：Notepad Agent
+### 117B：Notepad Agent
 
 - 只允许 Windows 系统记事本和语义 UIA selector，禁止任意坐标点击。
 - 支持发现、启动、激活、输入，以及经审批保存到允许目录。
@@ -160,11 +200,11 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 新增本地 Browser Profile/域名允许管理接口和 Browser/App action receipt。Browser Operator 与 Notepad Operator 都是 LOCAL-only Agent；网页、DOM 与 UI 文本始终按不可信输入处理。任务仍通过通用 Workbench、Capability、Policy 与 Approval 执行。
 
-系统设置、多应用编排、管理员操作、支付、验证码绕过和跨端控制移至阶段 117 以后。
+系统设置、多应用编排、管理员操作、支付、验证码绕过和跨端控制移至阶段 118 以后。
 
-## 8. Baseline、提交与外部边界
+## 9. Baseline、提交与外部边界
 
 - Agent/Contract/Plan 变化导致 Phase75 digest 漂移时，只能在 11/11、false-success=0、unauthorized-effect=0 且人工确认差异符合预期后追加新不可变 baseline；禁止覆盖旧版本。
 - 每阶段同步 README、`项目进度.md` 与阶段文档。
-- 112、113、116 可以按内部里程碑做中文提交，但阶段结束仍需一次全量门禁。
-- 不自动 push，不执行真实 cloud capture，不把模型输出、UI 点击或 Judge 结果视为权限或任务正确性的证明。
+- 112、113、115、116、117 可以按内部里程碑做中文提交，但阶段结束仍需一次全量门禁。
+- 不自动 push。真实 cloud capture 只能在明确的 Provider、数据出站、费用和真人评审授权后执行；模型输出、UI 点击或 Judge 结果都不能视为权限或任务正确性的证明。

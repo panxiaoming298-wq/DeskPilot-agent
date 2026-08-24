@@ -4,9 +4,9 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 77～110 checkpoint、阶段 111～113 均已通过；下一步进入 `codex/stage-114`。** 阶段 111 保留 15 条确定性 Route 的旧 digest/行为，并在无法路由时增加 LOCAL-only Turn Planner 与服务器预编译 Capability Offer；阶段 112 已把 deferred Offer 续接为可重启的 `Observe → Plan → Execute → Verify → waiting_user / Repair → Delivery` 通用循环；阶段 113 又接入项目根限定的搜索/批读、Git 只读和六个服务器固定 Python/Node Command Profile，所有命令均在断网临时快照中执行。当前没有真实模型/Judge/真人 production admission，既有 Agent 仍保持 LOCAL-only。详细进度和续接入口见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 77～110 checkpoint 与阶段 111～114 均已通过；当前停在 `codex/stage-114` checkpoint。** 阶段 111 保留 15 条确定性 Route 的旧 digest/行为，并在无法路由时增加 LOCAL-only Turn Planner 与服务器预编译 Capability Offer；阶段 112 建立可重启的通用 TaskLoop；阶段 113 接入项目根限定的搜索/批读、Git 只读和六个固定 Python/Node Command Profile；阶段 114 又闭合三任务并行、exact Task/revision 控制、托盘、重启恢复与受监督冻结 sidecar。当前没有真实模型/Judge/真人 production admission，既有 Agent 仍保持 LOCAL-only。按用户指令，本次不执行阶段 115～117。详细进度见[项目进度](项目进度.md)。
 
-产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物：内部扩展计划约完成 87%～91%，相对 Codex 类编码 Agent 的能力覆盖粗估约 63%～72%，相对 Marvis 类桌面 Agent 约 33%～43%。通用规划、持久执行/验证/修复循环和首版安全代码工具面已经闭合；当前最大缺口转为多活动任务与托盘后台、真实项目上的长循环体验，以及登录态浏览器和 Computer/App Agent。后续继续采用 **Codex 优先、Marvis 后置** 的路线。
+产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物。路线把真实 Cloud cohort、Production Admission 和 Codex 类真实仓库长循环纳入正式分母后，阶段 114 完成时内部扩展计划约完成 84%～88%；相对 Codex 类编码 Agent 的能力覆盖粗估约 66%～75%，相对 Marvis 类桌面 Agent 约 37%～46%。通用规划、持久执行/验证/修复循环、首版安全代码工具面和三任务桌面后台已经闭合；当前最大缺口是真实模型生产闭环、真实仓库长循环，以及后续登录态浏览器和 Computer/App Agent。后续路线仍为 **Codex 优先、Marvis 后置**，但本次不继续执行。
 
 ## 一句话架构
 
@@ -190,9 +190,11 @@ flowchart LR
 123. [每 Turn Agent 模型路由裁决](doc/108-每Turn-Agent模型路由裁决.md)
 124. [真实校准证据与 Provider Admission](doc/109-真实校准证据与Provider-Admission.md)
 125. [候选 Agent 身份绑定与校准工件 v2](doc/110-候选Agent身份绑定与校准工件v2.md)
-126. [阶段 111～116：通用多 Agent 与 Edge/记事本实施路线](doc/111-116-通用多Agent与Edge记事本实施路线.md)
+126. [阶段 111～117：通用多 Agent、Codex 纵切与 Edge/记事本实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)
 127. [通用任务提案与 Capability Offer](doc/111-通用任务提案与Capability-Offer.md)
 128. [通用持久任务循环](doc/112-通用持久任务循环.md)
+129. [Codex 类安全编码工具](doc/113-Codex类安全编码工具.md)
+130. [并行任务与窗口后台运行](doc/114-并行任务与窗口后台运行.md)
 
 ## 目标 MVP 与当前边界
 
@@ -247,7 +249,7 @@ flowchart LR
 
 - `backend/`：Python 3.12、FastAPI、SQLite/PostgreSQL、Alembic、带 delivery/inbox/DLQ 和数据库 claim/fencing 的事务 Outbox、默认进程内实时 broker 与可选 RabbitMQ publisher-confirm/manual-ack transport、本地会话安全、任务控制与有界历史查询、角色级 Model Gateway、版本化冻结 Agent Registry/Prompt Package/脱敏 Descriptor/精确 digest Binder、不可变 Task Contract/Executable Plan generation/纯确定性 Compiler/只读规划投影、费用/重试预算、Retry-After、EWMA/熔断、版本化 Provider catalog、安全凭据与密文运行配置、ETag/幂等写 API、Fake/OpenAI-compatible Provider、Policy/Approval、一次性审批、Runner 授权证明、签名 IPC、Runner 自动换代/退避/熔断、持久化工具调用账本、`unknown` 人工对账、内容寻址 Runner 回执证据、跨实例并发幂等冲突归一化、版本化 Tool effect graph、数据库时间 lease/CAS/fencing、v2 DAG 并行 dispatcher/node 心跳/join 恢复、条件边与内容寻址 branch-decision、进程级/集群级公平 admission、事务维护的 ready membership/count 与 v6 keyset 页证明、owner/fence 定向 graph control mailbox、四域受保护运维快照/retention/DLQ requeue/hash-chain 审计、图级终态/skip/cancel reducer、内容寻址并行补偿计划、PostgreSQL `SKIP LOCKED/RETURNING` claim，以及真实 PostgreSQL/RabbitMQ 故障门禁和现有 v1 receipt-bound saga、Windows 每调用 AppContainer/Job Object 安全边界。
 - 后端另已将结构化写请求、受信计划、Policy/审批绑定、Tool 幂等键以及 effect graph/node/mode/fence 游标保存到 current-user DPAPI 受保护 checkpoint；可证明的 created/paused/waiting-approval 可跨 API 重启精确续跑，running Tool 只转 unknown/`waiting_reconciliation`，由显式 continue/terminate 恢复且绝不重放原 call。
-- `frontend/`：Vue 3、TypeScript、Vite 7，支持安全会话引导、任务提交、暂停/恢复/取消、`waiting_approval` 审批卡、审批失败对账、任务历史/集中 Reconciliation 列表、`waiting_reconciliation` 筛选、Runner 证据刷新、不可改写裁决、graph continue/terminate、attempt/compensation 二次确认和血缘导航、断线续传提示、任务快照、计划、实时事件时间线，Provider CRUD/健康/ETag/路由韧性控制面，以及 graph-control/admission/ready/Outbox 四域脱敏运维、告警/hash-chain 审计、retention/DLQ 二次确认与幂等重试；Vitest 组件测试已接入。
+- `frontend/`：Vue 3、TypeScript、Vite 7，最多三个活动 Task 各自保留事件 cursor、连接、预算、待审批/待输入和未读状态；控制请求绑定 exact Task/revision，启动时恢复最新的三个未完成任务。原有安全会话、Approval/Reconciliation、历史、运维和 Provider 控制面保持；Tauri 托盘、受监督冻结 sidecar 与 NSIS 打包已接入。
 - 当前 TaskProcessor 的磁盘容量任务通过离线 Fake Provider 获得结构化分类和计划，不调用网络模型；显式 `file.move` 请求使用受信任应用计划模板，路径只来自本地用户表单并强制进入 R1 一次性审批，不从自然语言或模型输出提取。
 - 统一对话入口已接入研究、本地知识、固定 MCP、Workspace 读写/检查/固定测试及 HTML/Markdown/PDF Artifact；阶段 111 已为确定性 Route 未命中接入受服务器 Offer 约束的 Turn Planner，阶段 112 已建立不重放 Provider 的通用 TaskLoop。阶段 113 新增项目根限定的递归搜索/批读、Git `status/diff/log` 和六个服务器 Command Profile，Python pytest/Ruff/mypy 与 Node/pnpm test/type-check/build 只在断网临时快照中执行，模型不能提供 executable、argv、cwd 或环境变量。
 - `web.search`/`web.page.read` 在显式开关与 SearchProvider 配置下可用，默认仍关闭；Task Workspace、ArtifactRevision/PatchReceipt、同源 HTML/Markdown/PDF Builder、PDF 全页 render evidence 和 HTML BrowserRenderRun 已实现。未验证研究结果仍只能停在 `awaiting_verification`。
@@ -260,9 +262,11 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-25 校准）
 
-阶段 77～110 checkpoint 与阶段 111～113 已完成。下一步推进阶段 114 三任务并行与托盘后台，随后是阶段 115 三角色 Cloud 候选生命周期/Calibration v3、阶段 116 独立 Edge Profile 与 Windows 记事本安全纵切。完整设计、失败策略和验收边界见[项目进度](项目进度.md)、[阶段 113 实现文档](doc/113-Codex类安全编码工具.md)与[阶段 111～116 实施路线](doc/111-116-通用多Agent与Edge记事本实施路线.md)。
+阶段 77～110 checkpoint 与阶段 111～114 已完成。阶段 115 真实 Cloud cohort/Production Admission、阶段 116 Codex 类真实仓库长循环与阶段 117 Edge/记事本仍保留在路线中，但按用户当前指令不执行。完整设计、失败策略和验收边界见[项目进度](项目进度.md)、[阶段 114 实现文档](doc/114-并行任务与窗口后台运行.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
+
+阶段 114 最终门禁：默认后端 775 项，`763 passed + 12 skipped`；Ruff、严格 mypy 283 个生产源码、Alembic/SQLite、Evaluation/Phase75 v16、17 份 immutable baseline 和 wheel Prompt 24/24 通过。前端 24 个文件 / 165 项、type-check/build、Rust `fmt/clippy/test`、冻结 sidecar 健康烟测、Tauri/NSIS 实构建、PostgreSQL 11/11 与 RabbitMQ 1/1 全部通过；环境已恢复且未改 baseline。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 

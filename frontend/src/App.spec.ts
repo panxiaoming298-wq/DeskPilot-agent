@@ -15,6 +15,7 @@ import type {
 
 const apiMocks = vi.hoisted(() => ({
   createTask: vi.fn(),
+  listTasks: vi.fn(),
 }))
 
 const eventComposableMocks = vi.hoisted(() => ({
@@ -35,6 +36,7 @@ const reconciliationComposableMocks = vi.hoisted(() => ({
 
 vi.mock('./api', () => ({
   createTask: apiMocks.createTask,
+  listTasks: apiMocks.listTasks,
 }))
 
 vi.mock('./components/ReconciliationCenter.vue', () => ({
@@ -88,7 +90,7 @@ let reconciliationRefreshing: Ref<boolean>
 let reconciliationCompensating: Ref<boolean>
 let reconciliationMessage: Ref<string | null>
 let reconciliationError: Ref<string | null>
-let capturedTask: Ref<Task | null>
+let capturedTasks: Array<Ref<Task | null>>
 
 const connect = vi.fn()
 const reconnectNow = vi.fn()
@@ -211,7 +213,7 @@ beforeEach(() => {
   reconciliationCompensating = ref(false)
   reconciliationMessage = ref(null)
   reconciliationError = ref(null)
-  capturedTask = ref(null)
+  capturedTasks = []
 
   connect.mockReset()
   reconnectNow.mockReset()
@@ -224,6 +226,13 @@ beforeEach(() => {
   createCompensation.mockReset()
   resetReconciliation.mockReset()
   apiMocks.createTask.mockReset()
+  apiMocks.listTasks.mockReset()
+  apiMocks.listTasks.mockResolvedValue({
+    items: [],
+    total: 0,
+    limit: 100,
+    offset: 0,
+  })
 
   eventComposableMocks.useTaskEvents.mockReturnValue({
     events,
@@ -239,7 +248,7 @@ beforeEach(() => {
   })
 
   controlComposableMocks.useTaskControl.mockImplementation((task: Ref<Task | null>) => {
-    capturedTask = task
+    capturedTasks.push(task)
     return {
       activeAction,
       controlMessage,
@@ -273,6 +282,51 @@ beforeEach(() => {
 })
 
 describe('App task workspace', () => {
+  it('启动时恢复最新的三个未完成任务并重建独立连接', async () => {
+    apiMocks.listTasks.mockResolvedValueOnce({
+      items: [
+        makeTask('running', {
+          task_id: 'task-newest',
+          updated_at: '2026-08-25T08:00:04Z',
+        }),
+        makeTask('paused', {
+          task_id: 'task-second',
+          updated_at: '2026-08-25T08:00:03Z',
+        }),
+        makeTask('waiting_approval', {
+          task_id: 'task-third',
+          updated_at: '2026-08-25T08:00:02Z',
+        }),
+        makeTask('created', {
+          task_id: 'task-fourth',
+          updated_at: '2026-08-25T08:00:01Z',
+        }),
+        makeTask('succeeded', {
+          task_id: 'task-terminal',
+          updated_at: '2026-08-25T08:00:05Z',
+        }),
+      ],
+      total: 5,
+      limit: 100,
+      offset: 0,
+    })
+
+    const wrapper = mountApp()
+    await flushPromises()
+
+    expect(apiMocks.listTasks).toHaveBeenCalledWith(undefined, 100, 0)
+    expect(connect.mock.calls.map(([taskId]) => taskId)).toEqual([
+      'task-third',
+      'task-second',
+      'task-newest',
+    ])
+    expect(wrapper.findAll('.task-runtime-card')).toHaveLength(3)
+    expect(wrapper.findAll('.task-runtime-card.selected')).toHaveLength(1)
+    expect(wrapper.find('.task-runtime-card.selected').attributes('data-testid')).toBe(
+      'task-runtime-3',
+    )
+  })
+
   it('从侧栏进入独立的任务历史与集中对账工作台', async () => {
     const wrapper = mountApp()
     const centerNav = wrapper.findAll('nav button').find(
@@ -325,7 +379,7 @@ describe('App task workspace', () => {
     await flushPromises()
 
     expect(createCompensation).toHaveBeenCalledTimes(1)
-    expect(capturedTask.value).toEqual(compensation)
+    expect(capturedTasks[1].value).toEqual(compensation)
     expect(resetEvents).toHaveBeenCalledTimes(2)
     expect(resetControl).toHaveBeenCalledTimes(2)
     expect(resetApproval).toHaveBeenCalledTimes(2)
@@ -435,7 +489,7 @@ describe('App task workspace', () => {
     expect(wrapper.find('[data-testid="cancel-task"]').exists()).toBe(false)
   })
 
-  it('resets and connects only after creation succeeds, and blocks a second active task', async () => {
+  it('resets and connects only after creation succeeds, and allows exactly three active tasks', async () => {
     let resolveCreation: ((task: Task) => void) | undefined
     apiMocks.createTask.mockImplementationOnce(
       () => new Promise<Task>((resolve) => {
@@ -463,11 +517,26 @@ describe('App task workspace', () => {
     expect(resetApproval).toHaveBeenCalledTimes(1)
     expect(resetReconciliation).toHaveBeenCalledTimes(1)
     expect(connect).toHaveBeenCalledWith('task-1')
-    expect(wrapper.get('button[type="submit"]').text()).toBe('当前任务进行中')
+    expect(wrapper.get('button[type="submit"]').text()).toBe('开始任务')
+
+    apiMocks.createTask
+      .mockResolvedValueOnce(makeTask('running', { task_id: 'task-2' }))
+      .mockResolvedValueOnce(makeTask('running', { task_id: 'task-3' }))
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(apiMocks.createTask).toHaveBeenCalledTimes(3)
+    expect(connect).toHaveBeenNthCalledWith(2, 'task-2')
+    expect(connect).toHaveBeenNthCalledWith(3, 'task-3')
+    expect(wrapper.get('button[type="submit"]').text()).toBe('三个任务槽位均已占用')
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.findAll('.task-runtime-card')).toHaveLength(3)
 
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(apiMocks.createTask).toHaveBeenCalledTimes(1)
+    expect(apiMocks.createTask).toHaveBeenCalledTimes(3)
   })
 
   it('submits an explicit single-file move only after both paths are provided', async () => {
@@ -543,6 +612,7 @@ describe('App task workspace', () => {
 
   it('shows reconnect details, retries immediately, and then reports recovery', async () => {
     const wrapper = mountApp()
+    await createVisibleTask(wrapper, makeTask('running'))
 
     streamError.value = '任务事件连接暂时不可用，正在尝试恢复。'
     connectionState.value = 'reconnecting'

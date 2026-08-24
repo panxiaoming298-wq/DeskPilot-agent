@@ -63,6 +63,17 @@ function mountStream() {
   return { stream: stream as TaskEventStream, wrapper }
 }
 
+function mountStreams(count: number) {
+  let streams: TaskEventStream[] = []
+  const wrapper = mount(defineComponent({
+    setup() {
+      streams = Array.from({ length: count }, () => useTaskEvents())
+      return () => h('div')
+    },
+  }))
+  return { streams, wrapper }
+}
+
 function taskEvent(
   seq: number,
   type = 'agent.started',
@@ -105,6 +116,34 @@ afterEach(() => {
 })
 
 describe('useTaskEvents', () => {
+  it('三个任务断线后各自从独立 cursor 恢复', async () => {
+    const taskIds = ['task-1', 'task-2', 'task-3']
+    const cursors = [3, 5, 7]
+    const { streams, wrapper } = mountStreams(3)
+
+    streams.forEach((stream, index) => stream.connect(taskIds[index]))
+    await flushPromises()
+    expect(MockWebSocket.instances).toHaveLength(3)
+
+    for (const [index, socket] of MockWebSocket.instances.entries()) {
+      socket.open()
+      socket.message(taskEvent(cursors[index], 'agent.started', taskIds[index]))
+      socket.closeFromServer()
+      expect(streams[index].connectionState.value).toBe('reconnecting')
+    }
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    await flushPromises()
+    const recovered = MockWebSocket.instances.slice(3)
+    expect(recovered).toHaveLength(3)
+    recovered.forEach((socket, index) => {
+      expect(socket.url).toContain(`/${taskIds[index]}?after_seq=${cursors[index]}`)
+      socket.open()
+      expect(streams[index].connectionState.value).toBe('connected')
+    })
+    wrapper.unmount()
+  })
+
   it('公开兼容连接标记并在握手成功后进入 connected', async () => {
     const { stream, wrapper } = mountStream()
 

@@ -113,7 +113,7 @@ run/report/baseline 模型同时接受 v1 与 v2：
 
 ## 8. 阶段 77～110 checkpoint
 
-2026-08-24 在 `codex/stage-110` 对阶段 77～110 做了独立的全量 checkpoint。最初冻结的 151 个路径全部纳入审阅；门禁期间增加 fail-closed downgrade guard、并发 claim/fencing 修复、PostgreSQL 确定性计划夹具、阶段 110 汇总 CI 和阶段 111～116 路线文档后，最终范围为 159 个路径（51 个已跟踪修改、108 个新增）。阶段 80 引用的 `frontend/src/components/WorkspaceApproval.preview.html` 明确纳入；真实 `.env`、数据库、缓存、JUnit/Vitest 报告、wheel 和构建产物均排除。
+2026-08-24 在 `codex/stage-110` 对阶段 77～110 做了独立的全量 checkpoint。最初冻结的 151 个路径全部纳入审阅；门禁期间增加 fail-closed downgrade guard、并发 claim/fencing 修复、PostgreSQL 确定性计划夹具、阶段 110 汇总 CI 和当时的阶段 111～116 路线文档（现已扩展并更名为阶段 111～117 路线）后，最终范围为 159 个路径（51 个已跟踪修改、108 个新增）。阶段 80 引用的 `frontend/src/components/WorkspaceApproval.preview.html` 明确纳入；真实 `.env`、数据库、缓存、JUnit/Vitest 报告、wheel 和构建产物均排除。
 
 迁移 `0037`～`0050` 的 downgrade 会在存在不可安全降级的数据时 fail closed。Agent 执行、Model Loop、Workspace、Patch 和 Supervisor 统一数据库锁顺序并在副作用前复验 exact active lease/fence/attempt；lease 重试耗尽会终结当前调用、父图与路由，清除并 fence 全部未完成兄弟节点，旧 worker 不能再写入。Patch confirmation 使用 CAS，PostgreSQL 计划测试通过固定数据复位与统计信息取得确定性，没有改 baseline、隐藏重试或放宽安全阈值。
 
@@ -125,4 +125,4 @@ run/report/baseline 模型同时接受 v1 与 v2：
 
 但阶段 109/110 已把生产启用安全链推进得明显快于通用任务能力。2026-08-24 路线复核后，项目下一实现优先级调整为阶段 111“模型驱动的通用任务提案 + 服务器 Capability Offer”，随后建设通用执行/验证/修复循环和 Codex 类安全编码工具包。现有确定性 Router 保留为安全回退，模型 proposal 不授予 Capability。
 
-Cloud 候选生命周期现在固定为阶段 115：先实现独立 Release Manifest、显式 activation channel、三角色 Calibration v3 Schema、固定测试和合成证据回放；没有 Admission 时所有候选仍为 disabled，本地稳定版本保持 preferred。真实 Provider/Judge capture、费用、真人评审和 production Admission 只有在用户明确选择 Provider、数据出站范围与评审安排后才执行；条件不具备时在该外部授权点暂停，不伪造真实 cohort，也不阻塞阶段 116 的 LOCAL-only Edge/记事本能力。详细顺序见根目录 `项目进度.md` 与 `doc/111-116-通用多Agent与Edge记事本实施路线.md`。
+Cloud 候选生命周期现在固定为阶段 115：先实现独立 Release Manifest、显式 activation channel 和三角色 Calibration v3 Schema，再在用户明确选择 Provider、数据出站范围、费用上限与评审安排后完成真实 Provider/Judge capture、真人评审和 production Admission。合成证据只能形成内部 checkpoint；没有真实 Admission 时所有候选仍为 disabled，本地稳定版本保持 preferred，且不得把阶段 115 标记为完成。阶段 116 改为 Codex 类真实仓库长循环，原 LOCAL-only Edge/记事本能力顺延为阶段 117。详细顺序见根目录 `项目进度.md` 与 `doc/111-117-通用多Agent与Codex纵切实施路线.md`。

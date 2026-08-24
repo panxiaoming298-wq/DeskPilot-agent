@@ -163,6 +163,9 @@ class TaskCreate(BaseModel):
 
 
 class TaskControlCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_last_event_seq: int = Field(ge=1)
     reason: str | None = Field(default=None, min_length=1, max_length=500)
 
 

@@ -16,6 +16,7 @@ from deskpilot.application.task_service import (
     EffectGraphNotFoundError,
     InvalidTaskTransitionError,
     TaskNotFoundError,
+    TaskRevisionConflictError,
     TaskService,
 )
 from deskpilot.domain.effect_graph import EffectGraphRead
@@ -67,6 +68,46 @@ def _transition_problem(error: InvalidTaskTransitionError) -> ProblemException:
             "current_status": error.current.value,
             "target_status": error.target.value,
             "allowed_statuses": sorted(status.value for status in error.allowed),
+        },
+    )
+
+
+def _require_control_revision(
+    task: TaskRead,
+    command: TaskControlCommand | None,
+) -> TaskControlCommand:
+    if command is None:
+        raise ProblemException(
+            status_code=428,
+            code="TASK_REVISION_REQUIRED",
+            title="任务控制缺少版本绑定",
+            detail="暂停、恢复或取消必须绑定当前任务事件版本。",
+            extensions={"current_last_event_seq": task.last_event_seq},
+        )
+    if command.expected_last_event_seq != task.last_event_seq:
+        raise ProblemException(
+            status_code=409,
+            code="TASK_REVISION_CONFLICT",
+            title="任务状态已更新",
+            detail="控制命令绑定的任务版本已经过期；请读取最新任务后重新决定。",
+            extensions={
+                "expected_last_event_seq": command.expected_last_event_seq,
+                "current_last_event_seq": task.last_event_seq,
+            },
+        )
+    return command
+
+
+def _revision_problem(error: TaskRevisionConflictError) -> ProblemException:
+    return ProblemException(
+        status_code=409,
+        code="TASK_REVISION_CONFLICT",
+        title="任务状态已更新",
+        detail="控制命令绑定的任务版本已经过期；请读取最新任务后重新决定。",
+        extensions={
+            "expected_last_event_seq": error.expected_last_event_seq,
+            "current_last_event_seq": error.current_last_event_seq,
+            "current_status": error.current_status.value,
         },
     )
 
@@ -288,18 +329,37 @@ async def pause_task(
 ) -> TaskRead:
     try:
         task = await service.get_task(task_id)
+        bound_command = _require_control_revision(task, command)
         if task.status is not TaskStatus.PAUSED:
             if task.status is not TaskStatus.RUNNING:
                 raise InvalidTaskTransitionError(task_id, task.status, TaskStatus.PAUSED)
-            await processor.pause(task_id)
+        if task.status is TaskStatus.PAUSED:
+            return await service.transition_task(
+                task_id,
+                TaskStatus.PAUSED,
+                command="pause",
+                reason=bound_command.reason,
+                expected_last_event_seq=bound_command.expected_last_event_seq,
+            )
+        reservation = await service.reserve_task_control(
+            task_id,
+            command="pause",
+            target=TaskStatus.PAUSED,
+            expected_last_event_seq=bound_command.expected_last_event_seq,
+        )
+        await processor.pause(task_id)
         return await service.transition_task(
             task_id,
             TaskStatus.PAUSED,
             command="pause",
-            reason=command.reason if command else None,
+            reason=bound_command.reason,
+            expected_last_event_seq=bound_command.expected_last_event_seq,
+            control_request_event_id=reservation.event_id,
         )
     except TaskNotFoundError as error:
         raise _not_found_problem(task_id) from error
+    except TaskRevisionConflictError as error:
+        raise _revision_problem(error) from error
     except InvalidTaskTransitionError as error:
         raise _transition_problem(error) from error
 
@@ -313,6 +373,7 @@ async def resume_task(
 ) -> TaskRead:
     try:
         task = await service.get_task(task_id)
+        bound_command = _require_control_revision(task, command)
         if task.status is not TaskStatus.PAUSED:
             raise InvalidTaskTransitionError(task_id, task.status, TaskStatus.RUNNING)
         if not processor.can_resume(task_id):
@@ -321,12 +382,15 @@ async def resume_task(
             task_id,
             TaskStatus.RUNNING,
             command="resume",
-            reason=command.reason if command else None,
+            reason=bound_command.reason,
+            expected_last_event_seq=bound_command.expected_last_event_seq,
         )
         processor.resume(task_id)
         return resumed
     except TaskNotFoundError as error:
         raise _not_found_problem(task_id) from error
+    except TaskRevisionConflictError as error:
+        raise _revision_problem(error) from error
     except InvalidTaskTransitionError as error:
         raise _transition_problem(error) from error
     except TaskRuntimeUnavailableError as error:
@@ -347,21 +411,37 @@ async def cancel_task(
 ) -> TaskRead:
     try:
         task = await service.get_task(task_id)
-        if task.status is not TaskStatus.CANCELLED:
-            if task.status.is_terminal:
-                raise InvalidTaskTransitionError(task_id, task.status, TaskStatus.CANCELLED)
-            await processor.cancel(
+        bound_command = _require_control_revision(task, command)
+        if task.status is TaskStatus.CANCELLED:
+            return await service.cancel_task(
                 task_id,
-                reason=command.reason if command else None,
+                reason=bound_command.reason,
+                expected_last_event_seq=bound_command.expected_last_event_seq,
             )
+        if task.status.is_terminal:
+            raise InvalidTaskTransitionError(task_id, task.status, TaskStatus.CANCELLED)
+        reservation = await service.reserve_task_control(
+            task_id,
+            command="cancel",
+            target=TaskStatus.CANCELLED,
+            expected_last_event_seq=bound_command.expected_last_event_seq,
+        )
+        await processor.cancel(
+            task_id,
+            reason=bound_command.reason,
+        )
         cancelled = await service.cancel_task(
             task_id,
-            reason=command.reason if command else None,
+            reason=bound_command.reason,
+            expected_last_event_seq=bound_command.expected_last_event_seq,
+            control_request_event_id=reservation.event_id,
         )
         processor.forget(task_id)
         return cancelled
     except TaskNotFoundError as error:
         raise _not_found_problem(task_id) from error
+    except TaskRevisionConflictError as error:
+        raise _revision_problem(error) from error
     except EffectGraphControlDeliveryTimeoutError as error:
         raise ProblemException(
             status_code=503,

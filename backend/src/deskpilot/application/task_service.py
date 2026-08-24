@@ -162,6 +162,24 @@ class TaskNotFoundError(LookupError):
         self.task_id = task_id
 
 
+class TaskRevisionConflictError(RuntimeError):
+    code = "TASK_REVISION_CONFLICT"
+
+    def __init__(
+        self,
+        task_id: str,
+        *,
+        expected_last_event_seq: int,
+        current_last_event_seq: int,
+        current_status: TaskStatus,
+    ) -> None:
+        super().__init__(f"Task revision is stale: {task_id}")
+        self.task_id = task_id
+        self.expected_last_event_seq = expected_last_event_seq
+        self.current_last_event_seq = current_last_event_seq
+        self.current_status = current_status
+
+
 class EffectGraphNotFoundError(LookupError):
     code = "EFFECT_GRAPH_NOT_FOUND"
 
@@ -6061,6 +6079,8 @@ class TaskService:
         command: str,
         reason: str | None = None,
         requested_by: str = "user",
+        expected_last_event_seq: int | None = None,
+        control_request_event_id: str | None = None,
     ) -> TaskRead:
         event_created = False
         async with self._task_locks[task_id]:
@@ -6071,6 +6091,14 @@ class TaskService:
                         raise TaskNotFoundError(task_id)
 
                     current = TaskStatus(task.status)
+                    await self._assert_control_revision(
+                        session,
+                        task,
+                        command=command,
+                        target=target,
+                        expected_last_event_seq=expected_last_event_seq,
+                        control_request_event_id=control_request_event_id,
+                    )
                     if (command == "pause" and current is TaskStatus.PAUSED) or (
                         command == "cancel" and current is TaskStatus.CANCELLED
                     ):
@@ -6083,6 +6111,10 @@ class TaskService:
                             "command": command,
                             "requested_by": requested_by,
                         }
+                        if expected_last_event_seq is not None:
+                            payload["expected_last_event_seq"] = expected_last_event_seq
+                        if control_request_event_id is not None:
+                            payload["control_request_event_id"] = control_request_event_id
                         if reason is not None:
                             payload["reason"] = reason
                         event_type = (
@@ -6112,6 +6144,8 @@ class TaskService:
         *,
         reason: str | None = None,
         requested_by: str = "user",
+        expected_last_event_seq: int | None = None,
+        control_request_event_id: str | None = None,
     ) -> TaskRead:
         """Cancel a task and invalidate any unconsumed one-shot grant atomically."""
         event_created = False
@@ -6122,6 +6156,14 @@ class TaskService:
                     if task is None:
                         raise TaskNotFoundError(task_id)
                     current = TaskStatus(task.status)
+                    await self._assert_control_revision(
+                        session,
+                        task,
+                        command="cancel",
+                        target=TaskStatus.CANCELLED,
+                        expected_last_event_seq=expected_last_event_seq,
+                        control_request_event_id=control_request_event_id,
+                    )
                     if current is TaskStatus.CANCELLED:
                         return self._to_task(task)
                     self._ensure_transition(task_id, current, TaskStatus.CANCELLED)
@@ -6202,6 +6244,10 @@ class TaskService:
                         "command": "cancel",
                         "requested_by": requested_by,
                     }
+                    if expected_last_event_seq is not None:
+                        payload["expected_last_event_seq"] = expected_last_event_seq
+                    if control_request_event_id is not None:
+                        payload["control_request_event_id"] = control_request_event_id
                     if reason is not None:
                         payload["reason"] = reason
                     await self._append_event_record(
@@ -6217,6 +6263,95 @@ class TaskService:
         if event_created:
             self._notify_outbox()
         return snapshot
+
+    async def reserve_task_control(
+        self,
+        task_id: str,
+        *,
+        command: str,
+        target: TaskStatus,
+        expected_last_event_seq: int,
+        requested_by: str = "user",
+    ) -> TaskEventRead:
+        """Persist exact user control intent before stopping a live runtime."""
+        async with self._task_locks[task_id]:
+            async with self._database.session() as session:
+                async with session.begin():
+                    task = await session.get(TaskRecord, task_id)
+                    if task is None:
+                        raise TaskNotFoundError(task_id)
+                    current = TaskStatus(task.status)
+                    if task.last_event_seq != expected_last_event_seq:
+                        raise TaskRevisionConflictError(
+                            task_id,
+                            expected_last_event_seq=expected_last_event_seq,
+                            current_last_event_seq=task.last_event_seq,
+                            current_status=current,
+                        )
+                    self._ensure_transition(task_id, current, target)
+                    event = await self._append_event_record(
+                        session,
+                        task,
+                        "task.control_requested",
+                        {
+                            "from": current.value,
+                            "to": target.value,
+                            "requested_action": command,
+                            "requested_by": requested_by,
+                            "expected_last_event_seq": expected_last_event_seq,
+                        },
+                        new_status=None,
+                    )
+        self._notify_outbox()
+        return event
+
+    async def _assert_control_revision(
+        self,
+        session: AsyncSession,
+        task: TaskRecord,
+        *,
+        command: str,
+        target: TaskStatus,
+        expected_last_event_seq: int | None,
+        control_request_event_id: str | None,
+    ) -> None:
+        current = TaskStatus(task.status)
+        if expected_last_event_seq is None:
+            if control_request_event_id is not None:
+                raise TaskRevisionConflictError(
+                    task.task_id,
+                    expected_last_event_seq=task.last_event_seq,
+                    current_last_event_seq=task.last_event_seq,
+                    current_status=current,
+                )
+            return
+        if control_request_event_id is None:
+            if task.last_event_seq != expected_last_event_seq:
+                raise TaskRevisionConflictError(
+                    task.task_id,
+                    expected_last_event_seq=expected_last_event_seq,
+                    current_last_event_seq=task.last_event_seq,
+                    current_status=current,
+                )
+            return
+
+        reservation = await session.get(TaskEventRecord, control_request_event_id)
+        payload = dict(reservation.payload or {}) if reservation is not None else {}
+        if (
+            reservation is None
+            or reservation.task_id != task.task_id
+            or reservation.type != "task.control_requested"
+            or reservation.seq != expected_last_event_seq + 1
+            or payload.get("requested_action") != command
+            or payload.get("to") != target.value
+            or payload.get("expected_last_event_seq") != expected_last_event_seq
+        ):
+            raise TaskRevisionConflictError(
+                task.task_id,
+                expected_last_event_seq=expected_last_event_seq,
+                current_last_event_seq=task.last_event_seq,
+                current_status=current,
+            )
 
     async def _append_event_record(
         self,

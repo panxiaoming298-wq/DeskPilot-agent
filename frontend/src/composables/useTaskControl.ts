@@ -62,6 +62,7 @@ export function useTaskControl(task: Ref<Task | null>) {
     if (activeAction.value || !task.value) return
 
     const taskId = task.value.task_id
+    const expectedLastEventSeq = task.value.last_event_seq
     const generation = ++requestGeneration
     const normalizedReason = reason?.trim()
 
@@ -73,7 +74,10 @@ export function useTaskControl(task: Ref<Task | null>) {
       const snapshot = await controlTask(
         taskId,
         action,
-        normalizedReason ? { reason: normalizedReason } : undefined,
+        {
+          expected_last_event_seq: expectedLastEventSeq,
+          ...(normalizedReason ? { reason: normalizedReason } : {}),
+        },
       )
       if (!isCurrentRequest(generation, taskId)) return
 

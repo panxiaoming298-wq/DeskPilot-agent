@@ -406,9 +406,13 @@ def test_task_cancel_broadcasts_to_in_flight_dag_runner_calls(
             _approve(test_client, approval)
         assert runner.started.wait(timeout=5)
 
+        snapshot = test_client.get(f"/api/v1/tasks/{task_id}").json()
         cancelled = test_client.post(
             f"/api/v1/tasks/{task_id}:cancel",
-            json={"reason": "stop the active graph"},
+            json={
+                "expected_last_event_seq": snapshot["last_event_seq"],
+                "reason": "stop the active graph",
+            },
         )
         graph = test_client.get(f"/api/v1/tasks/{task_id}/effect-graph").json()
         events = test_client.get(f"/api/v1/tasks/{task_id}/events").json()
@@ -492,9 +496,13 @@ def test_remote_api_routes_cancel_to_live_dag_owner_runner_calls(
             )
 
         owner_runner.cancel_observer = observe_cancel_intent
+        snapshot = requester_client.get(f"/api/v1/tasks/{task_id}").json()
         cancelled = requester_client.post(
             f"/api/v1/tasks/{task_id}:cancel",
-            json={"reason": "cancel through the remote API"},
+            json={
+                "expected_last_event_seq": snapshot["last_event_seq"],
+                "reason": "cancel through the remote API",
+            },
         )
         graph = owner_client.get(f"/api/v1/tasks/{task_id}/effect-graph").json()
 

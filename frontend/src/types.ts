@@ -173,6 +173,7 @@ export interface EvaluationReport {
 export type TaskControlAction = 'pause' | 'resume' | 'cancel'
 
 export interface TaskControlCommand {
+  expected_last_event_seq: number
   reason?: string | null
 }
 

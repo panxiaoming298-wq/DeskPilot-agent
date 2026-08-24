@@ -2,6 +2,7 @@
 
 Vue 3 + TypeScript 本地控制台，当前包含：
 
+- 最多三个活动任务同时运行；每个任务拥有独立的事件 cursor、连接、预算、待审批/待输入和未读状态。
 - 任务创建、状态快照、结构化计划和实时事件时间线。
 - 运行中任务暂停、暂停任务恢复、所有非终态任务取消及取消二次确认。
 - 断线状态、1/2/4/8 秒恢复退避、手动重连、会话重认证和按事件序号续传提示。
@@ -28,7 +29,7 @@ pnpm dev
 
 ## 桌面壳
 
-普通网页开发仍使用 `pnpm dev`。安装 Rust/MSVC 构建环境后，可在后端已启动的情况下运行：
+普通网页开发仍使用 `pnpm dev`。安装 Rust/MSVC 构建环境后，可运行：
 
 ```powershell
 pnpm desktop:dev
@@ -40,11 +41,11 @@ pnpm desktop:dev
 pnpm desktop:build
 ```
 
-桌面生产构建会连接 `http://127.0.0.1:8000`。当前 Tauri 只负责窗口和前端资源，Python 后端仍按原方式独立启动，尚未打包为 sidecar。
+桌面生产构建会用锁定的 Python 依赖冻结 FastAPI/Runner 后端，再将固定 sibling sidecar 与 Tauri/NSIS 一起打包。sidecar 只监听 `127.0.0.1:8000`，由 Rust supervisor 启动、限次退避重启并在明确退出时停止。关闭主窗口只隐藏到托盘，后台任务继续；托盘可恢复窗口、查看活动任务数和明确退出。它不是 Windows Service，也不承诺机器重启后无人值守继续。
 
 前端启动后自动从受信任的 `/api/v1/session` 获取进程级令牌并只保存在内存中。REST 自动添加 Bearer token，WebSocket 通过子协议认证；API 重启导致令牌失效时会自动重新建立会话。事件连接恢复后会从最后一个 `seq` 继续接收。服务端 Problem Details 的 `detail` 会作为可读错误展示。
 
-任务控制请求不做乐观状态切换。Pause/Resume/Cancel 成功后使用服务端完整 Task 快照；响应中断或 `409` 时先查询任务真值再决定提示，尤其不会盲目重放非幂等 Resume。API 重启后内存检查点丢失时，暂停任务会保持暂停并提示取消后重新创建。
+任务控制请求不做乐观状态切换。Pause/Resume/Cancel 必须同时绑定 exact Task ID 和当前 `last_event_seq`；缺少 revision 返回 `428`，过期 revision 返回 `409`。成功后使用服务端完整 Task 快照，响应中断时先查询任务真值再决定提示，不会盲目重放非幂等 Resume。桌面重启后会恢复最新的三个未完成任务并从各自 cursor 重连。
 
 ## 模型凭据
 
@@ -66,4 +67,4 @@ pnpm type-check
 pnpm build
 ```
 
-组件测试使用 Vitest、Vue Test Utils 和 jsdom；当前 21 个文件、141 个用例额外覆盖长期记忆来源/Provider 使用展示、待确认提案、类型化新建和两次显式删除确认。阶段 74 未修改前端；CompactionSnapshot API 已为后续统一工作台提供 source/coverage/conflict/stale/parent 数据。执行 Vite/Vitest 需要 Node 20.19+。
+组件测试使用 Vitest、Vue Test Utils 和 jsdom；阶段 114 共 24 个测试文件、165 项，覆盖三任务槽位、独立 cursor/重连、焦点切换、重启恢复、exact revision 控制和 Tauri 托盘计数桥接。执行 Vite/Vitest 需要 Node 20.19+。

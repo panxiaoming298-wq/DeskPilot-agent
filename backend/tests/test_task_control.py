@@ -2,11 +2,14 @@ import sqlite3
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
 from pydantic import SecretStr
 
+from deskpilot.application.task_service import TaskRevisionConflictError
 from deskpilot.core.config import Settings
-from deskpilot.domain.schemas import FileMoveTaskRequest, TaskCreate
+from deskpilot.domain.schemas import FileMoveTaskRequest, TaskCreate, TaskStatus
 from deskpilot.main import create_app
 
 
@@ -35,6 +38,26 @@ def _events(client: TestClient, task_id: str) -> list[dict[str, object]]:
     return response.json()
 
 
+def _control(
+    client: TestClient,
+    task_id: str,
+    command: str,
+    *,
+    reason: str | None = None,
+    expected_last_event_seq: int | None = None,
+) -> Response:
+    if expected_last_event_seq is None:
+        snapshot = client.get(f"/api/v1/tasks/{task_id}")
+        assert snapshot.status_code == 200
+        expected_last_event_seq = int(snapshot.json()["last_event_seq"])
+    payload: dict[str, object] = {
+        "expected_last_event_seq": expected_last_event_seq,
+    }
+    if reason is not None:
+        payload["reason"] = reason
+    return client.post(f"/api/v1/tasks/{task_id}:{command}", json=payload)
+
+
 def _read_transient_database_file(path: Path, *, timeout: float = 2) -> bytes | None:
     deadline = time.monotonic() + timeout
     while True:
@@ -54,25 +77,42 @@ def test_cancel_stops_processor_and_is_idempotent(slow_client: TestClient) -> No
     created = slow_client.post("/api/v1/tasks", json={"goal": "取消慢任务"}).json()
     task_id = str(created["task_id"])
 
-    cancelled = slow_client.post(
-        f"/api/v1/tasks/{task_id}:cancel",
-        json={"reason": "用户改变主意"},
+    running = _wait_for_status(slow_client, task_id, "running")
+    expected_last_event_seq = int(running["last_event_seq"])
+    cancelled = _control(
+        slow_client,
+        task_id,
+        "cancel",
+        reason="用户改变主意",
+        expected_last_event_seq=expected_last_event_seq,
     )
 
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
     first_events = _events(slow_client, task_id)
     assert first_events[-1]["type"] == "task.cancelled"
+    reservation = next(
+        event for event in first_events if event["type"] == "task.control_requested"
+    )
+    assert reservation["payload"] == {
+        "from": "running",
+        "to": "cancelled",
+        "requested_action": "cancel",
+        "requested_by": "user",
+        "expected_last_event_seq": expected_last_event_seq,
+    }
     assert first_events[-1]["payload"] == {
-        "from": "classifying",
+        "from": "running",
         "to": "cancelled",
         "command": "cancel",
         "requested_by": "user",
+        "expected_last_event_seq": expected_last_event_seq,
+        "control_request_event_id": reservation["event_id"],
         "reason": "用户改变主意",
     }
 
     time.sleep(0.25)
-    repeated = slow_client.post(f"/api/v1/tasks/{task_id}:cancel")
+    repeated = _control(slow_client, task_id, "cancel")
     second_events = _events(slow_client, task_id)
 
     assert repeated.status_code == 200
@@ -87,10 +127,7 @@ def test_pause_resume_continues_from_checkpoint_without_duplicate_events(
     task_id = str(created["task_id"])
     _wait_for_status(slow_client, task_id, "running")
 
-    paused = slow_client.post(
-        f"/api/v1/tasks/{task_id}:pause",
-        json={"reason": "等待用户确认"},
-    )
+    paused = _control(slow_client, task_id, "pause", reason="等待用户确认")
     assert paused.status_code == 200
     assert paused.json()["status"] == "paused"
     paused_seq = paused.json()["last_event_seq"]
@@ -100,14 +137,11 @@ def test_pause_resume_continues_from_checkpoint_without_duplicate_events(
     assert still_paused["status"] == "paused"
     assert still_paused["last_event_seq"] == paused_seq
 
-    repeated_pause = slow_client.post(f"/api/v1/tasks/{task_id}:pause")
+    repeated_pause = _control(slow_client, task_id, "pause")
     assert repeated_pause.status_code == 200
     assert repeated_pause.json()["last_event_seq"] == paused_seq
 
-    resumed = slow_client.post(
-        f"/api/v1/tasks/{task_id}:resume",
-        json={"reason": "确认完成"},
-    )
+    resumed = _control(slow_client, task_id, "resume", reason="确认完成")
     assert resumed.status_code == 200
     assert resumed.json()["status"] == "running"
     completed = _wait_for_status(slow_client, task_id, "succeeded")
@@ -123,7 +157,7 @@ def test_pause_resume_continues_from_checkpoint_without_duplicate_events(
     assert event_types.count("task.classified") == 1
     assert event_types.count("policy.evaluated") == 1
     assert event_types[-1] == "task.completed"
-    assert completed["last_event_seq"] == len(events) == 24
+    assert completed["last_event_seq"] == len(events) == 25
     commands = [
         event["payload"].get("command")
         for event in events
@@ -138,7 +172,7 @@ def test_pause_before_running_is_rejected_without_stopping_processor(
     created = slow_client.post("/api/v1/tasks", json={"goal": "过早暂停"}).json()
     task_id = str(created["task_id"])
 
-    response = slow_client.post(f"/api/v1/tasks/{task_id}:pause")
+    response = _control(slow_client, task_id, "pause")
 
     assert response.status_code == 409
     assert response.headers["content-type"] == "application/problem+json"
@@ -147,13 +181,98 @@ def test_pause_before_running_is_rejected_without_stopping_processor(
     _wait_for_status(slow_client, task_id, "succeeded")
 
 
+def test_control_requires_an_explicit_task_revision(
+    slow_client: TestClient,
+) -> None:
+    created = slow_client.post("/api/v1/tasks", json={"goal": "缺少版本绑定"}).json()
+    task_id = str(created["task_id"])
+    _wait_for_status(slow_client, task_id, "running")
+    paused = _control(slow_client, task_id, "pause")
+    assert paused.status_code == 200
+    paused_snapshot = paused.json()
+    events_before = _events(slow_client, task_id)
+
+    response = slow_client.post(f"/api/v1/tasks/{task_id}:resume")
+
+    assert response.status_code == 428
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "TASK_REVISION_REQUIRED"
+    assert response.json()["current_last_event_seq"] == paused_snapshot["last_event_seq"]
+    assert slow_client.get(f"/api/v1/tasks/{task_id}").json() == paused_snapshot
+    assert _events(slow_client, task_id) == events_before
+
+
+def test_stale_control_revision_fails_closed_without_resuming_processor(
+    slow_client: TestClient,
+) -> None:
+    created = slow_client.post("/api/v1/tasks", json={"goal": "过期版本绑定"}).json()
+    task_id = str(created["task_id"])
+    _wait_for_status(slow_client, task_id, "running")
+    paused = _control(slow_client, task_id, "pause")
+    assert paused.status_code == 200
+    paused_snapshot = paused.json()
+    events_before = _events(slow_client, task_id)
+
+    response = _control(
+        slow_client,
+        task_id,
+        "resume",
+        expected_last_event_seq=int(paused_snapshot["last_event_seq"]) - 1,
+    )
+
+    assert response.status_code == 409
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "TASK_REVISION_CONFLICT"
+    assert response.json()["expected_last_event_seq"] == (
+        int(paused_snapshot["last_event_seq"]) - 1
+    )
+    assert response.json()["current_last_event_seq"] == paused_snapshot["last_event_seq"]
+    assert slow_client.get(f"/api/v1/tasks/{task_id}").json() == paused_snapshot
+    assert _events(slow_client, task_id) == events_before
+
+
+def test_task_service_rechecks_control_revision_inside_task_lock(
+    client: TestClient,
+) -> None:
+    service = client.app.state.task_service
+
+    async def exercise_atomic_guards() -> None:
+        for command in ("pause", "cancel"):
+            task = await service.create_task(TaskCreate(goal=f"{command} atomic revision"))
+            stale_seq = task.last_event_seq
+            await service.append_event(task.task_id, "test.revision.advanced", {})
+
+            with pytest.raises(TaskRevisionConflictError) as raised:
+                if command == "pause":
+                    await service.transition_task(
+                        task.task_id,
+                        target=TaskStatus.PAUSED,
+                        command="pause",
+                        expected_last_event_seq=stale_seq,
+                    )
+                else:
+                    await service.cancel_task(
+                        task.task_id,
+                        expected_last_event_seq=stale_seq,
+                    )
+
+            assert raised.value.expected_last_event_seq == stale_seq
+            assert raised.value.current_last_event_seq == stale_seq + 1
+            snapshot = await service.get_task(task.task_id)
+            assert snapshot.status.value == "created"
+            assert snapshot.last_event_seq == stale_seq + 1
+
+    assert client.portal is not None
+    client.portal.call(exercise_atomic_guards)
+
+
 def test_terminal_task_rejects_pause_resume_and_cancel(client: TestClient) -> None:
     created = client.post("/api/v1/tasks", json={"goal": "完成后拒绝控制"}).json()
     task_id = str(created["task_id"])
     _wait_for_status(client, task_id, "succeeded")
 
     for command in ("pause", "resume", "cancel"):
-        response = client.post(f"/api/v1/tasks/{task_id}:{command}")
+        response = _control(client, task_id, command)
         assert response.status_code == 409
         assert response.json()["code"] == "TASK_TRANSITION_NOT_ALLOWED"
         assert response.json()["current_status"] == "succeeded"
@@ -181,11 +300,11 @@ def test_paused_task_resumes_from_durable_checkpoint_after_api_restart(
         created = first_client.post("/api/v1/tasks", json={"goal": "跨重启恢复"}).json()
         task_id = str(created["task_id"])
         _wait_for_status(first_client, task_id, "running")
-        paused = first_client.post(f"/api/v1/tasks/{task_id}:pause")
+        paused = _control(first_client, task_id, "pause")
         assert paused.status_code == 200
 
     with TestClient(create_app(settings), headers=headers) as restarted_client:
-        response = restarted_client.post(f"/api/v1/tasks/{task_id}:resume")
+        response = _control(restarted_client, task_id, "resume")
         assert response.status_code == 200
         assert response.json()["status"] == "running"
         completed = _wait_for_status(restarted_client, task_id, "succeeded")
@@ -320,7 +439,7 @@ def test_corrupt_checkpoint_fails_closed_without_runner_dispatch(
         ).json()
         task_id = str(created["task_id"])
         _wait_for_status(first_client, task_id, "running")
-        assert first_client.post(f"/api/v1/tasks/{task_id}:pause").status_code == 200
+        assert _control(first_client, task_id, "pause").status_code == 200
 
     with sqlite3.connect(database_path) as connection:
         connection.execute(
@@ -368,7 +487,7 @@ def test_stale_checkpoint_event_binding_fails_closed_without_runner_dispatch(
         ).json()
         task_id = str(created["task_id"])
         _wait_for_status(first_client, task_id, "running")
-        assert first_client.post(f"/api/v1/tasks/{task_id}:pause").status_code == 200
+        assert _control(first_client, task_id, "pause").status_code == 200
 
     with sqlite3.connect(database_path) as connection:
         connection.execute(

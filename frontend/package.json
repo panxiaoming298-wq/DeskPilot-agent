@@ -10,7 +10,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
-    "build:desktop": "vue-tsc --noEmit && vite build --mode tauri",
+    "build:sidecar": "node scripts/build-sidecar.mjs",
+    "build:desktop": "pnpm build:sidecar && vue-tsc --noEmit && vite build --mode tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
     "preview": "vite preview",
@@ -19,6 +20,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
     "gsap": "^3.15.0",
     "vue": "^3.5.0"
   },

@@ -312,27 +312,33 @@ export function getTask(taskId: string): Promise<Task> {
 export function controlTask(
   taskId: string,
   action: TaskControlAction,
-  command?: TaskControlCommand,
+  command: TaskControlCommand,
 ): Promise<Task> {
-  const normalizedReason = command?.reason?.trim()
+  if (!command || !Number.isInteger(command.expected_last_event_seq) || command.expected_last_event_seq < 1) {
+    throw new Error('任务控制必须绑定有效的 last_event_seq。')
+  }
+  const normalizedReason = command.reason?.trim()
   return request<Task>(
     `/api/v1/tasks/${encodeURIComponent(taskId)}:${action}`,
     {
       method: 'POST',
-      body: normalizedReason ? JSON.stringify({ reason: normalizedReason }) : undefined,
+      body: JSON.stringify({
+        expected_last_event_seq: command.expected_last_event_seq,
+        ...(normalizedReason ? { reason: normalizedReason } : {}),
+      }),
     },
   )
 }
 
-export function pauseTask(taskId: string, command?: TaskControlCommand): Promise<Task> {
+export function pauseTask(taskId: string, command: TaskControlCommand): Promise<Task> {
   return controlTask(taskId, 'pause', command)
 }
 
-export function resumeTask(taskId: string, command?: TaskControlCommand): Promise<Task> {
+export function resumeTask(taskId: string, command: TaskControlCommand): Promise<Task> {
   return controlTask(taskId, 'resume', command)
 }
 
-export function cancelTask(taskId: string, command?: TaskControlCommand): Promise<Task> {
+export function cancelTask(taskId: string, command: TaskControlCommand): Promise<Task> {
   return controlTask(taskId, 'cancel', command)
 }
 
