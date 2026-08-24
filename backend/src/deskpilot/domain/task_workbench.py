@@ -166,6 +166,7 @@ class TurnRouteRead(BaseModel):
             "workspace_project_search",
             "workspace_project_batch_read",
             "workspace_git_inspect",
+            "workspace_command_profile",
         ]
         | None
     )

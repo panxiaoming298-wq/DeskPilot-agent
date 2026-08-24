@@ -29,12 +29,14 @@ from deskpilot.application.capability_input_binding_catalog import (
     BrowserVerifyExecutorInput,
     KnowledgeLocalExecutorInput,
     McpTextMetricsExecutorInput,
+    WorkspaceCommandExecutorInput,
     WorkspaceNodeTestExecutorInput,
     WorkspaceProjectBatchReadExecutorInput,
     WorkspaceProjectSearchExecutorInput,
     WorkspacePythonTestExecutorInput,
     WorkspaceSnapshotCheckExecutorInput,
 )
+from deskpilot.application.command_profile_catalog import CommandProfileCatalog
 from deskpilot.application.mcp_control_plane import SERVER_ID
 from deskpilot.application.workspace_coding_runtime import WorkspaceCodingRuntime
 from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
@@ -52,6 +54,12 @@ from deskpilot.domain.capability_execution import (
     CapabilityRecoveryPolicy,
     CapabilityResultKind,
     VerifiedCapabilityResultRef,
+)
+from deskpilot.domain.command_profiles import (
+    CommandProfile,
+    CommandProfileId,
+    WorkspaceCommandRead,
+    WorkspaceCommandSnapshot,
 )
 from deskpilot.domain.knowledge import KnowledgeSearchRead
 from deskpilot.domain.mcp import (
@@ -203,6 +211,33 @@ def _node_result() -> WorkspaceNodeTestRead:
     )
 
 
+def _command_result(profile: CommandProfile) -> WorkspaceCommandRead:
+    output = "1 lint error"
+    material: dict[str, Any] = {
+        "schema_version": "deskpilot.workspace-command-read.v1",
+        "command_profile_id": profile.command_profile_id,
+        "profile_digest": profile.profile_digest,
+        "project_path": "backend",
+        "snapshot_digest": "1" * 64,
+        "toolchain_digest": "2" * 64,
+        "status": "failed",
+        "exit_code": 1,
+        "duration_ms": 12,
+        "output_summary": output,
+        "output_digest": sha256_digest({"output": output}),
+        "output_truncated": False,
+        "termination_reason": "completed",
+        "cancellation_receipt_digest": None,
+        "isolation_mode": "windows_appcontainer",
+        "network_access": False,
+        "temporary_snapshot": True,
+        "snapshot_mutations_discarded": True,
+    }
+    return WorkspaceCommandRead.model_validate(
+        {**material, "result_digest": sha256_digest(material)}
+    )
+
+
 class FakeKnowledge:
     def __init__(self) -> None:
         self.calls: list[tuple[str, int]] = []
@@ -276,6 +311,32 @@ class FakeNodeRuntime:
         del snapshot
         self.calls += 1
         return _node_result()
+
+
+class FakeCommandSnapshots:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, CommandProfileId]] = []
+
+    def prepare_command_snapshot(
+        self,
+        project_path: str,
+        profile: CommandProfile,
+    ) -> WorkspaceCommandSnapshot:
+        self.calls.append((project_path, profile.command_profile_id))
+        return cast(WorkspaceCommandSnapshot, object())
+
+
+class FakeCommandRuntime:
+    enabled_profile_ids: frozenset[CommandProfileId] = frozenset({"python.ruff.v1"})
+
+    def __init__(self, profile: CommandProfile) -> None:
+        self._profile = profile
+        self.calls = 0
+
+    def run(self, snapshot: WorkspaceCommandSnapshot) -> WorkspaceCommandRead:
+        del snapshot
+        self.calls += 1
+        return _command_result(self._profile)
 
 
 class FakeArtifacts:
@@ -421,6 +482,7 @@ BaseModelInput = (
     | WorkspaceSnapshotCheckExecutorInput
     | WorkspacePythonTestExecutorInput
     | WorkspaceNodeTestExecutorInput
+    | WorkspaceCommandExecutorInput
     | WorkspaceProjectSearchExecutorInput
     | WorkspaceProjectBatchReadExecutorInput
     | ArtifactHtmlExecutorInput
@@ -485,6 +547,39 @@ async def test_project_coding_adapters_execute_and_verify_through_generic_engine
             "workspace.project.read_many.v1",
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_command_profile_adapter_verifies_failure_receipt_for_generic_repair() -> None:
+    profiles = CommandProfileCatalog()
+    profile = profiles.resolve("python.ruff.v1")
+    snapshots = FakeCommandSnapshots()
+    runtime = FakeCommandRuntime(profile)
+    registry = create_builtin_capability_executor_registry(
+        create_builtin_capability_catalog(),
+        command_profiles=profiles,
+        command_snapshots=snapshots,
+        command_runtime=runtime,
+    )
+    engine = CapabilityExecutionEngine(registry)
+    arguments = WorkspaceCommandExecutorInput(
+        project_path="backend",
+        command_profile_id="python.ruff.v1",
+    )
+    bound = _bound("workspace.command.run.v1", arguments, digit="d")
+    context = _context(bound)
+
+    candidate = await engine.execute_candidate(context, bound)
+    verified = await engine.verify_candidate(context, bound, candidate)
+
+    assert snapshots.calls == [("backend", "python.ruff.v1")]
+    assert runtime.calls == 1
+    assert candidate.result_kind is CapabilityResultKind.COMMAND_PROFILE
+    assert candidate.output_manifest["status"] == "failed"
+    assert verified.adapter_verification.result_digest == candidate.result_digest
+    manifest = registry.resolve(bound.capability).manifest
+    assert manifest.effect_class is CapabilityEffectClass.READ_ONLY
+    assert manifest.recovery_policy is CapabilityRecoveryPolicy.NO_AUTOMATIC_REPLAY
 
 
 def _context(bound: BoundCapabilityInput) -> CapabilityExecutionContext:

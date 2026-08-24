@@ -253,6 +253,19 @@ def create_builtin_capability_catalog(
                 workspace_write=False,
             ),
             _pack(
+                capability_id="workspace.command.run.v1",
+                runtime_enabled=True,
+                description=(
+                    "在断网临时项目快照中运行服务器注册的 pytest、Ruff、mypy 或 "
+                    "pnpm test/type-check/build Profile；调用者不能提供进程字段。"
+                ),
+                allowed_operations=("conversation-workspace.command.run",),
+                max_risk_level=ToolRiskLevel.R0,
+                external_ingress=True,
+                external_egress=False,
+                workspace_write=False,
+            ),
+            _pack(
                 capability_id="workspace.patch.propose.v1",
                 runtime_enabled=True,
                 description=(

@@ -14,6 +14,7 @@ from deskpilot.application.capability_input_binding_catalog import (
     KnowledgeLocalExecutorInput,
     McpTextMetricsExecutorInput,
     ResolvedVerifiedCapabilityResult,
+    WorkspaceCommandExecutorInput,
     WorkspaceGitInspectExecutorInput,
     WorkspaceNodeTestExecutorInput,
     WorkspaceProjectBatchReadExecutorInput,
@@ -93,12 +94,17 @@ def _source() -> TaskLoopSourceRef:
     )
 
 
-def _planner_recipe_digest(route_id: RouteId) -> str:
+def _planner_recipe_digest(
+    route_id: RouteId,
+    *,
+    variant_key: str | None = None,
+    fixed_parameters: dict[str, str] | None = None,
+) -> str:
     return sha256_digest(
         {
             **RouteRecipeCatalog.manifest(route_id, "2"),
-            "variant_key": route_id,
-            "fixed_parameters": {},
+            "variant_key": variant_key or route_id,
+            "fixed_parameters": fixed_parameters or {},
         }
     )
 
@@ -110,6 +116,7 @@ def _step(
     raw_parameters: dict[str, str] | None = None,
     digit: str = "a",
     source_local_key: str | None = None,
+    fixed_parameters: dict[str, str] | None = None,
 ) -> tuple[ModelPlannerNodeBinding, CapabilityRef, str, str]:
     capabilities = create_builtin_capability_catalog()
     contract, draft = RouteRecipeCatalog.compile(
@@ -161,7 +168,15 @@ def _step(
         recipe=TurnPlanningRecipeRef(
             route_id=route_id,
             route_version="2",
-            route_manifest_digest=_planner_recipe_digest(route_id),
+            route_manifest_digest=_planner_recipe_digest(
+                route_id,
+                variant_key=(
+                    f"{route_id}:{next(iter(fixed_parameters.values()))}"
+                    if fixed_parameters
+                    else None
+                ),
+                fixed_parameters=fixed_parameters,
+            ),
         ),
         policy_snapshot_digest="d" * 64,
         source_plan_id=plan.plan_id,
@@ -371,6 +386,44 @@ def test_catalog_rejects_recipe_node_and_reserved_parameter_drift() -> None:
         )
 
 
+def test_command_profile_is_bound_only_from_the_fixed_server_offer() -> None:
+    profile_id = "python.ruff.v1"
+    node_binding, capability, _node_id, _node_spec_digest = _step(
+        "workspace_command_profile",
+        normalized_parameters={
+            "project_path": "backend",
+            "command_profile_id": profile_id,
+        },
+        raw_parameters={"project_path": "backend"},
+        fixed_parameters={"command_profile_id": profile_id},
+    )
+    catalog = CapabilityInputBindingCatalog(create_builtin_capability_catalog())
+
+    bound = catalog.bind_node(node_binding=node_binding)
+
+    assert isinstance(bound.arguments, WorkspaceCommandExecutorInput)
+    assert bound.arguments.project_path == "backend"
+    assert bound.arguments.command_profile_id == profile_id
+    assert bound.capability == capability
+    assert tuple(item.parameter_name for item in node_binding.parameter_bindings) == (
+        "project_path",
+    )
+    serialized = bound.arguments.model_dump_json()
+    for forbidden in ("executable", "argv", "cwd", "environment", "shell"):
+        assert forbidden not in serialized
+
+    changed_manifest = node_binding.model_copy(
+        update={
+            "bound_input_manifest": {
+                "project_path": "backend",
+                "command_profile_id": "python.mypy.v1",
+            }
+        }
+    )
+    with pytest.raises(CapabilityInputLineageRejectedError, match="recipe changed"):
+        catalog.bind_node(node_binding=changed_manifest)
+
+
 def _knowledge_result() -> KnowledgeSearchRead:
     material: dict[str, Any] = {
         "query_digest": sha256_digest({"query": "cats"}),
@@ -487,7 +540,7 @@ def test_catalog_consumes_only_exact_server_selected_artifact_dependencies() -> 
         assert bound.consumed_result_refs == (result_ref,)
 
 
-def test_catalog_exposes_eleven_exact_runtime_capability_refs() -> None:
+def test_catalog_exposes_twelve_exact_runtime_capability_refs() -> None:
     catalog = CapabilityInputBindingCatalog(create_builtin_capability_catalog())
 
     refs = catalog.capabilities()
@@ -502,6 +555,7 @@ def test_catalog_exposes_eleven_exact_runtime_capability_refs() -> None:
         ("workspace.project.search.v1", "1.0.0"),
         ("workspace.project.read_many.v1", "1.0.0"),
         ("workspace.git.inspect.v1", "1.0.0"),
+        ("workspace.command.run.v1", "1.0.0"),
         ("artifact.html.v1", "1.2.0"),
         ("browser.verify.v1", "1.1.0"),
     }

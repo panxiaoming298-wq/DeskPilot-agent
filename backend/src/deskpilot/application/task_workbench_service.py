@@ -67,6 +67,7 @@ from deskpilot.application.plan_compiler import (
     workspace_snapshot_check_draft,
 )
 from deskpilot.application.research_runtime import ResearchRuntime, ResearchRuntimeError
+from deskpilot.application.route_recipe_catalog import RouteRecipeCatalog
 from deskpilot.application.task_loop_activation_runtime import (
     TaskLoopActivationError,
     TaskLoopActivationRuntime,
@@ -107,6 +108,7 @@ from deskpilot.domain.agent_runtime import (
     ExecutionRunStatus,
 )
 from deskpilot.domain.artifact_runtime import DeliveryManifestRead
+from deskpilot.domain.command_profiles import CommandProfileId
 from deskpilot.domain.context_memory import (
     ConversationMessageRead,
     CreateConversationMessageRequest,
@@ -204,6 +206,7 @@ class TaskWorkbenchService:
         task_loop: MultiStepPlanRuntime | None = None,
         task_loop_activation: TaskLoopActivationRuntime | None = None,
         task_loop_execution: TaskLoopExecutionCoordinator | None = None,
+        command_profile_ids: frozenset[CommandProfileId] = frozenset(),
     ) -> None:
         self._database = database
         self._tasks = tasks
@@ -221,6 +224,7 @@ class TaskWorkbenchService:
         self._task_loop = task_loop
         self._task_loop_activation = task_loop_activation
         self._task_loop_execution = task_loop_execution
+        self._command_profile_ids = command_profile_ids
         self._auto_advance: WorkbenchAutoAdvancePort | None = None
 
     def bind_auto_advance(self, auto_advance: WorkbenchAutoAdvancePort) -> None:
@@ -703,7 +707,9 @@ class TaskWorkbenchService:
         bound = self._turn_planner.bound_route(planning)
         if bound is not None:
             preparation_error = await self._prepare_planner_route(task_id, bound)
-            if preparation_error is None:
+            if preparation_error is None and not RouteRecipeCatalog.is_planner_only_route(
+                bound.route_id
+            ):
                 try:
                     runs = await self._execution.list_for_task(task_id)
                     if not runs.runs:
@@ -1689,6 +1695,13 @@ class TaskWorkbenchService:
         if not self._router.workspace_enabled:
             return frozenset(variants)
         variants.update({"workspace_file_read", "workspace_directory_list"})
+        variants.update(
+            {
+                "workspace_project_search",
+                "workspace_project_batch_read",
+                "workspace_git_inspect",
+            }
+        )
         if self._workspace_agents is not None:
             variants.add("workspace_directory_analyze")
         if self._router.workspace_patch_enabled:
@@ -1715,6 +1728,10 @@ class TaskWorkbenchService:
                         "workspace_dynamic_patch_test:node",
                     }
                 )
+        variants.update(
+            f"workspace_command_profile:{profile_id}"
+            for profile_id in self._command_profile_ids
+        )
         return frozenset(variants)
 
     async def get(self, task_id: str) -> TaskWorkbenchRead:
@@ -2037,6 +2054,8 @@ class TaskWorkbenchService:
         if turn_planning is not None:
             if turn_planning.run.status in {"prepared", "dispatching"}:
                 return WorkbenchStage.INTERPRETING
+            if TaskWorkbenchService._is_planner_only_single(turn_planning):
+                return WorkbenchStage.PLANNED
             adjudication = turn_planning.adjudication
             if adjudication is not None:
                 if adjudication.outcome == "needs_user_input":
@@ -2186,6 +2205,15 @@ class TaskWorkbenchService:
         run = executions.runs[-1] if executions.runs else None
         nodes = {item.local_key: item for item in run.nodes} if run else {}
         has_plan = contract is not None
+        planner_only_single = TaskWorkbenchService._is_planner_only_single(turn_planning)
+        deferred_task_loop = bool(
+            turn_planning is not None
+            and turn_planning.run.status == "succeeded"
+            and turn_planning.adjudication is not None
+            and turn_planning.adjudication.outcome == "multi_step_deferred"
+            and turn_planning.binding is not None
+            and turn_planning.binding.status == "multi_step_deferred"
+        )
         is_research = route is None or route.route_id == "research_to_html"
         is_direct = bool(
             route is not None
@@ -2220,15 +2248,10 @@ class TaskWorkbenchService:
             ),
             WorkbenchAction.PLAN_TASK_LOOP: (
                 bool(
-                    turn_planning is not None
-                    and turn_planning.run.status == "succeeded"
-                    and turn_planning.adjudication is not None
-                    and turn_planning.adjudication.outcome == "multi_step_deferred"
-                    and turn_planning.binding is not None
-                    and turn_planning.binding.status == "multi_step_deferred"
+                    (deferred_task_loop or planner_only_single)
                     and (task_loop is None or task_loop.status == "observed")
                 ),
-                "DEFERRED_MULTI_STEP_PLAN_NOT_RECOVERABLE",
+                "TASK_LOOP_PLAN_NOT_RECOVERABLE",
             ),
             WorkbenchAction.ADVANCE_TASK_LOOP: (
                 bool(
@@ -2251,6 +2274,7 @@ class TaskWorkbenchService:
                     has_plan
                     and run is None
                     and not uses_generic_task_loop
+                    and not planner_only_single
                     and (
                         route is None
                         or (
@@ -2555,4 +2579,27 @@ class TaskWorkbenchService:
                 ),
             )
             for action, (enabled, reason) in conditions.items()
+        )
+
+    @staticmethod
+    def _is_planner_only_single(turn_planning: TurnPlanningRead | None) -> bool:
+        if turn_planning is None:
+            return False
+        adjudication = turn_planning.adjudication
+        binding = turn_planning.binding
+        if (
+            turn_planning.run.status != "succeeded"
+            or adjudication is None
+            or binding is None
+            or adjudication.outcome != "single_step"
+            or binding.status != "bound"
+            or binding.offer is None
+            or len(adjudication.selected_offers) != 1
+            or binding.offer != adjudication.selected_offers[0]
+        ):
+            return False
+        return any(
+            item.ref == binding.offer
+            and RouteRecipeCatalog.is_planner_only_route(item.trusted_recipe.route_id)
+            for item in turn_planning.offers
         )

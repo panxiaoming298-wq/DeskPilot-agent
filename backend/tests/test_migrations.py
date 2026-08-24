@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0054_task_loop_cycle_events"
+CURRENT_REVISION = "0055_planner_only_single_task_loop"
 
 
 def _sync_url(path: Path) -> str:
@@ -626,6 +626,38 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
             for constraint in inspector.get_check_constraints("tool_reconciliation_evidence")
         }
     engine.dispose()
+
+
+def test_stage_113_single_offer_task_loop_constraint_round_trips(tmp_path: Path) -> None:
+    database_path = tmp_path / "stage-113-single-task-loop.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspect(connection).get_check_constraints("model_planner_drafts")
+        }
+    engine.dispose()
+    assert "BETWEEN 1 AND 8" in constraints["ck_model_planner_draft_steps"]
+
+    command.downgrade(config, "0054_task_loop_cycle_events")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspect(connection).get_check_constraints("model_planner_drafts")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert "BETWEEN 2 AND 8" in constraints["ck_model_planner_draft_steps"]
+    assert revision == "0054_task_loop_cycle_events"
+
+    command.upgrade(config, "head")
+    command.check(config)
 
 
 @pytest.mark.asyncio

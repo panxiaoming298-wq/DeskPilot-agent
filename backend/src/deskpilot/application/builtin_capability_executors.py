@@ -17,6 +17,7 @@ from deskpilot.application.capability_input_binding_catalog import (
     BrowserVerifyExecutorInput,
     KnowledgeLocalExecutorInput,
     McpTextMetricsExecutorInput,
+    WorkspaceCommandExecutorInput,
     WorkspaceGitInspectExecutorInput,
     WorkspaceNodeTestExecutorInput,
     WorkspacePatchBundleExecutorInput,
@@ -25,6 +26,7 @@ from deskpilot.application.capability_input_binding_catalog import (
     WorkspacePythonTestExecutorInput,
     WorkspaceSnapshotCheckExecutorInput,
 )
+from deskpilot.application.command_profile_catalog import CommandProfileCatalog
 from deskpilot.application.mcp_control_plane import SERVER_ID
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import DIGEST_PATTERN
@@ -39,6 +41,12 @@ from deskpilot.domain.capability_execution import (
     VerifiedCapabilityResultRef,
 )
 from deskpilot.domain.coding_tools import GitInspectionRead, ProjectBatchRead, ProjectSearchRead
+from deskpilot.domain.command_profiles import (
+    CommandProfile,
+    CommandProfileId,
+    WorkspaceCommandRead,
+    WorkspaceCommandSnapshot,
+)
 from deskpilot.domain.knowledge import KnowledgeSearchRead
 from deskpilot.domain.mcp import McpAuditPage, McpTextMetricsOutput, McpToolCallRead
 from deskpilot.domain.task_plans import CapabilityPack, CapabilityRef, DraftNodeKind
@@ -189,6 +197,21 @@ class WorkspaceCodingPort(Protocol):
         project_path: str,
         operation: Literal["status", "diff", "log"],
     ) -> GitInspectionRead: ...
+
+
+class WorkspaceCommandSnapshotPort(Protocol):
+    def prepare_command_snapshot(
+        self,
+        project_path: str,
+        profile: CommandProfile,
+    ) -> WorkspaceCommandSnapshot: ...
+
+
+class WorkspaceCommandPort(Protocol):
+    @property
+    def enabled_profile_ids(self) -> frozenset[CommandProfileId]: ...
+
+    def run(self, snapshot: WorkspaceCommandSnapshot) -> WorkspaceCommandRead: ...
 
 
 class ArtifactDeliveryPort(Protocol):
@@ -783,6 +806,74 @@ class WorkspaceGitInspectExecutor(_BuiltinExecutor):
         )
 
 
+class WorkspaceCommandExecutor(_BuiltinExecutor):
+    def __init__(
+        self,
+        capability: CapabilityRef,
+        profiles: CommandProfileCatalog,
+        workspace: WorkspaceCommandSnapshotPort,
+        runtime: WorkspaceCommandPort,
+    ) -> None:
+        super().__init__(capability, CapabilityResultKind.COMMAND_PROFILE)
+        self._profiles = profiles
+        self._workspace = workspace
+        self._runtime = runtime
+
+    async def execute(self, context: CapabilityExecutionContext, arguments: BaseModel) -> BaseModel:
+        self._require_context(context)
+        if not isinstance(arguments, WorkspaceCommandExecutorInput):
+            raise BuiltinCapabilityExecutionError("Command Profile input type changed")
+        if arguments.command_profile_id not in self._runtime.enabled_profile_ids:
+            raise BuiltinCapabilityRuntimeUnavailableError(
+                "Selected Command Profile runtime is disabled"
+            )
+        profile = self._profiles.resolve(arguments.command_profile_id)
+        snapshot = self._workspace.prepare_command_snapshot(
+            arguments.project_path,
+            profile,
+        )
+        return await asyncio.to_thread(self._runtime.run, snapshot)
+
+    async def verify(self, context: CapabilityExecutionContext, candidate: BaseModel) -> BaseModel:
+        if not isinstance(candidate, WorkspaceCommandRead):
+            raise BuiltinCapabilityCandidateRejectedError(
+                "Command Profile candidate type changed"
+            )
+        profile = self._profiles.resolve(candidate.command_profile_id)
+        if (
+            candidate.profile_digest != profile.profile_digest
+            or candidate.network_access
+            or candidate.isolation_mode != "windows_appcontainer"
+            or not candidate.temporary_snapshot
+            or not candidate.snapshot_mutations_discarded
+        ):
+            raise BuiltinCapabilityCandidateRejectedError(
+                "Command Profile candidate lost a fixed execution guard"
+            )
+        return self._verification(
+            context=context,
+            candidate=candidate,
+            verifier_id="builtin.workspace.command.run.verifier.v1",
+            evidence={
+                "command_profile_id": candidate.command_profile_id,
+                "profile_digest": candidate.profile_digest,
+                "snapshot_digest": candidate.snapshot_digest,
+                "toolchain_digest": candidate.toolchain_digest,
+                "status": candidate.status,
+                "exit_code": candidate.exit_code,
+                "output_digest": candidate.output_digest,
+                "output_truncated": candidate.output_truncated,
+                "termination_reason": candidate.termination_reason,
+                "cancellation_receipt_digest": candidate.cancellation_receipt_digest,
+                "isolation_mode": candidate.isolation_mode,
+                "network_access": candidate.network_access,
+                "temporary_snapshot": candidate.temporary_snapshot,
+                "snapshot_mutations_discarded": candidate.snapshot_mutations_discarded,
+                "result_digest": candidate.result_digest,
+            },
+        )
+
+
 class WorkspacePatchBundleExecutor(_BuiltinExecutor):
     """R1 adapter whose write path exists only behind an exact preview digest."""
 
@@ -899,6 +990,9 @@ def create_builtin_capability_executor_registry(
     node_tests: WorkspaceNodeTestPort | None = None,
     workspace_patches: WorkspacePatchPort | None = None,
     workspace_coding: WorkspaceCodingPort | None = None,
+    command_profiles: CommandProfileCatalog | None = None,
+    command_snapshots: WorkspaceCommandSnapshotPort | None = None,
+    command_runtime: WorkspaceCommandPort | None = None,
     artifacts: ArtifactDeliveryPort | None = None,
 ) -> CapabilityExecutorRegistry:
     """Register only exact packs whose concrete trusted runtime is available."""
@@ -1007,6 +1101,28 @@ def create_builtin_capability_executor_registry(
                 result_kind=CapabilityResultKind.GIT_INSPECTION,
                 executor=WorkspaceGitInspectExecutor(_ref(git_pack), workspace_coding),
             )
+    if (
+        command_profiles is not None
+        and command_snapshots is not None
+        and command_runtime is not None
+        and command_runtime.enabled_profile_ids
+    ):
+        command_pack = capabilities.resolve_preferred("workspace.command.run.v1")
+        _register(
+            registry,
+            command_pack,
+            executor_id="builtin.workspace.command.run.v1",
+            input_model=WorkspaceCommandExecutorInput,
+            output_model=WorkspaceCommandRead,
+            result_kind=CapabilityResultKind.COMMAND_PROFILE,
+            recovery_policy=CapabilityRecoveryPolicy.NO_AUTOMATIC_REPLAY,
+            executor=WorkspaceCommandExecutor(
+                _ref(command_pack),
+                command_profiles,
+                command_snapshots,
+                command_runtime,
+            ),
+        )
     if artifacts is not None:
         artifact_pack = capabilities.resolve_preferred("artifact.html.v1")
         _register(

@@ -119,6 +119,7 @@ def _runtime_sources(
     distributions: tuple[str, ...] = WORKER_DISTRIBUTIONS,
     *,
     include_deskpilot: bool = True,
+    additional_executables: tuple[Path, ...] = (),
 ) -> tuple[_SourceFile, ...]:
     base = Path(sys.base_prefix).resolve(strict=True)
     mappings: dict[PurePosixPath, Path] = {}
@@ -183,6 +184,11 @@ def _runtime_sources(
             PurePosixPath("Lib/site-packages/deskpilot"),
         ):
             add(source, destination)
+
+    for executable in additional_executables:
+        if executable.suffix.casefold() != ".exe":
+            raise WorkerRuntimeError("Additional worker executable must be one .exe file")
+        add(executable, PurePosixPath(executable.name))
 
     sources: list[_SourceFile] = []
     for destination, source in sorted(mappings.items(), key=lambda item: str(item[0])):
@@ -429,6 +435,7 @@ def prepare_worker_runtime(
     *,
     distributions: tuple[str, ...] = WORKER_DISTRIBUTIONS,
     include_deskpilot: bool = True,
+    additional_executables: tuple[Path, ...] = (),
 ) -> WorkerRuntimeBundle:
     """Build, protect, publish, and verify the current worker source closure."""
     if os.name != "nt":
@@ -439,7 +446,11 @@ def prepare_worker_runtime(
     )
 
     root = runtime_root.resolve(strict=False)
-    sources = _runtime_sources(distributions, include_deskpilot=include_deskpilot)
+    sources = _runtime_sources(
+        distributions,
+        include_deskpilot=include_deskpilot,
+        additional_executables=additional_executables,
+    )
     expected_capability_sid = capability_sid_string(WORKER_RUNTIME_CAPABILITY)
     digest = _bundle_digest(sources, expected_capability_sid)
     bundle_root = root / digest

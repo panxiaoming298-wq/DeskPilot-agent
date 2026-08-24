@@ -327,7 +327,7 @@ class ModelPlannerDraftRef(BaseModel):
     draft_record_digest: str = Field(pattern=DIGEST_PATTERN)
     draft_plan_digest: str = Field(pattern=DIGEST_PATTERN)
     expected_plan_manifest_digest: str = Field(pattern=DIGEST_PATTERN)
-    step_count: int = Field(ge=2, le=8)
+    step_count: int = Field(ge=1, le=8)
 
 
 class ModelPlannerDraft(BaseModel):
@@ -343,9 +343,9 @@ class ModelPlannerDraft(BaseModel):
     composer_version: Literal["deskpilot.offer-composer.v1"] = (
         MODEL_PLANNER_COMPOSER_VERSION
     )
-    steps: tuple[ModelPlannerStepBindingRef, ...] = Field(min_length=2, max_length=8)
+    steps: tuple[ModelPlannerStepBindingRef, ...] = Field(min_length=1, max_length=8)
     step_set_digest: str = Field(pattern=DIGEST_PATTERN)
-    step_count: int = Field(ge=2, le=8)
+    step_count: int = Field(ge=1, le=8)
     task_contract: TaskContract
     task_contract_digest: str = Field(pattern=DIGEST_PATTERN)
     draft_plan: DraftPlan
@@ -788,7 +788,7 @@ class TaskLoopWorkbenchRead(BaseModel):
         has_plan = (
             self.draft_record_digest is not None
             and self.expected_plan_manifest_digest is not None
-            and self.step_count >= 2
+            and self.step_count >= 1
         )
         if self.status == "observed":
             if has_plan or self.step_count != 0 or self.failure is not None or not self.recoverable:

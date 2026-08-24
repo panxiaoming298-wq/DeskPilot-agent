@@ -441,14 +441,32 @@ def test_research_and_local_read_merge_without_expanding_provider_location() -> 
     compiler.validate_manifest(composed.expected_plan)
 
 
-@pytest.mark.parametrize("count", (0, 1))
-def test_requires_two_to_eight_server_offers(count: int) -> None:
+def test_rejects_empty_or_legacy_single_offer() -> None:
     composer, compiler, capabilities, planner, provider = _environment()
     (knowledge,) = _routes(capabilities, "knowledge_lookup")
     step = _step(knowledge, compiler=compiler, planner=planner, provider=provider)
 
-    with pytest.raises(ModelPlannerOfferRejectedError, match="two and eight"):
-        composer.compose(TASK_ID, tuple(step for _ in range(count)))
+    with pytest.raises(ModelPlannerOfferRejectedError, match="one and eight"):
+        composer.compose(TASK_ID, ())
+    with pytest.raises(ModelPlannerOfferRejectedError, match="retain direct execution"):
+        composer.compose(TASK_ID, (step,))
+
+
+def test_composes_one_planner_only_offer_for_the_generic_task_loop() -> None:
+    composer, compiler, capabilities, planner, provider = _environment()
+    (search,) = _routes(capabilities, "workspace_project_search")
+    step = _step(search, compiler=compiler, planner=planner, provider=provider)
+
+    composed = composer.compose(TASK_ID, (step,))
+
+    assert composed.draft.producer.kind == "model_planner"
+    assert tuple(node.local_key for node in composed.draft.nodes) == (
+        "s01_workspace_project_search",
+        "final_acceptance",
+        "delivery",
+    )
+    assert composed.step_bindings[0].route_id == "workspace_project_search"
+    compiler.validate_manifest(composed.expected_plan)
 
 
 def test_input_dataclass_copies_parameter_mapping() -> None:

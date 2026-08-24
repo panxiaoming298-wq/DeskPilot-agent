@@ -100,6 +100,7 @@ PlannerMode = Literal[
     "provider_failure",
     "blocking_single",
     "invalid_patch",
+    "planner_only_single",
 ]
 
 
@@ -172,6 +173,22 @@ class PlannerScriptProvider(FakeModelProvider):
                 )
             )
 
+        if self.mode == "planner_only_single":
+            return _steps_decision(
+                (
+                    {
+                        "offer_key": _offer_key_for_parameters(
+                            payload,
+                            {"project_path", "query"},
+                        ),
+                        "parameters": [
+                            {"name": "project_path", "value": "."},
+                            {"name": "query", "value": "alpha"},
+                        ],
+                    },
+                )
+            )
+
         query_offer = _offer_key_for_parameter(payload, "query")
         if self.mode == "needs_input":
             return cast(
@@ -226,6 +243,20 @@ def _offer_key_for_parameter(payload: dict[str, object], parameter_name: str) ->
             reference = cast(dict[str, object], offer["offer"])
             return cast(str, reference["offer_key"])
     raise AssertionError(f"No precompiled Offer exposes only {parameter_name!r}")
+
+
+def _offer_key_for_parameters(payload: dict[str, object], parameter_names: set[str]) -> str:
+    raw_offers = cast(list[object], payload["offers"])
+    for raw_offer in raw_offers:
+        offer = cast(dict[str, object], raw_offer)
+        specs = cast(list[object], offer["parameter_specs"])
+        names = {
+            cast(str, cast(dict[str, object], raw_spec)["parameter_name"]) for raw_spec in specs
+        }
+        if names == parameter_names:
+            reference = cast(dict[str, object], offer["offer"])
+            return cast(str, reference["offer_key"])
+    raise AssertionError(f"No precompiled Offer exposes exactly {sorted(parameter_names)!r}")
 
 
 class NoopSearchProvider:
@@ -566,6 +597,47 @@ def test_unmatched_single_step_uses_explicit_bodyless_endpoint_and_binds_v2_rout
         assert completed_body["stage"] == "delivered"
         assert cast(dict[str, object], completed_body["route"])["status"] == "succeeded"
         assert cast(dict[str, object], completed_body["knowledge"])["citations"]
+
+    assert provider.planner_calls == 1
+
+
+def test_planner_only_single_step_enters_generic_task_loop_without_direct_execution(
+    tmp_path: Path,
+) -> None:
+    provider = PlannerScriptProvider("planner_only_single")
+    with _open_client(tmp_path, provider, name="planner-only-single") as (client, workspace):
+        (workspace / "sample.txt").write_text("alpha\n", encoding="utf-8")
+        created_response = client.post(
+            "/api/v1/conversation-turns",
+            json={"message": '请在项目 "." 中搜索 alpha'},
+        )
+        assert created_response.status_code == 201, created_response.text
+        created = cast(dict[str, object], created_response.json())
+        task_id = _task_id(created)
+
+        interpreted = client.post(f"/api/v1/tasks/{task_id}/workbench:interpret-turn")
+        assert interpreted.status_code == 200, interpreted.text
+        body = cast(dict[str, object], interpreted.json())
+
+        assert body["stage"] == "planned"
+        assert cast(dict[str, object], body["route"])["route_id"] == (
+            "workspace_project_search"
+        )
+        assert len(cast(dict[str, list[object]], body["executions"])["runs"]) == 0
+        actions = {
+            cast(str, item["action"]): cast(bool, item["enabled"])
+            for item in cast(list[dict[str, object]], body["actions"])
+        }
+        assert actions["plan_task_loop"] is True
+        assert actions["start_execution"] is False
+
+        planned_response = client.post(f"/api/v1/tasks/{task_id}/workbench:advance")
+        assert planned_response.status_code == 200, planned_response.text
+        planned = cast(dict[str, object], planned_response.json())
+        task_loop = cast(dict[str, object], planned["task_loop"])
+        assert task_loop["status"] == "planned"
+        assert task_loop["step_count"] == 1
+        assert len(cast(dict[str, list[object]], planned["executions"])["runs"]) == 0
 
     assert provider.planner_calls == 1
 

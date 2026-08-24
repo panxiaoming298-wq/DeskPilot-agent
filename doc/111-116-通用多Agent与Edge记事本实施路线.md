@@ -90,7 +90,7 @@
 
 ## 4. 阶段 113：Codex 类安全编码工具
 
-> 实施状态（2026-08-24）：阶段 112 总门禁已通过，阶段 113 尚未开始实现。
+> 实施状态（2026-08-25）：阶段 113 已完成并通过总门禁。项目根限定搜索/批读、Git 只读、六个服务器 Python/Node Command Profile、断网临时快照、内容寻址回执和 planner-only 单步骤 TaskLoop 均已落地；默认后端 `760 passed + 12 skipped`、严格 mypy 282 个源码、Alembic `0055`、Phase75/baseline、前端、PostgreSQL 11/11 与 RabbitMQ 1/1 通过。实际边界与失败记录见[阶段 113：Codex 类安全编码工具](113-Codex类安全编码工具.md)。下一步创建 `codex/stage-114`。
 
 ### 4.1 只读项目能力
 

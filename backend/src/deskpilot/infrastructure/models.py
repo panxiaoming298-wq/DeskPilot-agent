@@ -864,7 +864,7 @@ class ModelPlannerDraftRecord(Base):
             name="fk_model_planner_draft_source_binding",
             ondelete="RESTRICT",
         ),
-        CheckConstraint("step_count BETWEEN 2 AND 8", name="ck_model_planner_draft_steps"),
+        CheckConstraint("step_count BETWEEN 1 AND 8", name="ck_model_planner_draft_steps"),
         CheckConstraint(
             "expected_plan_generation = 1",
             name="ck_model_planner_draft_expected_plan",

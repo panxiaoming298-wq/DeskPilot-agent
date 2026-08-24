@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from deskpilot.application.model_planner_composer import (
@@ -24,6 +24,7 @@ from deskpilot.application.model_planner_composer import (
     ModelPlannerOfferRejectedError,
     ModelPlannerPrivacyConflictError,
 )
+from deskpilot.application.route_recipe_catalog import RouteRecipeCatalog
 from deskpilot.application.turn_planner_runtime import (
     RevalidatedDeferredPlan,
     TurnPlannerRuntime,
@@ -48,6 +49,7 @@ from deskpilot.infrastructure.models import (
     TaskLoopEventRecord,
     TaskLoopRecord,
     TurnPlanBindingRecord,
+    TurnRouteRecord,
 )
 
 
@@ -118,7 +120,7 @@ class MultiStepPlanRuntime:
             loop = existing.loop
 
         try:
-            deferred = await self._turn_planner.revalidate_deferred_plan(task_id)
+            deferred = await self._turn_planner.revalidate_task_loop_plan(task_id)
             if self._source_from_planning(deferred.planning) != loop.source:
                 raise MultiStepPlanProofRejectedError(
                     "Deferred Turn Planner lineage changed after Observe"
@@ -200,7 +202,7 @@ class MultiStepPlanRuntime:
             )
 
     async def recoverable_task_ids(self, *, limit: int = 100) -> tuple[str, ...]:
-        """Return bounded observed loops plus unobserved deferred v1 bindings."""
+        """Return observed loops plus unobserved Task-Loop-eligible bindings."""
 
         if not 1 <= limit <= 1_000:
             raise ValueError("Task Loop recovery limit is invalid")
@@ -218,17 +220,29 @@ class MultiStepPlanRuntime:
             remaining = limit - len(observed)
             if remaining <= 0:
                 return tuple(dict.fromkeys(observed))
-            deferred = tuple(
+            eligible_bindings = tuple(
                 (
                     await session.scalars(
                         select(TurnPlanBindingRecord.task_id)
+                        .join(
+                            TurnRouteRecord,
+                            TurnRouteRecord.task_id == TurnPlanBindingRecord.task_id,
+                        )
                         .outerjoin(
                             TaskLoopRecord,
                             TaskLoopRecord.source_turn_plan_binding_id
                             == TurnPlanBindingRecord.binding_id,
                         )
                         .where(
-                            TurnPlanBindingRecord.status == "multi_step_deferred",
+                            or_(
+                                TurnPlanBindingRecord.status == "multi_step_deferred",
+                                and_(
+                                    TurnPlanBindingRecord.status == "bound",
+                                    TurnRouteRecord.route_id.in_(
+                                        RouteRecipeCatalog.planner_only_route_ids()
+                                    ),
+                                ),
+                            ),
                             TaskLoopRecord.loop_id.is_(None),
                         )
                         .order_by(
@@ -239,7 +253,7 @@ class MultiStepPlanRuntime:
                     )
                 ).all()
             )
-        return tuple(dict.fromkeys((*observed, *deferred)))
+        return tuple(dict.fromkeys((*observed, *eligible_bindings)))
 
     async def _persist_observed(
         self,
@@ -449,12 +463,29 @@ class MultiStepPlanRuntime:
             planning.run.status != "succeeded"
             or adjudication is None
             or binding is None
-            or adjudication.outcome != "multi_step_deferred"
-            or binding.status != "multi_step_deferred"
-            or binding.reason_code != "MULTI_STEP_PLAN_DEFERRED"
+            or not (
+                (
+                    adjudication.outcome == "multi_step_deferred"
+                    and binding.status == "multi_step_deferred"
+                    and binding.reason_code == "MULTI_STEP_PLAN_DEFERRED"
+                )
+                or (
+                    adjudication.outcome == "single_step"
+                    and binding.status == "bound"
+                    and binding.reason_code == "MODEL_PLANNER_SINGLE_STEP"
+                    and len(adjudication.selected_offers) == 1
+                    and any(
+                        item.ref == adjudication.selected_offers[0]
+                        and RouteRecipeCatalog.is_planner_only_route(
+                            item.trusted_recipe.route_id
+                        )
+                        for item in planning.offers
+                    )
+                )
+            )
         ):
             raise MultiStepPlanNotEligibleError(
-                "Turn Planner outcome is not a deferred multi-step proposal"
+                "Turn Planner outcome is not eligible for the generic Task Loop"
             )
         return TaskLoopSourceRef(
             task_id=planning.task_id,

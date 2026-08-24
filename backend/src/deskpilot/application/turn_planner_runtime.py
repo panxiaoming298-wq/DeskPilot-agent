@@ -571,6 +571,100 @@ class TurnPlannerRuntime:
                 steps=tuple(steps),
             )
 
+    async def revalidate_task_loop_plan(self, task_id: str) -> RevalidatedDeferredPlan:
+        """Revalidate a deferred composition or one planner-only Offer for Task Loop.
+
+        Historical single-step Offers for the deterministic Route surface retain
+        their stage-111 direct execution path.  Stage-113 planner-only Routes have
+        no legacy executor, so their exact bound Offer is admitted only to the
+        generic Task Loop without another Provider call.
+        """
+
+        async with self._database.session() as session:
+            bundle = await self._load_bundle(session, task_id)
+            if bundle is None:
+                raise TurnPlannerNotFoundError("Turn Planner proof is missing")
+            adjudication = bundle.adjudication
+            binding = bundle.binding
+            if (
+                bundle.run.status != "succeeded"
+                or adjudication is None
+                or binding is None
+            ):
+                raise TurnPlannerNotEligibleError(
+                    "Turn Planner outcome is not eligible for the generic Task Loop"
+                )
+            is_deferred = bool(
+                adjudication.outcome == "multi_step_deferred"
+                and binding.status == "multi_step_deferred"
+                and binding.reason_code == "MULTI_STEP_PLAN_DEFERRED"
+                and 2 <= len(adjudication.selected_offers) <= 8
+            )
+            is_planner_only_single = bool(
+                adjudication.outcome == "single_step"
+                and binding.status == "bound"
+                and binding.reason_code == "MODEL_PLANNER_SINGLE_STEP"
+                and len(adjudication.selected_offers) == 1
+            )
+            if not is_deferred and not is_planner_only_single:
+                raise TurnPlannerNotEligibleError(
+                    "Turn Planner outcome is not eligible for the generic Task Loop"
+                )
+            await self._validate_parameter_sources(session, bundle)
+            message = await self._message_content(bundle.run, session=session)
+            offers_by_key = {item.offer_key: item for item in bundle.offers}
+            steps: list[RevalidatedOfferStep] = []
+            for selected in adjudication.selected_offers:
+                offer = offers_by_key.get(selected.offer_key)
+                if offer is None or offer.ref != selected:
+                    raise TurnPlannerProofRejectedError(
+                        "Task Loop Planner selected Offer proof changed"
+                    )
+                if is_planner_only_single and not RouteRecipeCatalog.is_planner_only_route(
+                    offer.trusted_recipe.route_id
+                ):
+                    raise TurnPlannerNotEligibleError(
+                        "Legacy single-step Offers must retain direct execution"
+                    )
+                if is_planner_only_single and (
+                    binding.offer != offer.ref
+                    or binding.plan is None
+                    or binding.plan.plan_id != offer.expected_plan.plan_id
+                    or binding.plan.plan_manifest_digest
+                    != offer.expected_plan.plan_manifest_digest
+                ):
+                    raise TurnPlannerProofRejectedError(
+                        "Planner-only single-step Binding changed from its Offer"
+                    )
+                route = self._draft_for_offer(offer)
+                parameters = self._canonical_parameters(
+                    adjudication=adjudication,
+                    offer=offer,
+                    draft=route,
+                    message=message,
+                )
+                raw_binding_digest = self._proposal_step(
+                    adjudication,
+                    offer.offer_key,
+                ).get("parameter_binding_digest")
+                if not isinstance(raw_binding_digest, str):
+                    raise TurnPlannerProofRejectedError(
+                        "Task Loop Planner parameter-binding digest is missing"
+                    )
+                steps.append(
+                    RevalidatedOfferStep(
+                        offer=offer,
+                        route=route,
+                        parameters=MappingProxyType(dict(parameters)),
+                        parameter_binding_digest=raw_binding_digest,
+                        planner_agent=bundle.run.planner_agent,
+                    )
+                )
+            return RevalidatedDeferredPlan(
+                planning=bundle.read(),
+                steps=tuple(steps),
+            )
+
     async def get_bound_route(self, task_id: str) -> BoundTurnRoute | None:
         planning = await self.get(task_id)
         if planning is None:
@@ -868,7 +962,7 @@ class TurnPlannerRuntime:
                     task_id=scope.task.task_id,
                     user_message_id=scope.message.message_id,
                     user_message_digest=scope.message.message_digest,
-                    intent_description=self._intent_description(draft),
+                    intent_description=RouteRecipeCatalog.intent_description(draft),
                     task_contract=TaskContractRef(
                         contract_id=draft.contract.contract_id,
                         version=draft.contract.version,
@@ -2722,19 +2816,6 @@ class TurnPlannerRuntime:
             cost_micros=budget.max_cost_micros,
             handoffs=budget.max_handoffs,
         )
-
-    @staticmethod
-    def _intent_description(draft: RouteOfferDraft) -> str:
-        operational = next(
-            (
-                node
-                for node in draft.draft.nodes
-                if node.agent_selector is not None
-                or node.capability_selector is not None
-            ),
-            draft.draft.nodes[0],
-        )
-        return operational.objective
 
     @staticmethod
     def _owns_claim(run: TurnPlannerRun, claim: _DispatchClaim) -> bool:

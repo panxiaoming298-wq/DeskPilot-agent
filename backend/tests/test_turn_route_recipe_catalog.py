@@ -66,7 +66,7 @@ def test_offers_are_precompiled_and_test_kind_is_server_fixed() -> None:
         capabilities=create_builtin_capability_catalog(research_runtime_enabled=True),
     )
 
-    assert len(offers) == 20
+    assert len(offers) == 26
     assert len({item.variant_key for item in offers}) == len(offers)
     assert len({item.recipe_digest for item in offers}) == len(offers)
     assert all(item.contract.task_id == task_id for item in offers)
@@ -80,10 +80,47 @@ def test_offers_are_precompiled_and_test_kind_is_server_fixed() -> None:
         ("workspace_agent_patch_test:python", "python"),
         ("workspace_agent_patch_test:node", "node"),
     }
+    command_variants = {
+        (item.variant_key, item.fixed_parameters.get("command_profile_id"))
+        for item in offers
+        if item.route_id == "workspace_command_profile"
+    }
+    assert command_variants == {
+        (
+            f"workspace_command_profile:{profile_id}",
+            profile_id,
+        )
+        for profile_id in (
+            "python.pytest.v1",
+            "python.ruff.v1",
+            "python.mypy.v1",
+            "node.pnpm_test.v1",
+            "node.pnpm_typecheck.v1",
+            "node.pnpm_build.v1",
+        )
+    }
+    command_intents = {
+        RouteRecipeCatalog.intent_description(item)
+        for item in offers
+        if item.route_id == "workspace_command_profile"
+    }
+    assert len(command_intents) == 6
+    assert all(
+        any(profile_id in description for profile_id in (
+            "python.pytest.v1",
+            "python.ruff.v1",
+            "python.mypy.v1",
+            "node.pnpm_test.v1",
+            "node.pnpm_typecheck.v1",
+            "node.pnpm_build.v1",
+        ))
+        for description in command_intents
+    )
     assert {item.route_id for item in offers} - set(RouteRecipeCatalog.route_ids()) == {
         "workspace_project_search",
         "workspace_project_batch_read",
         "workspace_git_inspect",
+        "workspace_command_profile",
     }
     assert set(RouteRecipeCatalog.route_ids()) < set(
         RouteRecipeCatalog.planner_route_ids()

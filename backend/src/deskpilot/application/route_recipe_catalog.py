@@ -18,6 +18,8 @@ from deskpilot.application.plan_compiler import (
     research_to_html_draft,
     workspace_agent_patch_test_contract,
     workspace_agent_patch_test_draft,
+    workspace_command_profile_contract,
+    workspace_command_profile_draft,
     workspace_directory_analyze_contract,
     workspace_directory_analyze_draft,
     workspace_directory_list_contract,
@@ -48,6 +50,7 @@ from deskpilot.application.plan_compiler import (
     workspace_snapshot_check_draft,
 )
 from deskpilot.core.canonical_json import canonical_json_bytes, sha256_digest
+from deskpilot.domain.command_profiles import COMMAND_PROFILE_IDS
 from deskpilot.domain.task_plans import DraftPlan, TaskContract
 
 RouteId = Literal[
@@ -69,6 +72,7 @@ RouteId = Literal[
     "workspace_project_search",
     "workspace_project_batch_read",
     "workspace_git_inspect",
+    "workspace_command_profile",
 ]
 RouteRecipeVersion = Literal["1", "2"]
 
@@ -269,6 +273,12 @@ _PLANNER_ONLY_ROUTE_SPECS: Mapping[RouteId, dict[str, object]] = MappingProxyTyp
             "capabilities": ("workspace.git.inspect.v1",),
             "max_risk": "R0",
         },
+        "workspace_command_profile": {
+            "route_id": "workspace_command_profile",
+            "producer_ref": "workspace_command_profile.v1",
+            "capabilities": ("workspace.command.run.v1",),
+            "max_risk": "R0",
+        },
     }
 )
 
@@ -340,6 +350,10 @@ _PARAMETERS: Mapping[RouteId, tuple[RouteParameterSpec, ...]] = MappingProxyType
             RouteParameterSpec("project_path"),
             RouteParameterSpec("operation", allowed_values=("status", "diff", "log")),
         ),
+        "workspace_command_profile": (
+            RouteParameterSpec("project_path"),
+            RouteParameterSpec("command_profile_id", allowed_values=COMMAND_PROFILE_IDS),
+        ),
     }
 )
 
@@ -359,8 +373,38 @@ class RouteRecipeCatalog:
         return (*_LEGACY_ROUTE_SPECS, *_PLANNER_ONLY_ROUTE_SPECS)
 
     @staticmethod
+    def planner_only_route_ids() -> tuple[RouteId, ...]:
+        return tuple(_PLANNER_ONLY_ROUTE_SPECS)
+
+    @staticmethod
     def is_planner_route(route_id: str) -> bool:
         return route_id in _LEGACY_ROUTE_SPECS or route_id in _PLANNER_ONLY_ROUTE_SPECS
+
+    @staticmethod
+    def is_planner_only_route(route_id: str) -> bool:
+        """Return whether a Route may execute only through the generic Task Loop."""
+
+        return route_id in _PLANNER_ONLY_ROUTE_SPECS
+
+    @staticmethod
+    def intent_description(draft: RouteOfferDraft) -> str:
+        """Describe an opaque Offer while distinguishing server-fixed variants."""
+
+        operational = next(
+            (
+                node
+                for node in draft.draft.nodes
+                if node.agent_selector is not None
+                or node.capability_selector is not None
+            ),
+            draft.draft.nodes[0],
+        )
+        if draft.route_id != "workspace_command_profile":
+            return operational.objective
+        profile_id = draft.fixed_parameters.get("command_profile_id")
+        if profile_id is None:
+            raise RouteRecipeError("Command Profile Offer lacks its server-fixed identity")
+        return f"{operational.objective} Fixed Command Profile: {profile_id}."
 
     @staticmethod
     def parameter_specs(route_id: RouteId) -> tuple[RouteParameterSpec, ...]:
@@ -378,7 +422,16 @@ class RouteRecipeCatalog:
 
         variants: list[tuple[RouteId, str, dict[str, str]]] = []
         for route_id in cls.planner_route_ids():
-            if route_id in {
+            if route_id == "workspace_command_profile":
+                variants.extend(
+                    (
+                        route_id,
+                        f"{route_id}:{profile_id}",
+                        {"command_profile_id": profile_id},
+                    )
+                    for profile_id in COMMAND_PROFILE_IDS
+                )
+            elif route_id in {
                 "workspace_agent_patch_test",
                 "workspace_dynamic_patch_test",
             }:
@@ -587,6 +640,10 @@ class RouteRecipeCatalog:
             return workspace_git_inspect_contract(
                 task_id, capabilities
             ), workspace_git_inspect_draft(task_id)
+        if route_id == "workspace_command_profile":
+            return workspace_command_profile_contract(
+                task_id, capabilities
+            ), workspace_command_profile_draft(task_id)
         if route_id == "workspace_file_replace":
             return workspace_file_replace_contract(
                 task_id, capabilities

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -23,6 +24,11 @@ from deskpilot.domain.coding_tools import (
     ProjectSearchMatch,
     ProjectSearchRead,
 )
+from deskpilot.domain.command_profiles import (
+    CommandProfile,
+    WorkspaceCommandFile,
+    WorkspaceCommandSnapshot,
+)
 
 MAX_SEARCH_MATCHES = 200
 MAX_SEARCH_FILES = 2_000
@@ -36,6 +42,8 @@ GIT_TIMEOUT_SECONDS = 15
 CODING_SUFFIXES = {
     ".c",
     ".cc",
+    ".cfg",
+    ".cjs",
     ".cpp",
     ".cs",
     ".css",
@@ -52,6 +60,7 @@ CODING_SUFFIXES = {
     ".mjs",
     ".mts",
     ".py",
+    ".pyi",
     ".rs",
     ".scss",
     ".sql",
@@ -214,6 +223,110 @@ class WorkspaceCodingRuntime:
         }
         return ProjectBatchRead.model_validate(
             {**values, "result_digest": sha256_digest(values)}
+        )
+
+    def prepare_command_snapshot(
+        self,
+        project_path: str,
+        profile: CommandProfile,
+    ) -> WorkspaceCommandSnapshot:
+        project, normalized_project = self._workspace.resolve_project_directory(project_path)
+        paths, _scanned_entries = self._coding_paths(project)
+        allowed = (
+            {
+                ".py",
+                ".pyi",
+                ".toml",
+                ".ini",
+                ".cfg",
+                ".txt",
+                ".json",
+                ".yaml",
+                ".yml",
+            }
+            if profile.ecosystem == "python"
+            else {
+                ".js",
+                ".jsx",
+                ".mjs",
+                ".cjs",
+                ".ts",
+                ".tsx",
+                ".mts",
+                ".vue",
+                ".json",
+                ".yaml",
+                ".yml",
+                ".css",
+                ".scss",
+                ".html",
+            }
+        )
+        files: list[WorkspaceCommandFile] = []
+        total_bytes = 0
+        for path in paths:
+            relative_path = path.relative_to(project).as_posix()
+            if path.suffix.casefold() not in allowed or (
+                profile.ecosystem == "python"
+                and relative_path.casefold()
+                in {
+                    "package.json",
+                    "package-lock.json",
+                    "pnpm-lock.yaml",
+                    "pnpm-workspace.yaml",
+                    "yarn.lock",
+                }
+            ):
+                continue
+            material = self._workspace.read_project_material(path)
+            total_bytes += len(material.encoded)
+            if total_bytes > MAX_SEARCH_BYTES:
+                raise WorkspaceFilePathRejectedError(
+                    "Workspace command snapshot exceeds its byte limit"
+                )
+            files.append(
+                WorkspaceCommandFile(
+                    relative_path=relative_path,
+                    content=material.content,
+                    byte_count=len(material.encoded),
+                    content_digest=material.content_digest,
+                    version_digest=material.version_digest,
+                )
+            )
+        if not files:
+            raise WorkspaceFilePathRejectedError(
+                "Workspace command snapshot contains no supported project files"
+            )
+        files.sort(key=lambda item: item.relative_path.casefold())
+        if profile.ecosystem == "node":
+            by_path = {item.relative_path.casefold(): item for item in files}
+            package_file = by_path.get("package.json")
+            if package_file is None or "pnpm-lock.yaml" not in by_path:
+                raise WorkspaceFilePathRejectedError(
+                    "Node Command Profiles require package.json and pnpm-lock.yaml"
+                )
+            try:
+                package = json.loads(package_file.content)
+            except json.JSONDecodeError as error:
+                raise WorkspaceFilePathRejectedError(
+                    "Node Command Profile package.json is invalid"
+                ) from error
+            script_name = {
+                "node.pnpm_test.v1": "test",
+                "node.pnpm_typecheck.v1": "type-check",
+                "node.pnpm_build.v1": "build",
+            }.get(profile.command_profile_id)
+            scripts = package.get("scripts") if isinstance(package, dict) else None
+            script = scripts.get(script_name) if isinstance(scripts, dict) else None
+            if not isinstance(script, str) or not script.strip() or len(script) > 2_048:
+                raise WorkspaceFilePathRejectedError(
+                    "Node Command Profile requires its fixed package script"
+                )
+        return WorkspaceCommandSnapshot.build(
+            command_profile=profile,
+            project_path=normalized_project,
+            files=tuple(files),
+            total_byte_count=total_bytes,
         )
 
     def inspect_git(

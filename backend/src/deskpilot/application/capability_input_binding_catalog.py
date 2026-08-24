@@ -23,6 +23,7 @@ from deskpilot.domain.capability_execution import (
     CapabilityResultKind,
     VerifiedCapabilityResultRef,
 )
+from deskpilot.domain.command_profiles import COMMAND_PROFILE_IDS, CommandProfileId
 from deskpilot.domain.task_loop_execution import (
     MODEL_PLANNER_NODE_BINDING_ID_PATTERN,
     ModelPlannerNodeBinding,
@@ -153,6 +154,16 @@ class WorkspaceGitInspectExecutorInput(BaseModel):
     operation: Literal["status", "diff", "log"]
 
 
+class WorkspaceCommandExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-command-executor-input.v1"] = (
+        "deskpilot.workspace-command-executor-input.v1"
+    )
+    project_path: str = Field(min_length=1, max_length=32_767)
+    command_profile_id: CommandProfileId
+
+
 class WorkspacePatchChangeExecutorInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -200,6 +211,7 @@ CapabilityExecutorInput = Annotated[
     | WorkspaceProjectSearchExecutorInput
     | WorkspaceProjectBatchReadExecutorInput
     | WorkspaceGitInspectExecutorInput
+    | WorkspaceCommandExecutorInput
     | WorkspacePatchBundleExecutorInput
     | ArtifactHtmlExecutorInput
     | BrowserVerifyExecutorInput,
@@ -338,6 +350,7 @@ _INPUT_SCHEMA_BY_CAPABILITY = {
         "deskpilot.workspace-project-batch-read-executor-input.v1"
     ),
     "workspace.git.inspect.v1": "deskpilot.workspace-git-inspect-executor-input.v1",
+    "workspace.command.run.v1": "deskpilot.workspace-command-executor-input.v1",
     "workspace.patch.bundle.v1": "deskpilot.workspace-patch-bundle-executor-input.v1",
     "artifact.html.v1": "deskpilot.artifact-html-executor-input.v1",
     "browser.verify.v1": "deskpilot.browser-verify-executor-input.v1",
@@ -445,6 +458,15 @@ class CapabilityInputBindingCatalog:
                 (),
             ),
             (
+                "workspace_command_profile",
+                "workspace.command.run.v1",
+                "workspace_command_profile",
+                ("project_path",),
+                WorkspaceCommandExecutorInput,
+                frozenset(),
+                (),
+            ),
+            (
                 "workspace_patch_bundle",
                 "workspace.patch.bundle.v1",
                 "workspace_patch_bundle",
@@ -532,10 +554,24 @@ class CapabilityInputBindingCatalog:
             raise CapabilityInputProfileNotFoundError(
                 "Capability input profile has no exact registration"
             )
+        expected_recipe_digest = profile.route_manifest_digest
+        if profile.route_id == "workspace_command_profile":
+            profile_id = node_binding.bound_input_manifest.get("command_profile_id")
+            if profile_id not in COMMAND_PROFILE_IDS:
+                raise CapabilityInputLineageRejectedError(
+                    "Command Profile input has no registered fixed variant"
+                )
+            expected_recipe_digest = sha256_digest(
+                {
+                    **RouteRecipeCatalog.manifest(profile.route_id, "2"),
+                    "variant_key": f"{profile.route_id}:{profile_id}",
+                    "fixed_parameters": {"command_profile_id": profile_id},
+                }
+            )
         if (
             node_binding.recipe.route_id != profile.route_id
             or node_binding.recipe.route_version != "2"
-            or node_binding.recipe.route_manifest_digest != profile.route_manifest_digest
+            or node_binding.recipe.route_manifest_digest != expected_recipe_digest
         ):
             raise CapabilityInputLineageRejectedError("Capability input source recipe changed")
         if (
@@ -619,7 +655,10 @@ class CapabilityInputBindingCatalog:
                 by_name[name].value,
                 enum_value=name in profile.enum_parameters,
             )
-        if normalized != node_binding.bound_input_manifest:
+        if (
+            profile.route_id != "workspace_command_profile"
+            and normalized != node_binding.bound_input_manifest
+        ):
             raise CapabilityInputLineageRejectedError(
                 "Capability normalized input changed from its persisted node binding"
             )
@@ -653,6 +692,21 @@ class CapabilityInputBindingCatalog:
                 "project_path": normalized["project_path"],
                 "paths": decoded,
             }
+        elif profile.route_id == "workspace_command_profile":
+            profile_id = node_binding.bound_input_manifest.get("command_profile_id")
+            if profile_id not in COMMAND_PROFILE_IDS:
+                raise CapabilityInputLineageRejectedError(
+                    "Command Profile fixed input is not registered"
+                )
+            expected: dict[str, object] = {
+                "project_path": normalized["project_path"],
+                "command_profile_id": profile_id,
+            }
+            if expected != node_binding.bound_input_manifest:
+                raise CapabilityInputLineageRejectedError(
+                    "Command Profile fixed input changed from its persisted Offer"
+                )
+            result = expected
         return result
 
     def capabilities(self) -> tuple[CapabilityRef, ...]:
@@ -673,6 +727,7 @@ __all__ = [
     "McpTextMetricsExecutorInput",
     "ResolvedVerifiedCapabilityResult",
     "WorkspaceNodeTestExecutorInput",
+    "WorkspaceCommandExecutorInput",
     "WorkspaceGitInspectExecutorInput",
     "WorkspacePatchBundleExecutorInput",
     "WorkspacePatchChangeExecutorInput",

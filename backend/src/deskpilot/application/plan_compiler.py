@@ -1073,6 +1073,43 @@ def workspace_git_inspect_draft(task_id: str, contract_version: int = 1) -> Draf
     )
 
 
+def workspace_command_profile_contract(
+    task_id: str, capabilities: CapabilityCatalog
+) -> TaskContract:
+    return _direct_capability_contract(
+        task_id,
+        capabilities,
+        capability_id="workspace.command.run.v1",
+        objective="在断网临时项目快照中运行一个服务器注册的固定命令 Profile",
+        criterion=AcceptanceCriterion(
+            criterion_id="ac_workspace_command_profile",
+            kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+            description=(
+                "结果绑定 Profile、项目快照、内容寻址工具链、退出码、受限输出、"
+                "超时/取消回执及 AppContainer 断网证明。"
+            ),
+            verification_requirement=VerificationRequirement.DETERMINISTIC,
+            origin="trusted_template",
+        ),
+        output=OutputContract(media_type="application/json", language="zh-CN"),
+    )
+
+
+def workspace_command_profile_draft(
+    task_id: str, contract_version: int = 1
+) -> DraftPlan:
+    return _direct_capability_draft(
+        task_id,
+        contract_version,
+        producer_ref="workspace_command_profile.v1",
+        local_key="workspace_command_profile",
+        capability_id="workspace.command.run.v1",
+        objective="运行一个服务器固定、断网、临时快照命令 Profile。",
+        acceptance_ref="ac_workspace_command_profile",
+        verification_profile=VerificationProfile.DETERMINISTIC,
+    )
+
+
 def workspace_file_replace_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
     return _direct_capability_contract(
         task_id,

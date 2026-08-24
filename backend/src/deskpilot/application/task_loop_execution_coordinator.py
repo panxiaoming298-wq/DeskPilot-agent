@@ -447,6 +447,7 @@ class TaskLoopExecutionCoordinator:
             CapabilityResultKind.WORKSPACE_CHECK.value,
             CapabilityResultKind.PYTHON_TEST.value,
             CapabilityResultKind.NODE_TEST.value,
+            CapabilityResultKind.COMMAND_PROFILE.value,
         } and output.get("status") != "passed":
             raise TaskLoopFinalAcceptanceRejectedError(
                 "Verified check evidence does not satisfy final acceptance"

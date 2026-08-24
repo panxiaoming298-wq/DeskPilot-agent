@@ -58,6 +58,7 @@ from deskpilot.application.capability_execution_runtime import CapabilityExecuti
 from deskpilot.application.capability_input_binding_catalog import (
     CapabilityInputBindingCatalog,
 )
+from deskpilot.application.command_profile_catalog import CommandProfileCatalog
 from deskpilot.application.context_memory_runtime import ContextMemoryRuntime
 from deskpilot.application.credential_resolver import CredentialResolver
 from deskpilot.application.effect_dag_cluster_admission import (
@@ -130,6 +131,7 @@ from deskpilot.application.workbench_runtime_coordinator import (
 from deskpilot.application.workspace_agent_runtime import WorkspaceAgentRuntime
 from deskpilot.application.workspace_check_runtime import WorkspaceCheckRuntime
 from deskpilot.application.workspace_coding_runtime import WorkspaceCodingRuntime
+from deskpilot.application.workspace_command_runtime import WorkspaceCommandRuntime
 from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
 from deskpilot.application.workspace_node_test_runtime import WorkspaceNodeTestRuntime
 from deskpilot.application.workspace_python_test_runtime import WorkspacePythonTestRuntime
@@ -380,6 +382,11 @@ def create_app(
             resolved_settings.artifact_workspace_root,
         )
         workspace_coding_runtime = WorkspaceCodingRuntime(workspace_file_runtime)
+        command_profile_catalog = CommandProfileCatalog()
+        workspace_command_runtime = WorkspaceCommandRuntime(
+            resolved_settings.runner_worker_runtime_root,
+            resolved_settings.runner_appcontainer_profile_journal_path,
+        )
         agent_model_loop_runtime = AgentModelLoopRuntime(
             database,
             agent_execution_runtime,
@@ -456,6 +463,9 @@ def create_app(
             node_tests=resolved_workspace_node_test_runtime,
             workspace_patches=workspace_file_runtime,
             workspace_coding=workspace_coding_runtime,
+            command_profiles=command_profile_catalog,
+            command_snapshots=workspace_coding_runtime,
+            command_runtime=workspace_command_runtime,
             artifacts=artifact_delivery_runtime,
         )
         task_loop_agent_adapters = create_task_loop_agent_adapter_registry(
@@ -512,6 +522,7 @@ def create_app(
             task_loop_runtime,
             task_loop_activation_runtime,
             task_loop_execution_runtime,
+            command_profile_ids=workspace_command_runtime.enabled_profile_ids,
         )
         workbench_runtime = (
             WorkbenchRuntimeCoordinator(
@@ -636,6 +647,8 @@ def create_app(
         app.state.task_loop_agent_runtime = task_loop_agent_runtime
         app.state.workspace_file_runtime = workspace_file_runtime
         app.state.workspace_coding_runtime = workspace_coding_runtime
+        app.state.command_profile_catalog = command_profile_catalog
+        app.state.workspace_command_runtime = workspace_command_runtime
         app.state.workspace_agent_runtime = workspace_agent_runtime
         app.state.workspace_check_runtime = resolved_workspace_check_runtime
         app.state.workspace_python_test_runtime = resolved_workspace_python_test_runtime

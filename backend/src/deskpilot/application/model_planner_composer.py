@@ -126,9 +126,15 @@ class ModelPlannerComposer:
         task_id: str,
         steps: tuple[RevalidatedOfferStep, ...],
     ) -> ModelPlannerComposition:
-        if not 2 <= len(steps) <= _MAX_COMPOSITE_STEPS:
+        if not 1 <= len(steps) <= _MAX_COMPOSITE_STEPS:
             raise ModelPlannerOfferRejectedError(
-                "A composite Plan requires between two and eight Offers"
+                "A generic Task Loop Plan requires between one and eight Offers"
+            )
+        if len(steps) == 1 and not RouteRecipeCatalog.is_planner_only_route(
+            steps[0].route.route_id
+        ):
+            raise ModelPlannerOfferRejectedError(
+                "A legacy single-step Offer must retain direct execution"
             )
         self._validate_scope_and_uniqueness(task_id, steps)
         for step in steps:

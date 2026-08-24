@@ -95,6 +95,7 @@ RouteId = Literal[
     "workspace_project_search",
     "workspace_project_batch_read",
     "workspace_git_inspect",
+    "workspace_command_profile",
 ]
 CLASSIFIER_VERSION = "deskpilot.turn-router.rules.v5"
 MODEL_PLANNER_CLASSIFIER_VERSION = "deskpilot.turn-router.model-planner.v1"
