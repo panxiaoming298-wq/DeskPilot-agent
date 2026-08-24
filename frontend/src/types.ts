@@ -1554,6 +1554,11 @@ export interface TaskLoopExecutionWorkbenchRead {
   cancelled_count: number
   candidate_count: number
   verified_result_count: number
+  no_progress_count: number
+  no_progress_limit: 3
+  repair_count: number
+  maximum_plan_generations: 3
+  budget_exhausted: boolean
   nodes: TaskLoopExecutionWorkbenchNodeRead[]
   recoverable: boolean
   created_at: string

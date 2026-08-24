@@ -33,6 +33,8 @@ from deskpilot.application.turn_planner_runtime import (
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.capability_execution import VerifiedCapabilityResultRef
 from deskpilot.domain.task_loop import ModelPlannerDraft, TaskLoop
+from deskpilot.domain.task_loop_approvals import TaskLoopCapabilityApproval
+from deskpilot.domain.task_loop_cycle import TaskLoopCycleEvent, TaskLoopCycleRead
 from deskpilot.domain.task_loop_execution import (
     ModelPlannerNodeBinding,
     TaskLoopExecution,
@@ -43,6 +45,7 @@ from deskpilot.domain.task_loop_execution import (
     TaskLoopVerifiedResult,
 )
 from deskpilot.domain.task_plans import DraftNodeKind, ExecutablePlan
+from deskpilot.domain.workspace_files import WorkspacePatchPreview, WorkspacePatchReceipt
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
     ModelPlannerDraftRecord,
@@ -50,6 +53,8 @@ from deskpilot.infrastructure.models import (
     TaskExecutionEdgeRecord,
     TaskExecutionNodeRecord,
     TaskExecutionRunRecord,
+    TaskLoopCapabilityApprovalRecord,
+    TaskLoopCycleEventRecord,
     TaskLoopExecutionEventRecord,
     TaskLoopExecutionRecord,
     TaskLoopNodeAttemptRecord,
@@ -442,6 +447,41 @@ class TaskLoopActivationRuntime:
             attempts_by_id[attempt.attempt_id] = attempt
             attempts_by_node.setdefault(attempt.node_id, []).append(attempt)
 
+        approval_records = tuple(
+            (
+                await session.scalars(
+                    select(TaskLoopCapabilityApprovalRecord)
+                    .where(
+                        TaskLoopCapabilityApprovalRecord.execution_id
+                        == execution.execution_id
+                    )
+                    .order_by(TaskLoopCapabilityApprovalRecord.created_at)
+                )
+            ).all()
+        )
+        approvals_by_node: dict[str, TaskLoopCapabilityApproval] = {}
+        for approval_record in approval_records:
+            approval = self._approval_from_record(approval_record)
+            approval_attempt = attempts_by_id.get(approval.attempt_id)
+            binding = bindings_by_id.get(approval.node_binding_id)
+            if (
+                approval.execution_id != execution.execution_id
+                or approval.task_id != execution.task_id
+                or approval.run_id != execution.run_id
+                or approval.plan_generation != execution.plan_generation
+                or approval_attempt is None
+                or approval_attempt.node_id != approval.node_id
+                or approval_attempt.attempt != approval.attempt
+                or approval_attempt.input_digest != approval.input_binding_digest
+                or binding is None
+                or binding.composite_node_id != approval.node_id
+                or approval.node_id in approvals_by_node
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Task Loop capability approval crossed its execution binding"
+                )
+            approvals_by_node[approval.node_id] = approval
+
         result_records = tuple(
             (
                 await session.scalars(
@@ -475,6 +515,35 @@ class TaskLoopActivationRuntime:
                 )
             results_by_node[result.node_id] = result
 
+        cycle_records = tuple(
+            (
+                await session.scalars(
+                    select(TaskLoopCycleEventRecord)
+                    .where(
+                        TaskLoopCycleEventRecord.execution_id
+                        == execution.execution_id
+                    )
+                    .order_by(TaskLoopCycleEventRecord.sequence)
+                )
+            ).all()
+        )
+        cycle_events = tuple(
+            self._cycle_event_from_record(item) for item in cycle_records
+        )
+        for index, event in enumerate(cycle_events, start=1):
+            previous = cycle_events[index - 2] if index > 1 else None
+            if (
+                event.sequence != index
+                or event.execution_id != execution.execution_id
+                or event.task_id != execution.task_id
+                or event.plan_generation != execution.plan_generation
+                or event.previous_event_digest
+                != (previous.event_digest if previous is not None else None)
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Task Loop cycle event chain changed"
+                )
+
         node_reads: list[TaskLoopExecutionNodeRead] = []
         for node in node_records:
             node_attempts = attempts_by_node.get(node.node_id, [])
@@ -498,6 +567,29 @@ class TaskLoopActivationRuntime:
 
             latest_attempt = node_attempts[-1] if node_attempts else None
             verified_result = results_by_node.get(node.node_id)
+            node_approval = approvals_by_node.get(node.node_id)
+            if node_approval is not None and latest_attempt is not None:
+                valid_approval_state = (
+                    node_approval.status == "pending"
+                    and execution.status == "awaiting_user"
+                    and node.status == "waiting_user"
+                    and latest_attempt.status == "prepared"
+                ) or (
+                    node_approval.status == "approved"
+                    and execution.status == "active"
+                    and node.status in {"ready", "running"}
+                    and latest_attempt.status in {"prepared", "running"}
+                ) or (
+                    node_approval.status == "consumed"
+                    and node.status in {"awaiting_verification", "verified"}
+                    and latest_attempt.status in {"awaiting_verification", "verified"}
+                )
+                if not valid_approval_state:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Task Loop capability approval lifecycle changed: "
+                        f"approval={node_approval.status}, execution={execution.status}, "
+                        f"node={node.status}, attempt={latest_attempt.status}"
+                    )
             if any(
                 item.status == "verified"
                 and item.attempt_id
@@ -588,11 +680,76 @@ class TaskLoopActivationRuntime:
             )
 
         phase = self._execution_phase(execution, tuple(node_reads))
+        node_state_digest = sha256_digest(
+            {
+                "nodes": [
+                    {
+                        "node_id": item.node_id,
+                        "status": item.status,
+                        "revision": item.revision,
+                        "attempt_count": item.attempt_count,
+                    }
+                    for item in sorted(node_records, key=lambda value: value.node_id)
+                ]
+            }
+        )
+        latest_cycle = cycle_events[-1] if cycle_events else None
+        no_progress_count = 0
+        if latest_cycle is not None and (
+            latest_cycle.evidence_manifest.get("node_state_digest")
+            == node_state_digest
+        ):
+            if latest_cycle.kind == "no_progress_observed":
+                value = latest_cycle.evidence_manifest.get("observation_count")
+                if not isinstance(value, int) or not 1 <= value <= 3:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Task Loop no-progress counter proof changed"
+                    )
+                no_progress_count = value
+            elif latest_cycle.kind == "no_progress_terminated":
+                no_progress_count = 3
+        cycle = TaskLoopCycleRead.build(
+            no_progress_count=no_progress_count,
+            repair_count=sum(item.kind == "repair_started" for item in cycle_events),
+            budget_exhausted=any(
+                item.kind == "budget_exhausted" for item in cycle_events
+            ),
+            latest_event_kind=(latest_cycle.kind if latest_cycle is not None else None),
+            latest_event_sequence=(latest_cycle.sequence if latest_cycle is not None else 0),
+        )
         updated_at = max(
             loop.updated_at,
             execution.updated_at,
             *(item.updated_at for item in node_reads),
+            *(item.updated_at for item in approvals_by_node.values()),
         )
+        workspace_patch: WorkspacePatchPreview | WorkspacePatchReceipt | None = None
+        if approvals_by_node:
+            latest_approval = max(
+                approvals_by_node.values(),
+                key=lambda item: (item.updated_at, item.approval_id),
+            )
+            workspace_patch = WorkspacePatchPreview.model_validate(
+                latest_approval.preview_manifest
+            )
+            attempt = attempts_by_id[latest_approval.attempt_id]
+            if latest_approval.status == "consumed":
+                if attempt.candidate_manifest is None:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Consumed patch approval has no durable candidate"
+                    )
+                candidate_output = attempt.candidate_manifest.get("output_manifest")
+                receipt = (
+                    candidate_output.get("receipt")
+                    if isinstance(candidate_output, dict)
+                    else None
+                )
+                try:
+                    workspace_patch = WorkspacePatchReceipt.model_validate(receipt)
+                except ValidationError as error:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Consumed patch approval receipt proof changed"
+                    ) from error
         return TaskLoopExecutionRead.build(
             task_id=execution.task_id,
             loop_id=execution.loop_id,
@@ -602,11 +759,90 @@ class TaskLoopActivationRuntime:
             loop_event_count=loop.event_count,
             loop_progress_digest=loop.progress_digest,
             execution=execution,
+            cycle=cycle,
+            workspace_patch=workspace_patch,
             nodes=tuple(node_reads),
             recoverable=execution.status in {"active", "paused", "awaiting_user", "repairing"},
             created_at=loop.created_at,
             updated_at=updated_at,
         )
+
+    @staticmethod
+    def _cycle_event_from_record(
+        record: TaskLoopCycleEventRecord,
+    ) -> TaskLoopCycleEvent:
+        try:
+            event = TaskLoopCycleEvent.model_validate(record.manifest)
+        except ValidationError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop cycle event Schema was rejected"
+            ) from error
+        if (
+            record.event_id != event.event_id
+            or record.execution_id != event.execution_id
+            or record.task_id != event.task_id
+            or record.sequence != event.sequence
+            or record.previous_event_digest != event.previous_event_digest
+            or record.kind != event.kind
+            or record.plan_generation != event.plan_generation
+            or record.source_progress_digest != event.source_progress_digest
+            or record.reason_code != event.reason_code
+            or record.evidence_manifest != event.evidence_manifest
+            or record.evidence_digest != event.evidence_digest
+            or record.event_digest != event.event_digest
+        ):
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop cycle event columns changed"
+            )
+        return event
+
+    @classmethod
+    def _approval_from_record(
+        cls,
+        record: TaskLoopCapabilityApprovalRecord,
+    ) -> TaskLoopCapabilityApproval:
+        values = {
+            "schema_version": "deskpilot.task-loop-capability-approval.v1",
+            **{
+                field: getattr(record, field)
+                for field in (
+                    "approval_id",
+                    "execution_id",
+                    "task_id",
+                    "run_id",
+                    "node_id",
+                    "node_binding_id",
+                    "attempt_id",
+                    "attempt",
+                    "plan_generation",
+                    "input_binding_digest",
+                    "executor_manifest_digest",
+                    "preview_schema_digest",
+                    "preview_manifest",
+                    "confirmation_digest",
+                    "requested_execution_revision",
+                    "status",
+                    "revision",
+                    "result_digest",
+                    "approval_digest",
+                )
+            },
+            "approved_at": cls._aware_optional(record.approved_at),
+            "consumed_at": cls._aware_optional(record.consumed_at),
+            "created_at": cls._aware(record.created_at),
+            "updated_at": cls._aware(record.updated_at),
+        }
+        try:
+            approval = TaskLoopCapabilityApproval.model_validate(values)
+        except ValidationError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop capability approval Schema was rejected"
+            ) from error
+        if record.manifest != approval.model_dump(mode="json"):
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop capability approval columns changed"
+            )
+        return approval
 
     @staticmethod
     def _dependency_is_verified(

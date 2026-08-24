@@ -1,7 +1,7 @@
 """Exact, data-bound registry for trusted capability executors."""
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ValidationError
 
@@ -113,12 +113,31 @@ class CapabilityExecutor(Protocol):
     ) -> BaseModel: ...
 
 
+@runtime_checkable
+class ApprovalGatedCapabilityExecutor(CapabilityExecutor, Protocol):
+    """Trusted adapter that separates preview from an approved side effect."""
+
+    async def prepare_approval(
+        self,
+        context: CapabilityExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel: ...
+
+    async def execute_approved(
+        self,
+        context: CapabilityExecutionContext,
+        arguments: BaseModel,
+        preview: BaseModel,
+    ) -> BaseModel: ...
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityExecutorRegistration:
     manifest: CapabilityExecutorManifest
     input_model: type[BaseModel]
     output_model: type[BaseModel]
     executor: CapabilityExecutor
+    approval_model: type[BaseModel] | None = None
 
 
 class CapabilityExecutorRegistry:
@@ -135,6 +154,8 @@ class CapabilityExecutorRegistry:
         input_model: type[BaseModel],
         output_model: type[BaseModel],
         executor: CapabilityExecutor,
+        *,
+        approval_model: type[BaseModel] | None = None,
     ) -> CapabilityExecutorRegistration:
         capability = manifest.capability
         exact_key = self._exact_key(capability)
@@ -160,6 +181,15 @@ class CapabilityExecutorRegistry:
             raise CapabilityExecutorSchemaError(
                 "Capability executor output model does not match its manifest"
             )
+        approval_required = manifest.approval_requirement.value != "none"
+        if approval_required != (approval_model is not None):
+            raise CapabilityExecutorSchemaError(
+                "Capability approval model does not match its manifest requirement"
+            )
+        if approval_required and not isinstance(executor, ApprovalGatedCapabilityExecutor):
+            raise CapabilityExecutorSchemaError(
+                "Approval-gated capability executor omitted its trusted protocol"
+            )
         reserved_schema_field = self._reserved_authority_field(manifest.input_schema)
         if reserved_schema_field is not None:
             raise CapabilityModelAuthorityRejectedError(
@@ -171,6 +201,7 @@ class CapabilityExecutorRegistry:
             input_model=input_model,
             output_model=output_model,
             executor=executor,
+            approval_model=approval_model,
         )
         self._registrations[exact_key] = registration
         self._identity_digests[identity_key] = capability.digest

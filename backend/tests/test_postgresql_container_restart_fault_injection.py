@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from asyncpg.exceptions import CannotConnectNowError
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
@@ -241,7 +242,7 @@ async def _wait_for_database_ttls(
                 ).one_or_none()
             if row is not None and row[1] is True and row[2] is True and row[3] is True:
                 return probe, row[0]
-        except (DBAPIError, OSError) as exc:
+        except (CannotConnectNowError, DBAPIError, OSError) as exc:
             last_error = exc
         await probe.dispose()
         await asyncio.sleep(0.1)

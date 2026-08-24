@@ -18,6 +18,7 @@ from deskpilot.application.capability_input_binding_catalog import (
     KnowledgeLocalExecutorInput,
     McpTextMetricsExecutorInput,
     WorkspaceNodeTestExecutorInput,
+    WorkspacePatchBundleExecutorInput,
     WorkspacePythonTestExecutorInput,
     WorkspaceSnapshotCheckExecutorInput,
 )
@@ -41,6 +42,8 @@ from deskpilot.domain.workspace_files import (
     WorkspaceCheckRead,
     WorkspaceNodeTestRead,
     WorkspaceNodeTestSnapshot,
+    WorkspacePatchPreview,
+    WorkspacePatchReceipt,
     WorkspacePythonTestRead,
     WorkspacePythonTestSnapshot,
 )
@@ -153,6 +156,19 @@ class WorkspaceNodeTestPort(Protocol):
     def run(self, snapshot: WorkspaceNodeTestSnapshot) -> WorkspaceNodeTestRead: ...
 
 
+class WorkspacePatchPort(Protocol):
+    def prepare_patch(
+        self,
+        *,
+        task_id: str,
+        changes: tuple[dict[str, str], ...],
+        minimum_changes: int = 2,
+        maximum_changes: int = 8,
+    ) -> WorkspacePatchPreview: ...
+
+    def commit_patch(self, preview: WorkspacePatchPreview) -> WorkspacePatchReceipt: ...
+
+
 class ArtifactDeliveryPort(Protocol):
     async def build_html_node(
         self,
@@ -206,6 +222,23 @@ class BrowserVerifyCapabilityOutput(BaseModel):
         material = self.model_dump(mode="json", exclude={"result_digest"})
         if self.result_digest != sha256_digest(material):
             raise ValueError("Browser capability output digest does not match")
+        return self
+
+
+class WorkspacePatchCapabilityOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-patch-capability-output.v1"] = (
+        "deskpilot.workspace-patch-capability-output.v1"
+    )
+    receipt: WorkspacePatchReceipt
+    result_digest: str = Field(pattern=DIGEST_PATTERN)
+
+    @model_validator(mode="after")
+    def digest_matches(self) -> WorkspacePatchCapabilityOutput:
+        material = self.model_dump(mode="json", exclude={"result_digest"})
+        if self.result_digest != sha256_digest(material):
+            raise ValueError("Workspace patch capability output digest does not match")
         return self
 
 
@@ -612,6 +645,90 @@ class WorkspaceNodeTestExecutor(_BuiltinExecutor):
         )
 
 
+class WorkspacePatchBundleExecutor(_BuiltinExecutor):
+    """R1 adapter whose write path exists only behind an exact preview digest."""
+
+    def __init__(self, capability: CapabilityRef, workspace: WorkspacePatchPort) -> None:
+        super().__init__(capability, CapabilityResultKind.PATCH_RECEIPT)
+        self._workspace = workspace
+
+    async def execute(
+        self,
+        context: CapabilityExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        self._require_context(context)
+        raise BuiltinCapabilityExecutionError(
+            "Workspace patch execution requires an exact persisted approval"
+        )
+
+    async def prepare_approval(
+        self,
+        context: CapabilityExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        self._require_context(context)
+        if not isinstance(arguments, WorkspacePatchBundleExecutorInput):
+            raise BuiltinCapabilityExecutionError("Workspace patch input type changed")
+        changes = tuple(item.model_dump(mode="python") for item in arguments.changes)
+        return await asyncio.to_thread(
+            self._workspace.prepare_patch,
+            task_id=context.task_id,
+            changes=changes,
+        )
+
+    async def execute_approved(
+        self,
+        context: CapabilityExecutionContext,
+        arguments: BaseModel,
+        preview: BaseModel,
+    ) -> BaseModel:
+        self._require_context(context)
+        if (
+            not isinstance(arguments, WorkspacePatchBundleExecutorInput)
+            or not isinstance(preview, WorkspacePatchPreview)
+            or preview.task_id != context.task_id
+        ):
+            raise BuiltinCapabilityExecutionError(
+                "Workspace patch approval changed its exact Task binding"
+            )
+        receipt = await asyncio.to_thread(self._workspace.commit_patch, preview)
+        values = {
+            "schema_version": "deskpilot.workspace-patch-capability-output.v1",
+            "receipt": receipt.model_dump(mode="json"),
+        }
+        return WorkspacePatchCapabilityOutput.model_validate(
+            {**values, "result_digest": sha256_digest(values)}
+        )
+
+    async def verify(
+        self,
+        context: CapabilityExecutionContext,
+        candidate: BaseModel,
+    ) -> BaseModel:
+        if (
+            not isinstance(candidate, WorkspacePatchCapabilityOutput)
+            or candidate.receipt.task_id != context.task_id
+            or candidate.receipt.status != "committed"
+        ):
+            raise BuiltinCapabilityCandidateRejectedError(
+                "Workspace patch receipt is partial or crossed its Task"
+            )
+        return self._verification(
+            context=context,
+            candidate=candidate,
+            verifier_id="builtin.workspace.patch.bundle.verifier.v1",
+            evidence={
+                "confirmation_digest": candidate.receipt.confirmation_digest,
+                "change_receipt_digests": [
+                    item.receipt_digest for item in candidate.receipt.change_receipts
+                ],
+                "receipt_digest": candidate.receipt.receipt_digest,
+                "result_digest": candidate.result_digest,
+            },
+        )
+
+
 def _test_evidence(
     candidate: WorkspacePythonTestRead | WorkspaceNodeTestRead,
 ) -> dict[str, object]:
@@ -642,6 +759,7 @@ def create_builtin_capability_executor_registry(
     workspace_checks: WorkspaceCheckPort | None = None,
     python_tests: WorkspacePythonTestPort | None = None,
     node_tests: WorkspaceNodeTestPort | None = None,
+    workspace_patches: WorkspacePatchPort | None = None,
     artifacts: ArtifactDeliveryPort | None = None,
 ) -> CapabilityExecutorRegistry:
     """Register only exact packs whose concrete trusted runtime is available."""
@@ -703,6 +821,21 @@ def create_builtin_capability_executor_registry(
             result_kind=CapabilityResultKind.NODE_TEST,
             executor=WorkspaceNodeTestExecutor(_ref(pack), workspace, node_tests),
         )
+    if workspace_patches is not None:
+        pack = capabilities.resolve_preferred("workspace.patch.bundle.v1")
+        _register(
+            registry,
+            pack,
+            executor_id="builtin.workspace.patch.bundle.v1",
+            input_model=WorkspacePatchBundleExecutorInput,
+            output_model=WorkspacePatchCapabilityOutput,
+            approval_model=WorkspacePatchPreview,
+            result_kind=CapabilityResultKind.PATCH_RECEIPT,
+            effect_class=CapabilityEffectClass.WORKSPACE_WRITE,
+            approval_requirement=CapabilityApprovalRequirement.EXACT_CONFIRMATION_DIGEST,
+            recovery_policy=CapabilityRecoveryPolicy.RECEIPT_RECONCILE,
+            executor=WorkspacePatchBundleExecutor(_ref(pack), workspace_patches),
+        )
     if artifacts is not None:
         artifact_pack = capabilities.resolve_preferred("artifact.html.v1")
         _register(
@@ -739,9 +872,11 @@ def _register(
     output_model: type[BaseModel],
     result_kind: CapabilityResultKind,
     executor: _BuiltinExecutor,
+    approval_model: type[BaseModel] | None = None,
     consumes: tuple[CapabilityResultKind, ...] = (),
     effect_class: CapabilityEffectClass = CapabilityEffectClass.READ_ONLY,
     recovery_policy: CapabilityRecoveryPolicy = CapabilityRecoveryPolicy.DETERMINISTIC_RETRY,
+    approval_requirement: CapabilityApprovalRequirement = CapabilityApprovalRequirement.NONE,
 ) -> None:
     if not pack.runtime_enabled:
         return
@@ -754,7 +889,7 @@ def _register(
         consumes=consumes,
         produces=result_kind,
         effect_class=effect_class,
-        approval_requirement=CapabilityApprovalRequirement.NONE,
+        approval_requirement=approval_requirement,
         recovery_policy=recovery_policy,
     )
     registry.register(
@@ -762,6 +897,7 @@ def _register(
         input_model,
         output_model,
         cast(CapabilityExecutor, executor),
+        approval_model=approval_model,
     )
 
 
@@ -786,6 +922,9 @@ __all__ = [
     "KnowledgeLocalExecutor",
     "McpTextMetricsExecutor",
     "WorkspaceNodeTestExecutor",
+    "WorkspacePatchBundleExecutor",
+    "WorkspacePatchCapabilityOutput",
+    "WorkspacePatchPort",
     "WorkspacePythonTestExecutor",
     "WorkspaceSnapshotCheckExecutor",
     "create_builtin_capability_executor_registry",

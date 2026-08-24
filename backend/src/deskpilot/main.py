@@ -452,6 +452,7 @@ def create_app(
             workspace_checks=resolved_workspace_check_runtime,
             python_tests=resolved_workspace_python_test_runtime,
             node_tests=resolved_workspace_node_test_runtime,
+            workspace_patches=workspace_file_runtime,
             artifacts=artifact_delivery_runtime,
         )
         task_loop_agent_adapters = create_task_loop_agent_adapter_registry(

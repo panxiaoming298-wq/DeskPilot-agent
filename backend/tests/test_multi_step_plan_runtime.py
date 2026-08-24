@@ -157,11 +157,11 @@ async def _seed_turn(
     database: Database,
     *,
     suffix: str,
+    message: str = "cats stats",
 ) -> tuple[str, TurnRouteRead]:
     task_id = f"tsk_{suffix * 32}"
     conversation_id = f"cnv_{suffix * 32}"
     message_id = f"msg_{suffix * 32}"
-    message = "cats stats"
     message_material = {
         "message_id": message_id,
         "conversation_id": conversation_id,

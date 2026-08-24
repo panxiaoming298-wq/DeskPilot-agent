@@ -8,6 +8,7 @@ semantically consumes those payloads.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, cast
@@ -122,6 +123,26 @@ class WorkspaceNodeTestExecutorInput(BaseModel):
     test_path: str = Field(min_length=1, max_length=32_767)
 
 
+class WorkspacePatchChangeExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str = Field(min_length=1, max_length=32_767)
+    old_text: str = Field(min_length=1, max_length=4_096)
+    new_text: str = Field(max_length=4_096)
+
+
+class WorkspacePatchBundleExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-patch-bundle-executor-input.v1"] = (
+        "deskpilot.workspace-patch-bundle-executor-input.v1"
+    )
+    changes: tuple[WorkspacePatchChangeExecutorInput, ...] = Field(
+        min_length=2,
+        max_length=8,
+    )
+
+
 class ArtifactHtmlExecutorInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -146,6 +167,7 @@ CapabilityExecutorInput = Annotated[
     | WorkspaceSnapshotCheckExecutorInput
     | WorkspacePythonTestExecutorInput
     | WorkspaceNodeTestExecutorInput
+    | WorkspacePatchBundleExecutorInput
     | ArtifactHtmlExecutorInput
     | BrowserVerifyExecutorInput,
     Field(discriminator="schema_version"),
@@ -278,6 +300,7 @@ _INPUT_SCHEMA_BY_CAPABILITY = {
     "workspace.snapshot.check.v1": "deskpilot.workspace-check-executor-input.v1",
     "workspace.python.test.v1": "deskpilot.workspace-python-test-executor-input.v1",
     "workspace.node.test.v1": "deskpilot.workspace-node-test-executor-input.v1",
+    "workspace.patch.bundle.v1": "deskpilot.workspace-patch-bundle-executor-input.v1",
     "artifact.html.v1": "deskpilot.artifact-html-executor-input.v1",
     "browser.verify.v1": "deskpilot.browser-verify-executor-input.v1",
 }
@@ -353,6 +376,15 @@ class CapabilityInputBindingCatalog:
                 "workspace_node_test",
                 ("project_path", "test_path"),
                 WorkspaceNodeTestExecutorInput,
+                frozenset(),
+                (),
+            ),
+            (
+                "workspace_patch_bundle",
+                "workspace.patch.bundle.v1",
+                "workspace_patch_bundle",
+                ("changes_json",),
+                WorkspacePatchBundleExecutorInput,
                 frozenset(),
                 (),
             ),
@@ -529,6 +561,18 @@ class CapabilityInputBindingCatalog:
         result: dict[str, object] = dict(normalized)
         if profile.route_id == "knowledge_lookup":
             result["limit"] = 10
+        elif profile.route_id == "workspace_patch_bundle":
+            try:
+                decoded = json.loads(normalized["changes_json"])
+            except (TypeError, json.JSONDecodeError) as error:
+                raise CapabilityInputLineageRejectedError(
+                    "Workspace patch changes are not valid JSON"
+                ) from error
+            if not isinstance(decoded, list):
+                raise CapabilityInputLineageRejectedError(
+                    "Workspace patch changes must be one JSON list"
+                )
+            result = {"changes": decoded}
         return result
 
     def capabilities(self) -> tuple[CapabilityRef, ...]:
@@ -549,6 +593,8 @@ __all__ = [
     "McpTextMetricsExecutorInput",
     "ResolvedVerifiedCapabilityResult",
     "WorkspaceNodeTestExecutorInput",
+    "WorkspacePatchBundleExecutorInput",
+    "WorkspacePatchChangeExecutorInput",
     "WorkspacePythonTestExecutorInput",
     "WorkspaceSnapshotCheckExecutorInput",
     "canonicalize_capability_parameter",

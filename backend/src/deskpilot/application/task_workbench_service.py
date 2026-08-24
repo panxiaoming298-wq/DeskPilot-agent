@@ -123,7 +123,10 @@ from deskpilot.domain.research import (
 )
 from deskpilot.domain.schemas import TaskCreate
 from deskpilot.domain.task_loop import TaskLoop, TaskLoopWorkbenchRead
-from deskpilot.domain.task_loop_execution import TaskLoopExecutionRead
+from deskpilot.domain.task_loop_execution import (
+    TaskLoopExecutionRead,
+    TaskLoopExecutionWorkbenchRead,
+)
 from deskpilot.domain.task_plans import (
     ExecutablePlanPage,
     PlanningStateRead,
@@ -147,6 +150,7 @@ from deskpilot.domain.workspace_files import (
     WorkspaceDirectoryRead,
     WorkspaceEditReceipt,
     WorkspaceFileRead,
+    WorkspacePatchPreview,
     WorkspacePatchReceipt,
     WorkspacePathOperationReceipt,
 )
@@ -1249,6 +1253,22 @@ class TaskWorkbenchService:
             item.action is WorkbenchAction.COMMIT_WORKSPACE_PATCH and item.enabled
             for item in workbench.actions
         ):
+            generic_summary = (
+                workbench.task_loop
+                if isinstance(workbench.task_loop, TaskLoopExecutionWorkbenchRead)
+                else None
+            )
+            if (
+                isinstance(workbench.workspace_patch, WorkspacePatchPreview)
+                and workbench.workspace_patch.confirmation_digest == confirmation_digest
+                and generic_summary is not None
+                and generic_summary.execution_status in {
+                    "active",
+                    "repairing",
+                    "succeeded",
+                }
+            ):
+                return workbench
             if isinstance(workbench.workspace_patch, WorkspacePatchReceipt):
                 if (
                     workbench.workspace_patch.status == "committed"
@@ -1269,6 +1289,41 @@ class TaskWorkbenchService:
             ):
                 return workbench
             raise TaskWorkbenchConflictError("Workspace patch is not awaiting confirmation")
+        generic_task_loop = (
+            workbench.task_loop
+            if isinstance(workbench.task_loop, TaskLoopExecutionWorkbenchRead)
+            else None
+        )
+        generic_patch = bool(
+            generic_task_loop is not None
+            and generic_task_loop.execution_status == "awaiting_user"
+            and isinstance(workbench.workspace_patch, WorkspacePatchPreview)
+        )
+        if generic_patch:
+            if (
+                self._task_loop_execution is None
+                or generic_task_loop is None
+                or generic_task_loop.execution_revision is None
+            ):
+                raise TaskWorkbenchConflictError(
+                    "Task Loop workspace patch runtime is unavailable"
+                )
+            try:
+                preview = await self._task_loop_execution.approve_workspace_patch(
+                    task_id,
+                    confirmation_digest,
+                    expected_execution_revision=(
+                        generic_task_loop.execution_revision
+                    ),
+                )
+            except TaskLoopExecutionCoordinatorError as error:
+                raise TaskWorkbenchConflictError(str(error)) from error
+            await self._add_assistant_message(
+                task_id,
+                f"已批准 {len(preview.changes)} 个工作区文件的精确补丁；"
+                "通用任务循环将按同一 Task/revision 恢复提交并核验回执。",
+            )
+            return await self._schedule_automatic(await self.get(task_id))
         is_agent_patch = bool(
             workbench.route is not None
             and workbench.route.route_id
@@ -1781,6 +1836,11 @@ class TaskWorkbenchService:
             ) = await self._router.get_result(task_id)
         except TurnRouterError as error:
             raise TaskWorkbenchConflictError(str(error)) from error
+        if (
+            task_loop_execution is not None
+            and task_loop_execution.workspace_patch is not None
+        ):
+            workspace_patch = task_loop_execution.workspace_patch
         mcp_enabled = bool(
             route is not None
             and route.route_id == "mcp_text_metrics"
@@ -2345,36 +2405,52 @@ class TaskWorkbenchService:
             ),
             WorkbenchAction.COMMIT_WORKSPACE_PATCH: (
                 bool(
-                    route is not None
-                    and route.route_id
-                    in {
-                        "workspace_patch_bundle",
-                        "workspace_agent_patch_test",
-                        "workspace_dynamic_patch_test",
-                    }
-                    and route.status in {TurnRouteStatus.NEEDS_USER_ACTION, TurnRouteStatus.RUNNING}
-                    and route.result_digest is not None
-                    and run is not None
-                    and run.status
-                    in {
-                        ExecutionRunStatus.ACTIVE,
-                        ExecutionRunStatus.PAUSED,
-                    }
-                    and any(
-                        (
-                            node.local_key == route.route_id
-                            or (
-                                route.route_id == "workspace_dynamic_patch_test"
-                                and node.status is ExecutionNodeStatus.WAITING_USER
-                            )
+                    (
+                        task_loop_execution is not None
+                        and generic_execution is not None
+                        and generic_execution.status == "awaiting_user"
+                        and isinstance(
+                            task_loop_execution.workspace_patch,
+                            WorkspacePatchPreview,
                         )
-                        and node.status
+                        and any(
+                            node.status == "waiting_user"
+                            for node in task_loop_execution.nodes
+                        )
+                    )
+                    or (
+                        route is not None
+                        and route.route_id
                         in {
-                            ExecutionNodeStatus.READY,
-                            ExecutionNodeStatus.RUNNING,
-                            ExecutionNodeStatus.WAITING_USER,
+                            "workspace_patch_bundle",
+                            "workspace_agent_patch_test",
+                            "workspace_dynamic_patch_test",
                         }
-                        for node in run.nodes
+                        and route.status
+                        in {TurnRouteStatus.NEEDS_USER_ACTION, TurnRouteStatus.RUNNING}
+                        and route.result_digest is not None
+                        and run is not None
+                        and run.status
+                        in {
+                            ExecutionRunStatus.ACTIVE,
+                            ExecutionRunStatus.PAUSED,
+                        }
+                        and any(
+                            (
+                                node.local_key == route.route_id
+                                or (
+                                    route.route_id == "workspace_dynamic_patch_test"
+                                    and node.status is ExecutionNodeStatus.WAITING_USER
+                                )
+                            )
+                            and node.status
+                            in {
+                                ExecutionNodeStatus.READY,
+                                ExecutionNodeStatus.RUNNING,
+                                ExecutionNodeStatus.WAITING_USER,
+                            }
+                            for node in run.nodes
+                        )
                     )
                 ),
                 "WORKSPACE_PATCH_PREVIEW_OR_CONFIRMATION_MISSING",

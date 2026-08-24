@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from deskpilot.application.capability_input_binding_catalog import (
     CapabilityInputBindingCatalog,
 )
 from deskpilot.application.model_planner_node_binder import ModelPlannerNodeBinder
+from deskpilot.application.route_recipe_catalog import RouteRecipeCatalog
 from deskpilot.application.task_loop_activation_runtime import (
     TaskLoopActivationRuntime,
 )
@@ -39,7 +41,9 @@ from deskpilot.application.task_loop_agent_adapter_registry import (
 )
 from deskpilot.application.task_loop_execution_coordinator import (
     TaskLoopExecutionCoordinator,
+    TaskLoopExecutionCoordinatorProofRejectedError,
 )
+from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.capability_execution import (
     CapabilityExecutionContext,
@@ -48,8 +52,11 @@ from deskpilot.domain.capability_execution import (
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
     TaskExecutionNodeRecord,
+    TaskLoopCapabilityApprovalRecord,
+    TaskLoopCycleEventRecord,
     TaskLoopNodeAttemptRecord,
     TaskLoopVerifiedResultRecord,
+    utc_now,
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -57,14 +64,47 @@ sys.path.insert(0, str(Path(__file__).parent))
 from test_builtin_capability_executors import (  # noqa: E402
     FakeKnowledge,
     FakeMcp,
+    FakePythonRuntime,
 )
 from test_multi_step_plan_runtime import (  # noqa: E402
     NOW,
     ScriptedTurnPlannerProvider,
     _defer_two_offers,
+    _offer_key_for,
     _runtimes,
+    _seed_turn,
     _select_two_offers,
 )
+
+
+def _select_patch_offer(request: Any) -> dict[str, Any]:
+    changes_json = json.dumps(
+        [
+            {"path": "one.txt", "old_text": "old-one", "new_text": "new-one"},
+            {"path": "two.txt", "old_text": "old-two", "new_text": "new-two"},
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return {
+        "schema_version": "deskpilot.turn-planner-decision.v1",
+        "kind": "propose_steps",
+        "steps": [
+            {
+                "offer_key": _offer_key_for(request, "changes_json"),
+                "parameters": [
+                    {"name": "changes_json", "value": changes_json}
+                ],
+            },
+            {
+                "offer_key": _offer_key_for(request, "project_path"),
+                "parameters": [
+                    {"name": "project_path", "value": "backend"},
+                    {"name": "test_path", "value": "tests/test_one.py"},
+                ],
+            },
+        ],
+    }
 
 
 class _FlakyVerificationEngine:
@@ -121,10 +161,62 @@ class _BlockingMcpEngine:
         return await self.delegate.verify_candidate(context, bound_input, candidate)
 
 
+class _BlockingApprovedPatchEngine:
+    def __init__(self, delegate: CapabilityExecutionEngine) -> None:
+        self.delegate = delegate
+        self.patch_effect_completed = asyncio.Event()
+        self.release_candidate = asyncio.Event()
+
+    async def execute_candidate(
+        self,
+        context: CapabilityExecutionContext,
+        bound_input: Any,
+    ) -> CapabilityExecutionCandidate:
+        return await self.delegate.execute_candidate(context, bound_input)
+
+    async def prepare_approval(
+        self,
+        context: CapabilityExecutionContext,
+        bound_input: Any,
+    ) -> Any:
+        return await self.delegate.prepare_approval(context, bound_input)
+
+    async def execute_approved_candidate(
+        self,
+        context: CapabilityExecutionContext,
+        bound_input: Any,
+        preview_manifest: dict[str, Any],
+    ) -> CapabilityExecutionCandidate:
+        candidate = await self.delegate.execute_approved_candidate(
+            context,
+            bound_input,
+            preview_manifest,
+        )
+        self.patch_effect_completed.set()
+        await self.release_candidate.wait()
+        return candidate
+
+    async def verify_candidate(
+        self,
+        context: CapabilityExecutionContext,
+        bound_input: Any,
+        candidate: CapabilityExecutionCandidate,
+    ) -> VerifiedCapabilityOutput:
+        return await self.delegate.verify_candidate(context, bound_input, candidate)
+
+
 class _FailingMcp(FakeMcp):
     async def invoke(self, tool_name: str, arguments: dict[str, object]) -> Any:
         self.calls.append((tool_name, arguments))
         raise RuntimeError("scripted ambiguous broker boundary")
+
+
+class _FlakyKnowledge(FakeKnowledge):
+    async def search(self, query: str, limit: int) -> Any:
+        result = await super().search(query, limit)
+        if len(self.calls) == 1:
+            raise RuntimeError("scripted transient knowledge boundary")
+        return result
 
 
 @dataclass(slots=True)
@@ -142,6 +234,7 @@ async def _runtime_fixture(
     tmp_path: Path,
     *,
     suffix: str,
+    knowledge: FakeKnowledge | None = None,
     mcp: FakeMcp | None = None,
     wrap_engine: Callable[[CapabilityExecutionEngine], CapabilityExecutionEnginePort] | None = None,
     clock: Callable[[], datetime] = lambda: NOW,
@@ -150,11 +243,11 @@ async def _runtime_fixture(
     await database.migrate()
     provider = ScriptedTurnPlannerProvider([_select_two_offers])
     planner, planning, task_loops, _composer = _runtimes(database, provider)
-    knowledge = FakeKnowledge()
+    actual_knowledge = knowledge or FakeKnowledge()
     actual_mcp = mcp or FakeMcp()
     registry = create_builtin_capability_executor_registry(
         planner._capabilities,  # noqa: SLF001 - exact shared fixture
-        knowledge=knowledge,
+        knowledge=actual_knowledge,
         mcp=actual_mcp,
     )
     execution = AgentExecutionRuntime(
@@ -202,7 +295,7 @@ async def _runtime_fixture(
         activation=activation,
         runtime=runtime,
         task_id=task_id,
-        knowledge=knowledge,
+        knowledge=actual_knowledge,
         mcp=actual_mcp,
         engine=engine,
     )
@@ -251,6 +344,374 @@ async def test_coordinator_reduces_capabilities_and_controls_across_restart(
         assert all(item.status == "verified" for item in delivered.read.nodes)
         assert replay.command.kind == "noop"
         assert replay.read.execution == delivered.read.execution
+    finally:
+        await fixture.database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_bounded_repair_recovers_started_marker_without_replaying_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_compile = RouteRecipeCatalog.compile
+
+    def compile_with_retry_budget(
+        cls: type[RouteRecipeCatalog],
+        **kwargs: Any,
+    ) -> Any:
+        del cls
+        contract, draft = original_compile(**kwargs)
+        if kwargs["route_id"] != "knowledge_lookup":
+            return contract, draft
+        contract_material = contract.model_dump(mode="json")
+        contract_material["budget"]["max_tool_calls"] = 3
+        contract_material["budget"]["max_retries"] = 2
+        draft_material = draft.model_dump(mode="json")
+        for node in draft_material["nodes"]:
+            if node["local_key"] == "knowledge_lookup":
+                node["budget"]["tool_calls"] = 3
+                node["budget"]["retries"] = 2
+        return (
+            type(contract).model_validate(contract_material),
+            type(draft).model_validate(draft_material),
+        )
+
+    monkeypatch.setattr(
+        RouteRecipeCatalog,
+        "compile",
+        classmethod(compile_with_retry_budget),
+    )
+    knowledge = _FlakyKnowledge()
+    fixture = await _runtime_fixture(
+        tmp_path,
+        suffix="b",
+        knowledge=knowledge,
+    )
+    coordinator = TaskLoopExecutionCoordinator(
+        fixture.database,
+        fixture.activation,
+        capabilities=fixture.runtime,
+    )
+    try:
+        failed = await coordinator.advance(fixture.task_id, "repair-first-worker")
+        failed_node = next(item for item in failed.read.nodes if item.status == "failed")
+        snapshot = await coordinator._snapshot(failed.read)  # noqa: SLF001
+        repair_command = coordinator._reducer.decide(snapshot)  # noqa: SLF001
+
+        assert repair_command.kind == "start_repair"
+        assert repair_command.node_id == failed_node.node_id
+        assert len(knowledge.calls) == 1
+
+        await coordinator._record_cycle_event(  # noqa: SLF001
+            failed.read,
+            repair_command,
+            kind="repair_started",
+        )
+        restarted = TaskLoopExecutionCoordinator(
+            fixture.database,
+            fixture.activation,
+            capabilities=fixture.runtime,
+        )
+        recovered = await restarted.advance(
+            fixture.task_id,
+            "repair-restarted-worker",
+        )
+
+        assert recovered.command.kind == "execute_capability"
+        assert len(knowledge.calls) == 2
+        assert recovered.read.execution is not None
+        assert recovered.read.execution.event_count == 3
+        assert recovered.read.cycle is not None
+        assert recovered.read.cycle.repair_count == 1
+        assert recovered.read.cycle.latest_event_kind == "repair_completed"
+        assert failed_node.node_id in {
+            item.node_id for item in recovered.read.nodes if item.status == "verified"
+        }
+        async with fixture.database.session() as session:
+            events = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopCycleEventRecord).order_by(
+                            TaskLoopCycleEventRecord.sequence
+                        )
+                    )
+                ).all()
+            )
+        assert [item.kind for item in events] == [
+            "repair_started",
+            "repair_completed",
+        ]
+    finally:
+        await fixture.database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_workspace_patch_waits_for_exact_revision_and_recovers_after_approval(
+    tmp_path: Path,
+) -> None:
+    database = Database(
+        f"sqlite+aiosqlite:///{(tmp_path / 'capability-patch.db').as_posix()}"
+    )
+    await database.migrate()
+    provider = ScriptedTurnPlannerProvider([_select_patch_offer])
+    planner, planning, task_loops, _composer = _runtimes(database, provider)
+    knowledge = FakeKnowledge()
+    workspace_root = tmp_path / "workspace"
+    staging_root = tmp_path / "staging"
+    workspace_root.mkdir()
+    staging_root.mkdir()
+    first_path = workspace_root / "one.txt"
+    second_path = workspace_root / "two.txt"
+    first_path.write_text("before old-one after", encoding="utf-8")
+    second_path.write_text("before old-two after", encoding="utf-8")
+    test_path = workspace_root / "backend" / "tests" / "test_one.py"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text("def test_one():\n    assert True\n", encoding="utf-8")
+    workspace = WorkspaceFileRuntime(str(workspace_root), str(staging_root))
+    python_tests = FakePythonRuntime()
+    registry = create_builtin_capability_executor_registry(
+        planner._capabilities,  # noqa: SLF001
+        knowledge=knowledge,
+        workspace=workspace,
+        python_tests=python_tests,
+        workspace_patches=workspace,
+    )
+    execution = AgentExecutionRuntime(
+        database,
+        planning._compiler,  # noqa: SLF001
+        planner._agents,  # noqa: SLF001
+    )
+    activation = TaskLoopActivationRuntime(
+        database,
+        task_loops,
+        planner,
+        planning,
+        execution,
+        ModelPlannerNodeBinder(
+            planner._agents,  # noqa: SLF001
+            registry,
+            create_task_loop_agent_adapter_registry(
+                research_available=True,
+                workspace_file_available=True,
+            ),
+        ),
+        clock=lambda: NOW,
+    )
+    engine = _BlockingApprovedPatchEngine(CapabilityExecutionEngine(registry))
+    runtime = CapabilityExecutionRuntime(
+        database,
+        CapabilityInputBindingCatalog(planner._capabilities),  # noqa: SLF001
+        registry,
+        engine,
+        clock=lambda: NOW,
+    )
+    changes_json = json.dumps(
+        [
+            {"path": "one.txt", "old_text": "old-one", "new_text": "new-one"},
+            {"path": "two.txt", "old_text": "old-two", "new_text": "new-two"},
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    try:
+        task_id, fallback = await _seed_turn(
+            database,
+            suffix="f",
+            message=(
+                f"apply {changes_json} then test project backend "
+                "file tests/test_one.py"
+            ),
+        )
+        await planner.prepare(
+            task_id,
+            fallback.user_message_id,
+            fallback,
+            frozenset({"workspace_patch_bundle", "workspace_python_test"}),
+        )
+        interpreted = await planner.interpret(task_id)
+        assert interpreted.adjudication is not None
+        assert interpreted.adjudication.outcome == "multi_step_deferred"
+        await task_loops.plan(task_id)
+        await activation.activate(task_id)
+        coordinator = TaskLoopExecutionCoordinator(
+            database,
+            activation,
+            capabilities=runtime,
+        )
+
+        waiting = await coordinator.advance(task_id, "patch-worker")
+
+        assert waiting.command.kind == "execute_capability"
+        assert waiting.read.execution is not None
+        assert waiting.read.execution.status == "awaiting_user"
+        assert waiting.read.workspace_patch is not None
+        assert waiting.read.workspace_patch.schema_version == (
+            "deskpilot.workspace-patch-preview.v1"
+        )
+        assert first_path.read_text(encoding="utf-8") == "before old-one after"
+        assert second_path.read_text(encoding="utf-8") == "before old-two after"
+
+        with pytest.raises(TaskLoopExecutionCoordinatorProofRejectedError):
+            await coordinator.approve_workspace_patch(
+                task_id,
+                waiting.read.workspace_patch.confirmation_digest,
+                expected_execution_revision=waiting.read.execution.revision - 1,
+            )
+        approved_preview = await coordinator.approve_workspace_patch(
+            task_id,
+            waiting.read.workspace_patch.confirmation_digest,
+            expected_execution_revision=waiting.read.execution.revision,
+        )
+        assert approved_preview == waiting.read.workspace_patch
+        assert first_path.read_text(encoding="utf-8") == "before old-one after"
+
+        restarted = TaskLoopExecutionCoordinator(
+            database,
+            activation,
+            capabilities=runtime,
+        )
+        interrupted = asyncio.create_task(
+            restarted.advance(task_id, "interrupted-patch-worker")
+        )
+        await engine.patch_effect_completed.wait()
+        assert first_path.read_text(encoding="utf-8") == "before new-one after"
+        async with database.session() as session, session.begin():
+            running_attempt = await session.scalar(
+                select(TaskLoopNodeAttemptRecord).where(
+                    TaskLoopNodeAttemptRecord.status == "running"
+                )
+            )
+            assert running_attempt is not None
+            attempt_model = runtime._attempt_from_record(  # noqa: SLF001
+                running_attempt
+            )
+            expired = runtime._replace_attempt(  # noqa: SLF001
+                attempt_model,
+                revision=attempt_model.revision + 1,
+                claim_expires_at=NOW,
+                updated_at=NOW,
+            )
+            runtime._apply_attempt(running_attempt, expired)  # noqa: SLF001
+            running_node = await session.get(
+                TaskExecutionNodeRecord,
+                running_attempt.node_id,
+            )
+            assert running_node is not None
+            running_node.claim_expires_at = NOW
+            running_node.updated_at = NOW
+        engine.release_candidate.set()
+        with pytest.raises(CapabilityExecutionRuntimeStaleFenceError):
+            await interrupted
+
+        committed = await restarted.advance(task_id, "restarted-patch-worker")
+        assert committed.command.kind == "execute_capability"
+        assert committed.read.workspace_patch is not None
+        assert committed.read.workspace_patch.schema_version == (
+            "deskpilot.workspace-patch-receipt.v1"
+        )
+        assert first_path.read_text(encoding="utf-8") == "before new-one after"
+        assert second_path.read_text(encoding="utf-8") == "before new-two after"
+        fixed_test = await restarted.advance(task_id, "fixed-test-worker")
+        assert fixed_test.command.kind == "execute_capability"
+        assert python_tests.calls == 1
+
+        async with database.session() as session:
+            approval = await session.scalar(select(TaskLoopCapabilityApprovalRecord))
+            result = await session.scalar(
+                select(TaskLoopVerifiedResultRecord).where(
+                    TaskLoopVerifiedResultRecord.result_kind == "patch_receipt"
+                )
+            )
+            test_result = await session.scalar(
+                select(TaskLoopVerifiedResultRecord).where(
+                    TaskLoopVerifiedResultRecord.result_kind == "python_test"
+                )
+            )
+        assert approval is not None and approval.status == "consumed"
+        assert result is not None
+        assert test_result is not None
+        assert result.output_manifest["receipt"]["confirmation_digest"] == (
+            approved_preview.confirmation_digest
+        )
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_persists_three_no_progress_observations_across_restart(
+    tmp_path: Path,
+) -> None:
+    fixture = await _runtime_fixture(tmp_path, suffix="e")
+    try:
+        async with fixture.database.session() as session, session.begin():
+            nodes = tuple(
+                (
+                    await session.scalars(
+                        select(TaskExecutionNodeRecord).with_for_update()
+                    )
+                ).all()
+            )
+            now = utc_now()
+            for node in nodes:
+                node.status = "pending"
+                node.revision += 1
+                node.updated_at = now
+
+        for expected_count in (1, 2, 3):
+            coordinator = TaskLoopExecutionCoordinator(
+                fixture.database,
+                fixture.activation,
+                capabilities=fixture.runtime,
+            )
+            observed = await coordinator.advance(
+                fixture.task_id,
+                f"no-progress-worker-{expected_count}",
+            )
+            assert observed.command.kind == "record_no_progress"
+            async with fixture.database.session() as session:
+                count = int(
+                    await session.scalar(
+                        select(func.count()).select_from(TaskLoopCycleEventRecord)
+                    )
+                    or 0
+                )
+            assert count == expected_count
+
+        restarted = TaskLoopExecutionCoordinator(
+            fixture.database,
+            fixture.activation,
+            capabilities=fixture.runtime,
+        )
+        terminal = await restarted.advance(
+            fixture.task_id,
+            "no-progress-terminal-worker",
+        )
+        assert terminal.command.kind == "terminate_no_progress"
+        assert terminal.read.execution is not None
+        assert terminal.read.execution.status == "failed"
+
+        async with fixture.database.session() as session:
+            events = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopCycleEventRecord).order_by(
+                            TaskLoopCycleEventRecord.sequence
+                        )
+                    )
+                ).all()
+            )
+        assert [item.kind for item in events] == [
+            "no_progress_observed",
+            "no_progress_observed",
+            "no_progress_observed",
+            "no_progress_terminated",
+        ]
+        assert [item.evidence_manifest["observation_count"] for item in events] == [
+            1,
+            2,
+            3,
+            0,
+        ]
     finally:
         await fixture.database.dispose()
 

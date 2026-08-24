@@ -1088,6 +1088,7 @@ onBeforeUnmount(() => {
           <div><dt>节点进度</dt><dd>{{ workbench.task_loop.verified_count }} / {{ workbench.task_loop.node_count }} 已验证</dd></div>
           <div><dt>运行中</dt><dd>{{ workbench.task_loop.active_count }} 个 · 候选 {{ workbench.task_loop.candidate_count }} 个</dd></div>
           <div><dt>等待验证</dt><dd>{{ workbench.task_loop.awaiting_verification_count }} 个 · ResultRef {{ workbench.task_loop.verified_result_count }} 个</dd></div>
+          <div><dt>循环守恒</dt><dd>无进展 {{ workbench.task_loop.no_progress_count }} / {{ workbench.task_loop.no_progress_limit }} · Repair {{ workbench.task_loop.repair_count }} / {{ workbench.task_loop.maximum_plan_generations - 1 }}<template v-if="workbench.task_loop.budget_exhausted"> · 预算耗尽</template></dd></div>
           <div><dt>执行事件链</dt><dd>{{ workbench.task_loop.execution_event_count }} 个</dd></div>
           <div><dt>恢复状态</dt><dd>{{ workbench.task_loop.recoverable ? '可从持久证明恢复' : '终态或尚未激活' }}</dd></div>
           <div><dt>公开投影</dt><dd>{{ shortDigest(workbench.task_loop.projection_digest) }}</dd></div>

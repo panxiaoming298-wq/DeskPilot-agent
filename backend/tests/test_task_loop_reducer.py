@@ -46,6 +46,8 @@ def _snapshot(
     execution_status: str = "active",
     active_claim_count: int = 0,
     no_progress_count: int = 0,
+    repair_count: int = 0,
+    repair_available: bool = False,
     budget_exhausted: bool = False,
     deadline_exceeded: bool = False,
     pending_user_revision: int | None = None,
@@ -58,6 +60,8 @@ def _snapshot(
         nodes=nodes,
         active_claim_count=active_claim_count,
         no_progress_count=no_progress_count,
+        repair_count=repair_count,
+        repair_available=repair_available,
         budget_exhausted=budget_exhausted,
         deadline_exceeded=deadline_exceeded,
         pending_user_revision=pending_user_revision,
@@ -209,6 +213,26 @@ def test_no_progress_requires_three_stable_observations() -> None:
 
     assert before.kind == "record_no_progress"
     assert terminal.kind == "terminate_no_progress"
+
+
+def test_failed_node_uses_only_a_proven_bounded_repair() -> None:
+    failed = _node(
+        "3",
+        local_key="s01_retryable",
+        channel="capability",
+        status="failed",
+    )
+
+    repair = TaskLoopReducer().decide(
+        _snapshot(failed, repair_count=1, repair_available=True)
+    )
+    terminal = TaskLoopReducer().decide(
+        _snapshot(failed, repair_count=2, repair_available=False)
+    )
+
+    assert repair.kind == "start_repair"
+    assert repair.node_id == failed.node_id
+    assert terminal.kind == "terminate_failure"
 
 
 def test_all_verified_nodes_terminate_successfully() -> None:

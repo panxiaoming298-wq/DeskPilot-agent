@@ -41,7 +41,7 @@ jobs:
       - name: Verify migration lineage and SQLite integrity
         run: |
           New-Item -ItemType Directory -Force data | Out-Null
-          $head = uv run python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; script=ScriptDirectory.from_config(Config('alembic.ini')); heads=script.get_heads(); assert len(heads)==1, heads; lineage={item.revision for item in script.iterate_revisions(heads[0], 'base', inclusive=True)}; assert '0053_task_loop_execution' in lineage, lineage; print(heads[0])"
+          $head = uv run python -c "from alembic.config import Config; from alembic.script import ScriptDirectory; script=ScriptDirectory.from_config(Config('alembic.ini')); heads=script.get_heads(); assert heads==['0054_task_loop_cycle_events'], heads; lineage={item.revision for item in script.iterate_revisions(heads[0], 'base', inclusive=True)}; assert {'0052_model_planner_task_loop','0053_task_loop_execution','0054_task_loop_cycle_events'}.issubset(lineage), lineage; print(heads[0])"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $head = ($head | Select-Object -Last 1).Trim()
           uv run alembic upgrade head
@@ -64,6 +64,7 @@ jobs:
             tests/test_agent_verified_result_bridge.py `
             tests/test_task_loop_agent_runtime.py `
             tests/test_task_loop_reducer.py `
+            tests/test_migrations.py `
             tests/test_phase111_turn_planner_workbench.py
       - name: Compare immutable evaluation baselines
         run: |
@@ -84,7 +85,7 @@ jobs:
         run: |
           uv run pytest --junitxml=pytest-default.xml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          uv run python -c "from xml.etree import ElementTree as E; root=E.parse('pytest-default.xml').getroot(); cases=[x for x in root.iter() if x.tag.rsplit('}',1)[-1]=='testcase']; skipped=[x for x in cases if any(c.tag.rsplit('}',1)[-1]=='skipped' for c in x)]; assert len(cases)==741,len(cases); assert len(skipped)==12,len(skipped); print('verified 729 passed and 12 external skips')"
+          uv run python -c "from xml.etree import ElementTree as E; root=E.parse('pytest-default.xml').getroot(); cases=[x for x in root.iter() if x.tag.rsplit('}',1)[-1]=='testcase']; skipped=[x for x in cases if any(c.tag.rsplit('}',1)[-1]=='skipped' for c in x)]; assert len(cases)==745,len(cases); assert len(skipped)==12,len(skipped); print('verified 733 passed and 12 external skips')"
       - name: Verify whitespace
         working-directory: .
         run: git diff --check

@@ -16,6 +16,7 @@ from deskpilot.application.builtin_capability_executors import (
     CapabilityAdapterVerification,
 )
 from deskpilot.application.capability_executor_registry import (
+    ApprovalGatedCapabilityExecutor,
     CapabilityExecutionBindingError,
     CapabilityExecutorRegistration,
     CapabilityExecutorRegistry,
@@ -24,6 +25,7 @@ from deskpilot.application.capability_input_binding_catalog import BoundCapabili
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import DIGEST_PATTERN
 from deskpilot.domain.capability_execution import (
+    CapabilityApprovalRequirement,
     CapabilityExecutionContext,
     CapabilityResultKind,
 )
@@ -161,6 +163,60 @@ class CapabilityExecutionEngine:
             bound_input.arguments.model_dump(mode="json")
         )
         raw_output = await registration.executor.execute(context, arguments)
+        output = registration.output_model.model_validate(raw_output.model_dump(mode="json"))
+        return CapabilityExecutionCandidate.build(
+            context=context,
+            bound_input=bound_input,
+            registration=registration,
+            output=output,
+        )
+
+    async def prepare_approval(
+        self,
+        context: CapabilityExecutionContext,
+        bound_input: BoundCapabilityInput,
+    ) -> BaseModel:
+        registration = self._registration(context, bound_input)
+        executor = registration.executor
+        approval_model = registration.approval_model
+        if (
+            registration.manifest.approval_requirement
+            is not CapabilityApprovalRequirement.EXACT_CONFIRMATION_DIGEST
+            or approval_model is None
+            or not isinstance(executor, ApprovalGatedCapabilityExecutor)
+        ):
+            raise CapabilityExecutionBindingError(
+                "Capability is not registered for an approval preview"
+            )
+        arguments = registration.input_model.model_validate(
+            bound_input.arguments.model_dump(mode="json")
+        )
+        raw_preview = await executor.prepare_approval(context, arguments)
+        return approval_model.model_validate(raw_preview.model_dump(mode="json"))
+
+    async def execute_approved_candidate(
+        self,
+        context: CapabilityExecutionContext,
+        bound_input: BoundCapabilityInput,
+        preview_manifest: dict[str, Any],
+    ) -> CapabilityExecutionCandidate:
+        registration = self._registration(context, bound_input)
+        executor = registration.executor
+        approval_model = registration.approval_model
+        if (
+            registration.manifest.approval_requirement
+            is not CapabilityApprovalRequirement.EXACT_CONFIRMATION_DIGEST
+            or approval_model is None
+            or not isinstance(executor, ApprovalGatedCapabilityExecutor)
+        ):
+            raise CapabilityExecutionBindingError(
+                "Capability has no exact approved execution path"
+            )
+        arguments = registration.input_model.model_validate(
+            bound_input.arguments.model_dump(mode="json")
+        )
+        preview = approval_model.model_validate(preview_manifest)
+        raw_output = await executor.execute_approved(context, arguments, preview)
         output = registration.output_model.model_validate(raw_output.model_dump(mode="json"))
         return CapabilityExecutionCandidate.build(
             context=context,

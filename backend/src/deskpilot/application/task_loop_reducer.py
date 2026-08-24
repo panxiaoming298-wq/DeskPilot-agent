@@ -51,6 +51,7 @@ TaskLoopReducerCommandKind = Literal[
     "reduce_control_node",
     "wait_user",
     "record_no_progress",
+    "start_repair",
     "terminate_success",
     "terminate_failure",
     "terminate_budget_exhausted",
@@ -133,6 +134,8 @@ class TaskLoopReducerSnapshot(BaseModel):
     nodes: tuple[TaskLoopReducerNode, ...] = Field(default=(), max_length=20)
     active_claim_count: int = Field(default=0, ge=0, le=20)
     no_progress_count: int = Field(default=0, ge=0, le=3)
+    repair_count: int = Field(default=0, ge=0, le=2)
+    repair_available: bool = False
     budget_exhausted: bool = False
     deadline_exceeded: bool = False
     pending_user_revision: int | None = Field(default=None, ge=1)
@@ -144,7 +147,11 @@ class TaskLoopReducerSnapshot(BaseModel):
         if activated != (self.execution_id is not None):
             raise ValueError("Reducer activation state and execution id differ")
         if self.execution_status == "planned" and (
-            self.execution_revision != 0 or self.nodes or self.active_claim_count != 0
+            self.execution_revision != 0
+            or self.nodes
+            or self.active_claim_count != 0
+            or self.repair_count != 0
+            or self.repair_available
         ):
             raise ValueError("Planned reducer snapshot cannot contain execution state")
         node_ids = tuple(item.node_id for item in self.nodes)
@@ -164,12 +171,23 @@ class TaskLoopReducerSnapshot(BaseModel):
                 raise ValueError("Awaiting-user execution has no pending user proof")
         elif self.pending_user_revision is not None:
             raise ValueError("Pending user revision appears outside awaiting-user state")
+        failed = tuple(item for item in self.nodes if item.status == "failed")
+        if self.repair_available and (
+            len(failed) != 1
+            or failed[0].attempt_count >= failed[0].max_attempts
+            or self.repair_count >= 2
+            or self.budget_exhausted
+            or self.deadline_exceeded
+        ):
+            raise ValueError("Task-loop repair availability has no bounded failure proof")
         expected_progress = self.build_progress_digest(
             task_id=self.task_id,
             execution_id=self.execution_id,
             execution_status=self.execution_status,
             execution_revision=self.execution_revision,
             nodes=self.nodes,
+            repair_count=self.repair_count,
+            repair_available=self.repair_available,
             budget_exhausted=self.budget_exhausted,
             deadline_exceeded=self.deadline_exceeded,
             pending_user_revision=self.pending_user_revision,
@@ -200,6 +218,8 @@ class TaskLoopReducerSnapshot(BaseModel):
         execution_status: TaskLoopReducerExecutionStatus,
         execution_revision: int,
         nodes: tuple[TaskLoopReducerNode, ...],
+        repair_count: int,
+        repair_available: bool,
         budget_exhausted: bool,
         deadline_exceeded: bool,
         pending_user_revision: int | None,
@@ -213,6 +233,8 @@ class TaskLoopReducerSnapshot(BaseModel):
                 item.model_dump(mode="json")
                 for item in sorted(nodes, key=lambda value: value.node_id)
             ],
+            "repair_count": repair_count,
+            "repair_available": repair_available,
             "budget_exhausted": budget_exhausted,
             "deadline_exceeded": deadline_exceeded,
             "pending_user_revision": pending_user_revision,
@@ -227,6 +249,8 @@ class TaskLoopReducerSnapshot(BaseModel):
             execution_status=values["execution_status"],
             execution_revision=values["execution_revision"],
             nodes=values.get("nodes", ()),
+            repair_count=values.get("repair_count", 0),
+            repair_available=values.get("repair_available", False),
             budget_exhausted=values.get("budget_exhausted", False),
             deadline_exceeded=values.get("deadline_exceeded", False),
             pending_user_revision=values.get("pending_user_revision"),
@@ -257,6 +281,7 @@ class TaskLoopReducerCommand(BaseModel):
             "verify_candidate",
             "reduce_control_node",
             "wait_user",
+            "start_repair",
         }
         if targeted != (self.node_id is not None):
             raise ValueError("Reducer command target shape is invalid")
@@ -308,6 +333,13 @@ class TaskLoopReducer:
 
         failed = self._first(snapshot, status="failed")
         if failed is not None:
+            if snapshot.repair_available:
+                return self._command(
+                    snapshot,
+                    "start_repair",
+                    "TASK_LOOP_BOUNDED_REPAIR_AVAILABLE",
+                    node_id=failed.node_id,
+                )
             return self._command(
                 snapshot,
                 "terminate_failure",

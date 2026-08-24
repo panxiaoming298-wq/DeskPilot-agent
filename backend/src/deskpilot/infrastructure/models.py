@@ -1364,6 +1364,158 @@ class TaskLoopVerifiedResultRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class TaskLoopCapabilityApprovalRecord(Base):
+    """Exact Task/revision-bound authority for one capability side effect."""
+
+    __tablename__ = "task_loop_capability_approvals"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt >= 1 AND plan_generation BETWEEN 1 AND 3 AND "
+            "requested_execution_revision >= 2 AND revision BETWEEN 1 AND 3",
+            name="ck_task_loop_capability_approval_versions",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'consumed')",
+            name="ck_task_loop_capability_approval_status",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND revision = 1 AND approved_at IS NULL AND "
+            "consumed_at IS NULL AND result_digest IS NULL) OR "
+            "(status = 'approved' AND revision = 2 AND approved_at IS NOT NULL AND "
+            "consumed_at IS NULL AND result_digest IS NULL) OR "
+            "(status = 'consumed' AND revision = 3 AND approved_at IS NOT NULL AND "
+            "consumed_at IS NOT NULL AND result_digest IS NOT NULL)",
+            name="ck_task_loop_capability_approval_lifecycle",
+        ),
+        UniqueConstraint(
+            "execution_id", "node_id", name="uq_task_loop_capability_approval_node"
+        ),
+        UniqueConstraint(
+            "attempt_id", name="uq_task_loop_capability_approval_attempt"
+        ),
+        UniqueConstraint(
+            "approval_digest", name="uq_task_loop_capability_approval_digest"
+        ),
+        Index(
+            "ix_task_loop_capability_approvals_pending",
+            "task_id",
+            "status",
+            "updated_at",
+        ),
+    )
+
+    approval_id: Mapped[str] = mapped_column(String(69), primary_key=True)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE")
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="RESTRICT")
+    )
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="RESTRICT")
+    )
+    node_binding_id: Mapped[str] = mapped_column(
+        ForeignKey("model_planner_node_bindings.node_binding_id", ondelete="RESTRICT")
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loop_node_attempts.attempt_id", ondelete="RESTRICT")
+    )
+    attempt: Mapped[int] = mapped_column(Integer)
+    plan_generation: Mapped[int] = mapped_column(Integer)
+    input_binding_digest: Mapped[str] = mapped_column(String(64))
+    executor_manifest_digest: Mapped[str] = mapped_column(String(64))
+    preview_schema_digest: Mapped[str] = mapped_column(String(64))
+    preview_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    confirmation_digest: Mapped[str] = mapped_column(String(64))
+    requested_execution_revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16))
+    revision: Mapped[int] = mapped_column(Integer)
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    result_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    approval_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TaskLoopCycleEventRecord(Base):
+    """Immutable stage-112C no-progress, budget, and repair evidence."""
+
+    __tablename__ = "task_loop_cycle_events"
+    __table_args__ = (
+        CheckConstraint(
+            "sequence >= 1 AND plan_generation BETWEEN 1 AND 3",
+            name="ck_task_loop_cycle_event_versions",
+        ),
+        CheckConstraint(
+            "kind IN ('no_progress_observed', 'no_progress_terminated', "
+            "'budget_exhausted', 'repair_started', 'repair_completed')",
+            name="ck_task_loop_cycle_event_kind",
+        ),
+        CheckConstraint(
+            "(sequence = 1 AND previous_event_digest IS NULL) OR "
+            "(sequence > 1 AND previous_event_digest IS NOT NULL)",
+            name="ck_task_loop_cycle_event_chain_root",
+        ),
+        UniqueConstraint(
+            "execution_id", "sequence", name="uq_task_loop_cycle_event_sequence"
+        ),
+        UniqueConstraint("event_digest", name="uq_task_loop_cycle_event_digest"),
+        UniqueConstraint(
+            "execution_id",
+            "event_digest",
+            name="uq_task_loop_cycle_event_chain_target",
+        ),
+        ForeignKeyConstraint(
+            ["execution_id", "previous_event_digest"],
+            [
+                "task_loop_cycle_events.execution_id",
+                "task_loop_cycle_events.event_digest",
+            ],
+            name="fk_task_loop_cycle_event_previous",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_task_loop_cycle_events_progress",
+            "execution_id",
+            "source_progress_digest",
+            "kind",
+            "sequence",
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE")
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    previous_event_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(32))
+    plan_generation: Mapped[int] = mapped_column(Integer)
+    source_progress_digest: Mapped[str] = mapped_column(String(64))
+    reason_code: Mapped[str] = mapped_column(String(100))
+    evidence_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    evidence_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    event_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+
+
 class TurnRouteRecord(Base):
     __tablename__ = "turn_routes"
     __table_args__ = (

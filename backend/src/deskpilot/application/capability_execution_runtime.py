@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,10 +35,12 @@ from deskpilot.application.capability_input_binding_catalog import (
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_runtime import ExecutionNodeStatus, ExecutionRunStatus
 from deskpilot.domain.capability_execution import (
+    CapabilityApprovalRequirement,
     CapabilityExecutionContext,
     CapabilityRecoveryPolicy,
     VerifiedCapabilityResultRef,
 )
+from deskpilot.domain.task_loop_approvals import TaskLoopCapabilityApproval
 from deskpilot.domain.task_loop_execution import (
     ModelPlannerNodeBinding,
     TaskLoopExecution,
@@ -51,12 +53,15 @@ from deskpilot.domain.task_plans import (
     ExecutablePlan,
     ExecutablePlanNode,
 )
+from deskpilot.domain.workspace_files import WorkspacePatchPreview
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
     ModelPlannerNodeBindingRecord,
     TaskExecutionEdgeRecord,
     TaskExecutionNodeRecord,
     TaskExecutionRunRecord,
+    TaskLoopCapabilityApprovalRecord,
+    TaskLoopExecutionEventRecord,
     TaskLoopExecutionRecord,
     TaskLoopNodeAttemptRecord,
     TaskLoopVerifiedResultRecord,
@@ -64,7 +69,12 @@ from deskpilot.infrastructure.models import (
     utc_now,
 )
 
-CapabilityRuntimeOutcomeStatus = Literal["verified", "failed", "outcome_unknown"]
+CapabilityRuntimeOutcomeStatus = Literal[
+    "awaiting_user",
+    "verified",
+    "failed",
+    "outcome_unknown",
+]
 _ACTIVE_RUN_STATUSES = frozenset(
     {
         ExecutionRunStatus.ACTIVE.value,
@@ -108,6 +118,19 @@ class CapabilityExecutionEnginePort(Protocol):
         bound_input: BoundCapabilityInput,
     ) -> CapabilityExecutionCandidate: ...
 
+    async def prepare_approval(
+        self,
+        context: CapabilityExecutionContext,
+        bound_input: BoundCapabilityInput,
+    ) -> BaseModel: ...
+
+    async def execute_approved_candidate(
+        self,
+        context: CapabilityExecutionContext,
+        bound_input: BoundCapabilityInput,
+        preview_manifest: dict[str, Any],
+    ) -> CapabilityExecutionCandidate: ...
+
     async def verify_candidate(
         self,
         context: CapabilityExecutionContext,
@@ -142,6 +165,7 @@ class _CapabilityWork:
     context: CapabilityExecutionContext
     registration: CapabilityExecutorRegistration
     candidate: CapabilityExecutionCandidate | None = None
+    approval: TaskLoopCapabilityApproval | None = None
 
 
 class CapabilityExecutionRuntime:
@@ -185,10 +209,29 @@ class CapabilityExecutionRuntime:
                 return None
             if work.candidate is None:
                 try:
-                    candidate = await self._engine.execute_candidate(
-                        work.context,
-                        work.bound_input,
-                    )
+                    if (
+                        work.registration.manifest.approval_requirement
+                        is CapabilityApprovalRequirement.EXACT_CONFIRMATION_DIGEST
+                    ):
+                        if work.approval is None:
+                            raw_preview = await self._engine.prepare_approval(
+                                work.context,
+                                work.bound_input,
+                            )
+                            preview = WorkspacePatchPreview.model_validate(
+                                raw_preview.model_dump(mode="json")
+                            )
+                            return await self._persist_approval(work, preview)
+                        candidate = await self._engine.execute_approved_candidate(
+                            work.context,
+                            work.bound_input,
+                            work.approval.preview_manifest,
+                        )
+                    else:
+                        candidate = await self._engine.execute_candidate(
+                            work.context,
+                            work.bound_input,
+                        )
                 except Exception as error:
                     return await self._settle_execution_error(work, error)
                 await self._persist_candidate(work, candidate)
@@ -213,6 +256,38 @@ class CapabilityExecutionRuntime:
                 "Capability persistence proof failed Schema or digest validation"
             ) from error
 
+    async def recover_expired(self, task_id: str) -> None:
+        """Reconcile expired capability claims before the pure reducer snapshots them."""
+
+        now = self._now()
+        async with self._database.session() as session, session.begin():
+            execution_records = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopExecutionRecord)
+                        .where(TaskLoopExecutionRecord.task_id == task_id)
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            if not execution_records:
+                return
+            if len(execution_records) != 1:
+                raise CapabilityExecutionRuntimeProofRejectedError(
+                    "Task has multiple model-planner executions"
+                )
+            execution_record = execution_records[0]
+            execution = self._execution_from_record(execution_record)
+            if execution.status != "active":
+                return
+            plan = await self._load_plan(session, execution)
+            await self._recover_expired_running(
+                session,
+                execution,
+                plan,
+                now=now,
+            )
+
     async def _claim_work(
         self,
         task_id: str,
@@ -236,6 +311,33 @@ class CapabilityExecutionRuntime:
                 plan,
                 now=now,
             )
+
+            approved_attempt = await session.scalar(
+                select(TaskLoopNodeAttemptRecord)
+                .join(
+                    TaskLoopCapabilityApprovalRecord,
+                    TaskLoopCapabilityApprovalRecord.attempt_id
+                    == TaskLoopNodeAttemptRecord.attempt_id,
+                )
+                .where(
+                    TaskLoopNodeAttemptRecord.execution_id == execution.execution_id,
+                    TaskLoopNodeAttemptRecord.status == "prepared",
+                    TaskLoopCapabilityApprovalRecord.status == "approved",
+                )
+                .order_by(TaskLoopNodeAttemptRecord.created_at)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+            if approved_attempt is not None:
+                return await self._claim_approved_attempt(
+                    session,
+                    execution,
+                    plan,
+                    approved_attempt,
+                    owner_id=owner_id,
+                    now=now,
+                    lease_seconds=lease_seconds,
+                )
 
             resumable = await session.scalar(
                 select(TaskLoopNodeAttemptRecord)
@@ -512,6 +614,335 @@ class CapabilityExecutionRuntime:
             candidate=candidate,
         )
 
+    async def _claim_approved_attempt(
+        self,
+        session: AsyncSession,
+        execution: TaskLoopExecution,
+        plan: ExecutablePlan,
+        attempt_record: TaskLoopNodeAttemptRecord,
+        *,
+        owner_id: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> _CapabilityWork:
+        attempt = self._attempt_from_record(attempt_record)
+        node = await session.scalar(
+            select(TaskExecutionNodeRecord)
+            .where(TaskExecutionNodeRecord.node_id == attempt.node_id)
+            .with_for_update()
+        )
+        approval_record = await session.scalar(
+            select(TaskLoopCapabilityApprovalRecord)
+            .where(
+                TaskLoopCapabilityApprovalRecord.attempt_id == attempt.attempt_id
+            )
+            .with_for_update()
+        )
+        if node is None or approval_record is None:
+            raise CapabilityExecutionRuntimeNotFoundError(
+                "Approved capability attempt lost its node or authority"
+            )
+        approval = self._approval_from_record(approval_record)
+        plan_node = self._plan_node(plan, node.node_id)
+        binding = await self._load_binding(session, execution, node, plan_node)
+        dependencies = await self._load_dependencies(
+            session,
+            execution,
+            plan,
+            node,
+            require_complete=True,
+        )
+        current_input = self._input_bindings.bind_node(
+            node_binding=binding,
+            dependencies=dependencies,
+        )
+        persisted_input = BoundCapabilityInput.model_validate(attempt.input_manifest)
+        registration = self._executors.resolve(current_input.capability)
+        if (
+            attempt.status != "prepared"
+            or attempt.execution_id != execution.execution_id
+            or attempt.node_binding_id != binding.node_binding_id
+            or attempt.run_id != execution.run_id
+            or attempt.attempt != node.attempt_count
+            or node.status != ExecutionNodeStatus.READY.value
+            or attempt.input_digest != persisted_input.binding_digest
+            or persisted_input != current_input
+            or attempt.candidate_manifest is not None
+            or approval.status != "approved"
+            or approval.execution_id != execution.execution_id
+            or approval.task_id != execution.task_id
+            or approval.run_id != execution.run_id
+            or approval.node_id != node.node_id
+            or approval.node_binding_id != binding.node_binding_id
+            or approval.attempt_id != attempt.attempt_id
+            or approval.attempt != attempt.attempt
+            or approval.plan_generation != execution.plan_generation
+            or approval.input_binding_digest != current_input.binding_digest
+            or approval.executor_manifest_digest
+            != registration.manifest.manifest_digest
+            or registration.manifest.approval_requirement
+            is not CapabilityApprovalRequirement.EXACT_CONFIRMATION_DIGEST
+        ):
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Approved capability attempt changed its exact execution binding"
+            )
+        fencing_token = max(node.claim_fencing_token, attempt.claim_fencing_token) + 1
+        expires_at = now + timedelta(seconds=lease_seconds)
+        context = CapabilityExecutionContext.build(
+            task_id=execution.task_id,
+            run_id=execution.run_id,
+            plan_id=execution.plan_id,
+            plan_generation=execution.plan_generation,
+            plan_manifest_digest=execution.plan_manifest_digest,
+            node_id=node.node_id,
+            node_kind=DraftNodeKind.CAPABILITY,
+            node_spec_digest=node.node_spec_digest,
+            node_binding_id=binding.node_binding_id,
+            node_binding_digest=binding.binding_digest,
+            effective_authority_digest=binding.effective_authority.authority_digest,
+            runtime_eligibility_digest=binding.runtime_eligibility.eligibility_digest,
+            node_attempt=attempt.attempt,
+            claim_owner_id=owner_id,
+            claim_fencing_token=fencing_token,
+            capability=current_input.capability,
+            step_input_digest=current_input.binding_digest,
+            upstream_result_refs=current_input.dependency_result_refs,
+            consumed_result_refs=current_input.consumed_result_refs,
+            budget=plan_node.budget,
+        )
+        updated = self._replace_attempt(
+            attempt,
+            status="running",
+            revision=attempt.revision + 1,
+            claim_owner_id=owner_id,
+            claim_fencing_token=fencing_token,
+            claim_acquired_at=now,
+            claim_expires_at=expires_at,
+            context_manifest=context.model_dump(mode="json"),
+            context_digest=context.context_digest,
+            updated_at=now,
+        )
+        self._apply_attempt(attempt_record, updated)
+        node.status = ExecutionNodeStatus.RUNNING.value
+        node.claim_owner_id = owner_id
+        node.claim_fencing_token = fencing_token
+        node.claim_acquired_at = now
+        node.claim_heartbeat_at = now
+        node.claim_expires_at = expires_at
+        node.revision += 1
+        node.updated_at = now
+        await session.flush()
+        return _CapabilityWork(
+            execution=execution,
+            plan=plan,
+            plan_node=plan_node,
+            binding=binding,
+            attempt_id=attempt.attempt_id,
+            attempt=attempt.attempt,
+            persistence_owner_id=owner_id,
+            persistence_fencing_token=fencing_token,
+            bound_input=current_input,
+            context=context,
+            registration=registration,
+            approval=approval,
+        )
+
+    async def _persist_approval(
+        self,
+        work: _CapabilityWork,
+        preview: WorkspacePatchPreview,
+    ) -> CapabilityRuntimeOutcome:
+        now = self._now()
+        approval_model = work.registration.approval_model
+        if (
+            work.registration.manifest.approval_requirement
+            is not CapabilityApprovalRequirement.EXACT_CONFIRMATION_DIGEST
+            or approval_model is not WorkspacePatchPreview
+            or preview.task_id != work.execution.task_id
+        ):
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Capability approval preview changed its registered Schema or Task"
+            )
+        approval = TaskLoopCapabilityApproval.request(
+            execution_id=work.execution.execution_id,
+            task_id=work.execution.task_id,
+            run_id=work.execution.run_id,
+            node_id=work.plan_node.node_id,
+            node_binding_id=work.binding.node_binding_id,
+            attempt_id=work.attempt_id,
+            attempt=work.attempt,
+            plan_generation=work.execution.plan_generation,
+            input_binding_digest=work.bound_input.binding_digest,
+            executor_manifest_digest=work.registration.manifest.manifest_digest,
+            preview=preview,
+            requested_execution_revision=work.execution.revision + 1,
+            created_at=now,
+        )
+        async with self._database.session() as session, session.begin():
+            attempt_record, attempt, node = await self._locked_attempt_scope(
+                session,
+                work,
+                expected_attempt_status="running",
+                expected_node_status=ExecutionNodeStatus.RUNNING.value,
+                now=now,
+            )
+            execution_record = await session.scalar(
+                select(TaskLoopExecutionRecord)
+                .where(
+                    TaskLoopExecutionRecord.execution_id
+                    == work.execution.execution_id
+                )
+                .with_for_update()
+            )
+            if execution_record is None:
+                raise CapabilityExecutionRuntimeNotFoundError(
+                    "Capability approval execution disappeared"
+                )
+            current = self._execution_from_record(execution_record)
+            if current != work.execution or current.status != "active":
+                raise CapabilityExecutionRuntimeStaleFenceError(
+                    "Capability approval execution revision is stale"
+                )
+            existing = await session.scalar(
+                select(TaskLoopCapabilityApprovalRecord).where(
+                    TaskLoopCapabilityApprovalRecord.execution_id
+                    == work.execution.execution_id,
+                    TaskLoopCapabilityApprovalRecord.node_id == work.plan_node.node_id,
+                )
+            )
+            if existing is not None:
+                raise CapabilityExecutionRuntimeConflictError(
+                    "Capability node already has an approval request"
+                )
+            transitioned = self._transition_execution(
+                session,
+                execution_record,
+                current,
+                status="awaiting_user",
+                kind="awaiting_user",
+                now=now,
+            )
+            if transitioned.revision != approval.requested_execution_revision:
+                raise CapabilityExecutionRuntimeProofRejectedError(
+                    "Capability approval requested revision changed"
+                )
+            updated_attempt = self._replace_attempt(
+                attempt,
+                status="prepared",
+                revision=attempt.revision + 1,
+                claim_owner_id=None,
+                claim_expires_at=None,
+                updated_at=now,
+            )
+            self._apply_attempt(attempt_record, updated_attempt)
+            node.status = ExecutionNodeStatus.WAITING_USER.value
+            node.claim_owner_id = None
+            node.claim_acquired_at = None
+            node.claim_heartbeat_at = None
+            node.claim_expires_at = None
+            node.revision += 1
+            node.updated_at = now
+            session.add(self._approval_record(approval))
+            await session.flush()
+        return CapabilityRuntimeOutcome(
+            execution_id=work.execution.execution_id,
+            run_id=work.execution.run_id,
+            node_id=work.plan_node.node_id,
+            attempt_id=work.attempt_id,
+            attempt=work.attempt,
+            status="awaiting_user",
+        )
+
+    async def approve_workspace_patch(
+        self,
+        task_id: str,
+        confirmation_digest: str,
+        *,
+        expected_execution_revision: int,
+    ) -> WorkspacePatchPreview:
+        """Consume no effect; only resume the exact revision carrying the preview."""
+
+        now = self._now()
+        async with self._database.session() as session, session.begin():
+            execution_record = await self._execution_record_for_task(session, task_id)
+            execution = self._execution_from_record(execution_record)
+            approval_records = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopCapabilityApprovalRecord)
+                        .where(
+                            TaskLoopCapabilityApprovalRecord.execution_id
+                            == execution.execution_id,
+                            TaskLoopCapabilityApprovalRecord.status == "pending",
+                        )
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            if len(approval_records) != 1:
+                raise CapabilityExecutionRuntimeConflictError(
+                    "Task Loop has no unique pending workspace patch approval"
+                )
+            approval_record = approval_records[0]
+            approval = self._approval_from_record(approval_record)
+            node = await session.scalar(
+                select(TaskExecutionNodeRecord)
+                .where(TaskExecutionNodeRecord.node_id == approval.node_id)
+                .with_for_update()
+            )
+            attempt_record = await session.scalar(
+                select(TaskLoopNodeAttemptRecord)
+                .where(TaskLoopNodeAttemptRecord.attempt_id == approval.attempt_id)
+                .with_for_update()
+            )
+            if node is None or attempt_record is None:
+                raise CapabilityExecutionRuntimeNotFoundError(
+                    "Task Loop workspace patch approval scope disappeared"
+                )
+            attempt = self._attempt_from_record(attempt_record)
+            if (
+                execution.status != "awaiting_user"
+                or execution.revision != expected_execution_revision
+                or approval.requested_execution_revision != execution.revision
+                or approval.run_id != execution.run_id
+                or approval.plan_generation != execution.plan_generation
+                or node.run_id != execution.run_id
+                or node.status != ExecutionNodeStatus.WAITING_USER.value
+                or node.node_id != approval.node_id
+                or attempt.status != "prepared"
+                or attempt.execution_id != execution.execution_id
+                or attempt.node_id != node.node_id
+                or attempt.node_binding_id != approval.node_binding_id
+                or attempt.input_digest != approval.input_binding_digest
+            ):
+                raise CapabilityExecutionRuntimeStaleFenceError(
+                    "Task Loop workspace patch approval revision is stale"
+                )
+            try:
+                approved = approval.approve(
+                    confirmation_digest=confirmation_digest,
+                    expected_execution_revision=expected_execution_revision,
+                    approved_at=now,
+                )
+            except ValueError as error:
+                raise CapabilityExecutionRuntimeProofRejectedError(
+                    "Workspace patch confirmation digest or revision changed"
+                ) from error
+            self._apply_approval(approval_record, approved)
+            self._transition_execution(
+                session,
+                execution_record,
+                execution,
+                status="active",
+                kind="resumed",
+                now=now,
+            )
+            node.status = ExecutionNodeStatus.READY.value
+            node.revision += 1
+            node.updated_at = now
+            await session.flush()
+            return WorkspacePatchPreview.model_validate(approved.preview_manifest)
+
     async def _persist_candidate(
         self,
         work: _CapabilityWork,
@@ -531,6 +962,37 @@ class CapabilityExecutionRuntime:
                 raise CapabilityExecutionRuntimeConflictError(
                     "Capability candidate is already persisted"
                 )
+            if work.approval is not None:
+                approval_record = await session.scalar(
+                    select(TaskLoopCapabilityApprovalRecord)
+                    .where(
+                        TaskLoopCapabilityApprovalRecord.approval_id
+                        == work.approval.approval_id
+                    )
+                    .with_for_update()
+                )
+                if approval_record is None:
+                    raise CapabilityExecutionRuntimeProofRejectedError(
+                        "Approved capability lost its authority record"
+                    )
+                current_approval = self._approval_from_record(approval_record)
+                receipt = candidate.output_manifest.get("receipt")
+                if (
+                    current_approval != work.approval
+                    or current_approval.status != "approved"
+                    or not isinstance(receipt, dict)
+                    or receipt.get("task_id") != work.execution.task_id
+                    or receipt.get("confirmation_digest")
+                    != current_approval.confirmation_digest
+                ):
+                    raise CapabilityExecutionRuntimeProofRejectedError(
+                        "Approved capability result changed its exact preview authority"
+                    )
+                consumed = current_approval.consume(
+                    result_digest=candidate.result_digest,
+                    consumed_at=now,
+                )
+                self._apply_approval(approval_record, consumed)
             updated = self._replace_attempt(
                 attempt,
                 status="awaiting_verification",
@@ -829,6 +1291,47 @@ class CapabilityExecutionRuntime:
                 bound_capability=bound_input.capability,
                 bound_node_kind=DraftNodeKind.CAPABILITY,
             )
+            approval_record = await session.scalar(
+                select(TaskLoopCapabilityApprovalRecord)
+                .where(TaskLoopCapabilityApprovalRecord.attempt_id == attempt.attempt_id)
+                .with_for_update()
+            )
+            approval = (
+                self._approval_from_record(approval_record)
+                if approval_record is not None
+                else None
+            )
+            receipt_reconcile = (
+                registration.manifest.recovery_policy
+                is CapabilityRecoveryPolicy.RECEIPT_RECONCILE
+                and approval is not None
+                and approval.status == "approved"
+                and approval.execution_id == execution.execution_id
+                and approval.node_id == node.node_id
+                and approval.attempt_id == attempt.attempt_id
+                and approval.input_binding_digest == bound_input.binding_digest
+            )
+            if receipt_reconcile:
+                updated = self._replace_attempt(
+                    attempt,
+                    status="prepared",
+                    revision=attempt.revision + 1,
+                    claim_owner_id=None,
+                    claim_acquired_at=None,
+                    claim_expires_at=None,
+                    error_code=None,
+                    error_digest=None,
+                    updated_at=now,
+                )
+                self._apply_attempt(record, updated)
+                node.status = ExecutionNodeStatus.READY.value
+                node.claim_owner_id = None
+                node.claim_acquired_at = None
+                node.claim_heartbeat_at = None
+                node.claim_expires_at = None
+                node.revision += 1
+                node.updated_at = now
+                continue
             safe_retry = (
                 registration.manifest.recovery_policy
                 is CapabilityRecoveryPolicy.DETERMINISTIC_RETRY
@@ -1515,6 +2018,139 @@ class CapabilityExecutionRuntime:
             raise CapabilityExecutionRuntimeProofRejectedError(
                 "Capability executor returned a candidate for another exact binding"
             )
+
+    @staticmethod
+    def _transition_execution(
+        session: AsyncSession,
+        record: TaskLoopExecutionRecord,
+        current: TaskLoopExecution,
+        *,
+        status: Literal["active", "awaiting_user"],
+        kind: Literal["awaiting_user", "resumed"],
+        now: datetime,
+    ) -> TaskLoopExecution:
+        effective_now = max(now, current.updated_at)
+        transitioned, event = current.transition(
+            status=status,
+            kind=kind,
+            updated_at=effective_now,
+        )
+        record.status = transitioned.status
+        record.revision = transitioned.revision
+        record.event_count = transitioned.event_count
+        record.latest_event_id = transitioned.latest_event_id
+        record.latest_event_digest = transitioned.latest_event_digest
+        record.manifest = transitioned.model_dump(mode="json")
+        record.execution_digest = transitioned.execution_digest
+        record.updated_at = transitioned.updated_at
+        session.add(
+            TaskLoopExecutionEventRecord(
+                event_id=event.event_id,
+                execution_id=event.execution_id,
+                task_id=event.task_id,
+                sequence=event.sequence,
+                previous_event_digest=event.previous_event_digest,
+                kind=event.kind,
+                plan_manifest_digest=event.plan_manifest_digest,
+                run_id=event.run_id,
+                binding_set_digest=event.binding_set_digest,
+                manifest=event.model_dump(mode="json"),
+                event_digest=event.event_digest,
+                created_at=event.created_at,
+            )
+        )
+        return transitioned
+
+    @staticmethod
+    def _approval_record(
+        approval: TaskLoopCapabilityApproval,
+    ) -> TaskLoopCapabilityApprovalRecord:
+        return TaskLoopCapabilityApprovalRecord(
+            **approval.model_dump(mode="python", exclude={"schema_version"}),
+            manifest=approval.model_dump(mode="json"),
+        )
+
+    @staticmethod
+    def _apply_approval(
+        record: TaskLoopCapabilityApprovalRecord,
+        approval: TaskLoopCapabilityApproval,
+    ) -> None:
+        values = approval.model_dump(mode="python")
+        for field in (
+            "approval_id",
+            "execution_id",
+            "task_id",
+            "run_id",
+            "node_id",
+            "node_binding_id",
+            "attempt_id",
+            "attempt",
+            "plan_generation",
+            "input_binding_digest",
+            "executor_manifest_digest",
+            "preview_schema_digest",
+            "preview_manifest",
+            "confirmation_digest",
+            "requested_execution_revision",
+            "status",
+            "revision",
+            "approved_at",
+            "consumed_at",
+            "result_digest",
+            "approval_digest",
+            "created_at",
+            "updated_at",
+        ):
+            setattr(record, field, values[field])
+        record.manifest = approval.model_dump(mode="json")
+
+    @classmethod
+    def _approval_from_record(
+        cls,
+        record: TaskLoopCapabilityApprovalRecord,
+    ) -> TaskLoopCapabilityApproval:
+        values = {
+            "schema_version": "deskpilot.task-loop-capability-approval.v1",
+            **{
+                field: getattr(record, field)
+                for field in (
+                    "approval_id",
+                    "execution_id",
+                    "task_id",
+                    "run_id",
+                    "node_id",
+                    "node_binding_id",
+                    "attempt_id",
+                    "attempt",
+                    "plan_generation",
+                    "input_binding_digest",
+                    "executor_manifest_digest",
+                    "preview_schema_digest",
+                    "preview_manifest",
+                    "confirmation_digest",
+                    "requested_execution_revision",
+                    "status",
+                    "revision",
+                    "result_digest",
+                    "approval_digest",
+                )
+            },
+            "approved_at": cls._optional_aware(record.approved_at),
+            "consumed_at": cls._optional_aware(record.consumed_at),
+            "created_at": cls._aware(record.created_at),
+            "updated_at": cls._aware(record.updated_at),
+        }
+        try:
+            approval = TaskLoopCapabilityApproval.model_validate(values)
+        except ValidationError as error:
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Persisted capability approval is invalid"
+            ) from error
+        if record.manifest != approval.model_dump(mode="json"):
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Capability approval columns changed from its manifest"
+            )
+        return approval
 
     @classmethod
     def _build_attempt(cls, **values: Any) -> TaskLoopNodeAttempt:

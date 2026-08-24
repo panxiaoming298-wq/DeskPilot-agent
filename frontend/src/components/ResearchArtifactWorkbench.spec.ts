@@ -310,7 +310,9 @@ describe('ResearchArtifactWorkbench', () => {
         node_count: 4, pending_count: 3, ready_count: 1, active_count: 0,
         awaiting_verification_count: 0, verified_count: 0, waiting_user_count: 0,
         failed_count: 0, cancelled_count: 0, candidate_count: 0,
-        verified_result_count: 0, nodes: [], recoverable: true,
+        verified_result_count: 0, no_progress_count: 2, no_progress_limit: 3,
+        repair_count: 0, maximum_plan_generations: 3, budget_exhausted: false,
+        nodes: [], recoverable: true,
         created_at: '2026-08-18T00:00:00Z', updated_at: '2026-08-18T00:00:02Z',
         projection_digest: '8'.repeat(64),
       },
@@ -326,6 +328,7 @@ describe('ResearchArtifactWorkbench', () => {
     expect(wrapper.text()).toContain('Task Loop Proof')
     expect(wrapper.text()).toContain('通用循环正在按一个持久命令逐步推进')
     expect(wrapper.text()).toContain('0 / 4 已验证')
+    expect(wrapper.text()).toContain('2 / 3')
     expect(wrapper.text()).toContain('可从持久证明恢复')
     expect(JSON.stringify(executing.task_loop)).not.toContain('parameters')
     expect(JSON.stringify(executing.task_loop)).not.toContain('offer')

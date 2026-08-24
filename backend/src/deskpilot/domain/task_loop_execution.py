@@ -24,6 +24,7 @@ from deskpilot.domain.task_loop import (
     TASK_LOOP_ID_PATTERN,
     ModelPlannerNodeMapping,
 )
+from deskpilot.domain.task_loop_cycle import TaskLoopCycleRead
 from deskpilot.domain.task_plans import (
     MESSAGE_ID_PATTERN,
     PLAN_ID_PATTERN,
@@ -40,6 +41,7 @@ from deskpilot.domain.turn_planning import (
     TurnPlanningParameterBinding,
     TurnPlanningRecipeRef,
 )
+from deskpilot.domain.workspace_files import WorkspacePatchPreview, WorkspacePatchReceipt
 
 TASK_LOOP_EXECUTION_ID_PATTERN = r"^tlx_[0-9a-f]{64}$"
 TASK_LOOP_EXECUTION_EVENT_ID_PATTERN = r"^txe_[0-9a-f]{64}$"
@@ -673,6 +675,8 @@ class TaskLoopExecutionRead(BaseModel):
     loop_event_count: int = Field(ge=1, le=2)
     loop_progress_digest: str = Field(pattern=DIGEST_PATTERN)
     execution: TaskLoopExecution | None = None
+    cycle: TaskLoopCycleRead | None = None
+    workspace_patch: WorkspacePatchPreview | WorkspacePatchReceipt | None = None
     nodes: tuple[TaskLoopExecutionNodeRead, ...] = Field(default=(), max_length=18)
     recoverable: bool
     created_at: datetime
@@ -698,6 +702,10 @@ class TaskLoopExecutionRead(BaseModel):
                 raise ValueError("Pre-execution Task Loop read lifecycle is invalid")
             if self.loop_status != "planned" and self.nodes:
                 raise ValueError("Only a sealed Plan may expose preview nodes")
+            if self.cycle is not None:
+                raise ValueError("Pre-execution Task Loop cannot expose cycle state")
+            if self.workspace_patch is not None:
+                raise ValueError("Pre-execution Task Loop cannot expose an approval")
         else:
             if (
                 self.loop_status != "planned"
@@ -714,6 +722,8 @@ class TaskLoopExecutionRead(BaseModel):
             }
             if self.recoverable is not expected_recoverable:
                 raise ValueError("Execution recovery state is invalid")
+            if self.cycle is None:
+                raise ValueError("Execution read has no persistent cycle summary")
         material = self.model_dump(mode="json", exclude={"read_digest"})
         if self.read_digest != sha256_digest(material):
             raise ValueError("Task-loop execution read digest does not match")
@@ -725,6 +735,16 @@ class TaskLoopExecutionRead(BaseModel):
             "schema_version": "deskpilot.task-loop-execution-read.v1",
             **values,
         }
+        material.setdefault("cycle", None)
+        material.setdefault("workspace_patch", None)
+        if material.get("execution") is not None and material.get("cycle") is None:
+            material["cycle"] = TaskLoopCycleRead.build(
+                no_progress_count=0,
+                repair_count=0,
+                budget_exhausted=False,
+                latest_event_kind=None,
+                latest_event_sequence=0,
+            )
         return cls(**material, read_digest=sha256_digest(material))
 
     @property
@@ -814,6 +834,11 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
     cancelled_count: int = Field(ge=0, le=18)
     candidate_count: int = Field(ge=0, le=18)
     verified_result_count: int = Field(ge=0, le=18)
+    no_progress_count: int = Field(ge=0, le=3)
+    no_progress_limit: Literal[3] = 3
+    repair_count: int = Field(ge=0, le=2)
+    maximum_plan_generations: Literal[3] = 3
+    budget_exhausted: bool
     nodes: tuple[TaskLoopExecutionWorkbenchNodeRead, ...] = Field(default=(), max_length=18)
     recoverable: bool
     created_at: datetime
@@ -844,6 +869,12 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
             raise ValueError("Task-loop Workbench execution summary is incomplete")
         if self.execution_status is None and self.execution_event_count != 0:
             raise ValueError("Pre-execution Workbench read has execution events")
+        if self.execution_status is None and (
+            self.no_progress_count
+            or self.repair_count
+            or self.budget_exhausted
+        ):
+            raise ValueError("Pre-execution Workbench read has cycle state")
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("Task-loop Workbench timestamps must be timezone-aware")
         material = self.model_dump(mode="json", exclude={"projection_digest"})
@@ -878,6 +909,15 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
             "cancelled_count": sum(item.status == "cancelled" for item in nodes),
             "candidate_count": sum(item.candidate_present for item in nodes),
             "verified_result_count": sum(item.verified_result_present for item in nodes),
+            "no_progress_count": (
+                read.cycle.no_progress_count if read.cycle is not None else 0
+            ),
+            "no_progress_limit": 3,
+            "repair_count": read.cycle.repair_count if read.cycle is not None else 0,
+            "maximum_plan_generations": 3,
+            "budget_exhausted": (
+                read.cycle.budget_exhausted if read.cycle is not None else False
+            ),
             "nodes": nodes,
             "recoverable": read.recoverable,
             "created_at": read.created_at,

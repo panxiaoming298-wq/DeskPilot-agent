@@ -220,10 +220,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["execution_id"],
             ["task_loop_executions.execution_id"],
-            name=(
-                "fk_model_planner_node_bindings_execution_id_"
-                "task_loop_executions"
-            ),
+            name="fk_mpn_binding_execution",
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
@@ -235,10 +232,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["user_message_id"],
             ["conversation_messages.message_id"],
-            name=(
-                "fk_model_planner_node_bindings_user_message_id_"
-                "conversation_messages"
-            ),
+            name="fk_mpn_binding_user_message",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
@@ -253,10 +247,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["step_binding_id"],
             ["model_planner_step_bindings.step_binding_id"],
-            name=(
-                "fk_model_planner_node_bindings_step_binding_id_"
-                "model_planner_step_bindings"
-            ),
+            name="fk_mpn_binding_step_binding",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
@@ -271,10 +262,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["composite_node_id"],
             ["task_execution_nodes.node_id"],
-            name=(
-                "fk_model_planner_node_bindings_composite_node_id_"
-                "task_execution_nodes"
-            ),
+            name="fk_mpn_binding_composite_node",
             ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("node_binding_id"),
@@ -365,10 +353,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["node_binding_id"],
             ["model_planner_node_bindings.node_binding_id"],
-            name=(
-                "fk_task_loop_node_attempts_node_binding_id_"
-                "model_planner_node_bindings"
-            ),
+            name="fk_tl_attempt_node_binding",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
@@ -452,10 +437,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["attempt_id"],
             ["task_loop_node_attempts.attempt_id"],
-            name=(
-                "fk_task_loop_verified_results_attempt_id_"
-                "task_loop_node_attempts"
-            ),
+            name="fk_tl_result_attempt",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
@@ -470,10 +452,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["node_binding_id"],
             ["model_planner_node_bindings.node_binding_id"],
-            name=(
-                "fk_task_loop_verified_results_node_binding_id_"
-                "model_planner_node_bindings"
-            ),
+            name="fk_tl_result_node_binding",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(

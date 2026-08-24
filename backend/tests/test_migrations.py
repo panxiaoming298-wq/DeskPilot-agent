@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0053_task_loop_execution"
+CURRENT_REVISION = "0054_task_loop_cycle_events"
 
 
 def _sync_url(path: Path) -> str:
@@ -157,6 +157,8 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
             "model_planner_node_bindings",
             "task_loop_node_attempts",
             "task_loop_verified_results",
+            "task_loop_capability_approvals",
+            "task_loop_cycle_events",
         }.issubset(inspector.get_table_names())
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
@@ -938,6 +940,23 @@ def test_stage_112_task_loop_execution_migration_round_trips(
             item["name"]
             for item in inspector.get_check_constraints("task_loop_verified_results")
         }
+        cycle_columns = {
+            item["name"] for item in inspector.get_columns("task_loop_cycle_events")
+        }
+        cycle_constraints = {
+            item["name"]
+            for item in inspector.get_check_constraints("task_loop_cycle_events")
+        }
+        approval_columns = {
+            item["name"]
+            for item in inspector.get_columns("task_loop_capability_approvals")
+        }
+        approval_constraints = {
+            item["name"]
+            for item in inspector.get_check_constraints(
+                "task_loop_capability_approvals"
+            )
+        }
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
@@ -949,6 +968,8 @@ def test_stage_112_task_loop_execution_migration_round_trips(
         "model_planner_node_bindings",
         "task_loop_node_attempts",
         "task_loop_verified_results",
+        "task_loop_capability_approvals",
+        "task_loop_cycle_events",
     }.issubset(tables)
     assert {
         "loop_id",
@@ -1021,12 +1042,45 @@ def test_stage_112_task_loop_execution_migration_round_trips(
         "task_execution_runs",
         "task_execution_nodes",
     } == result_foreign_keys
+    assert {
+        "attempt_id",
+        "node_binding_id",
+        "input_binding_digest",
+        "executor_manifest_digest",
+        "preview_schema_digest",
+        "preview_manifest",
+        "confirmation_digest",
+        "requested_execution_revision",
+        "status",
+        "approval_digest",
+    }.issubset(approval_columns)
+    assert {
+        "ck_task_loop_capability_approval_versions",
+        "ck_task_loop_capability_approval_status",
+        "ck_task_loop_capability_approval_lifecycle",
+    }.issubset(approval_constraints)
+    assert {
+        "previous_event_digest",
+        "kind",
+        "plan_generation",
+        "source_progress_digest",
+        "reason_code",
+        "evidence_manifest",
+        "evidence_digest",
+        "event_digest",
+    }.issubset(cycle_columns)
+    assert {
+        "ck_task_loop_cycle_event_versions",
+        "ck_task_loop_cycle_event_kind",
+        "ck_task_loop_cycle_event_chain_root",
+    }.issubset(cycle_constraints)
     assert revision == CURRENT_REVISION
 
+    command.downgrade(config, "0053_task_loop_execution")
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0053_task_loop_execution",
         target_revision="0052_model_planner_task_loop",
         insert_statement="""
             INSERT INTO task_loop_executions (
@@ -1081,6 +1135,8 @@ def test_stage_112_task_loop_execution_migration_round_trips(
         "model_planner_node_bindings",
         "task_loop_node_attempts",
         "task_loop_verified_results",
+        "task_loop_capability_approvals",
+        "task_loop_cycle_events",
     } & tables
     assert revision == "0052_model_planner_task_loop"
 

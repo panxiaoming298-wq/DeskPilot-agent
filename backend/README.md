@@ -335,7 +335,9 @@ GET /api/v1/agents/{agent_id}/versions/{version}
 
 阶段 111 最终验证：后端 87 个测试文件 / 653 项，`641 passed + 12 skipped`、统一退出 0，耗时 2540.26 秒；Ruff、严格 mypy 253 个源码、frozen `uv` 与 `pip check` 通过。Phase75 v16 为 11/11、false-success=0、unauthorized-effect=0，17 份 baseline SHA-256 前后不变；wheel Prompt 24/24。前端 22 文件 / 155 项、type-check/build 通过；Alembic 唯一 head `0051_turn_planning_offers`，default/fresh SQLite 无漂移。真实 PostgreSQL 11/11 与 RabbitMQ 1/1 通过并恢复/清理环境。
 
-下一实现方向为阶段 112 通用持久任务循环，之后依次推进安全编码 Profile、三任务/托盘后台、三角色 Calibration v3，以及独立 Edge Profile + Windows 记事本纵切。详见根目录 [`项目进度.md`](../项目进度.md)与 [`doc/111-116-通用多Agent与Edge记事本实施路线.md`](../doc/111-116-通用多Agent与Edge记事本实施路线.md)。
+阶段 112 最终验证：后端 745 项，`733 passed + 12 skipped`；Ruff 全仓、严格 mypy 275 个生产源码、frozen `uv` 与 `pip check` 通过。Phase75 v16 仍为 11/11、false-success=0、unauthorized-effect=0，17 份 baseline SHA-256 前后不变；wheel Prompt 24/24。前端 22 文件 / 157 项、type-check/build 通过；Alembic 唯一 head `0054_task_loop_cycle_events`，SQLite current/upgrade/check、integrity/foreign-key 通过。专用测试库 PostgreSQL 11/11（含容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复。
+
+下一实现方向为阶段 113 Codex 类安全编码工具，之后依次推进三任务/托盘后台、三角色 Calibration v3，以及独立 Edge Profile + Windows 记事本纵切。详见根目录 [`项目进度.md`](../项目进度.md)与 [`doc/111-116-通用多Agent与Edge记事本实施路线.md`](../doc/111-116-通用多Agent与Edge记事本实施路线.md)。
 
 ## 测试
 

@@ -19,7 +19,7 @@
 
 ## 2. 阶段 111：通用任务提案与 Capability Offer
 
-> 实施状态（2026-08-24）：阶段 111 代码、`0051` 迁移、前端投影和 CI 已完成，本地全量门禁取得统一退出 0；精确结果见[阶段 111：通用任务提案与 Capability Offer](111-通用任务提案与Capability-Offer.md)。完成中文阶段提交并建立 `codex/stage-112` 后，按本路线进入 112A。
+> 实施状态（2026-08-24）：阶段 111 代码、`0051` 迁移、前端投影、CI、全量/外部门禁与中文提交均已完成；精确结果见[阶段 111：通用任务提案与 Capability Offer](111-通用任务提案与Capability-Offer.md)。
 
 ### 2.1 路由与运行时
 
@@ -62,7 +62,7 @@
 
 ### 112A：版本化多步骤 Planner
 
-> 实施状态（2026-08-24）：112A 实现、独立 staged 里程碑门禁与中文提交 `完成阶段112A多步骤计划检查点` 已完成，未 push；112B 的通用 Execute/Verify 实现与本地里程碑门禁已通过，下一步进入 112C。实际边界与验证记录见[阶段 112：通用持久任务循环](112-通用持久任务循环.md)。阶段 112 的 PostgreSQL/RabbitMQ 外部门禁在 112C 结束后统一执行。
+> 实施状态（2026-08-24）：112A 与 112B 已分别形成中文里程碑提交；112C 的精确 Patch/Approval、receipt 对账、有界 Repair、no-progress/预算终止及 `0054` 迁移均已完成。阶段 112 默认后端、Phase75、前端、PostgreSQL 11/11 与 RabbitMQ 1/1 总门禁已通过，未 push；实际边界与验证记录见[阶段 112：通用持久任务循环](112-通用持久任务循环.md)。下一步创建 `codex/stage-113`。
 
 - 整体规划支持 1～8 个服务器 Offer：单步骤继续走阶段 111 已验收的 trusted recipe 路径，112A 的 TaskLoop 多步骤入口只消费 2～8 步 `MULTI_STEP_PLAN_DEFERRED`，不改旧 digest/行为。
 - 每一步只引用 Offer 与已持久输入；服务器重新验证消息片段、Offer、recipe、exact Contract/Capability/Policy/预算绑定，全程不进行第二次 Provider 调用。
@@ -84,10 +84,13 @@
 - 把现有精确 Patch、固定 Test、逐节点 Approval 和三代预算守恒 Repair 接入通用循环。
 - Workbench 增加可空 `task_loop` 投影，展示 `Observe → Plan → Execute → Verify → waiting_user → Repair`。
 - 支持重启恢复、no-progress 检测、总预算耗尽和稳定终止。
+- 实际实现使用持久 `task_loop_capability_approvals` 与 `task_loop_cycle_events`：审批绑定 exact Task/revision/node/attempt/preview/manifest/fresh confirmation；Patch 写入后崩溃按同 attempt receipt 对账；非审批节点的 Repair 只能消费原 Plan retry/预算，最多两次，审批副作用不自动重放。
 
 本阶段仍不开放任意 Shell、模型安装依赖、项目删除或登录态浏览器。
 
 ## 4. 阶段 113：Codex 类安全编码工具
+
+> 实施状态（2026-08-24）：阶段 112 总门禁已通过，阶段 113 尚未开始实现。
 
 ### 4.1 只读项目能力
 
