@@ -14,7 +14,10 @@ from deskpilot.application.capability_input_binding_catalog import (
     KnowledgeLocalExecutorInput,
     McpTextMetricsExecutorInput,
     ResolvedVerifiedCapabilityResult,
+    WorkspaceGitInspectExecutorInput,
     WorkspaceNodeTestExecutorInput,
+    WorkspaceProjectBatchReadExecutorInput,
+    WorkspaceProjectSearchExecutorInput,
     WorkspacePythonTestExecutorInput,
     WorkspaceSnapshotCheckExecutorInput,
 )
@@ -265,6 +268,33 @@ def _step(
             WorkspaceNodeTestExecutorInput,
             {"project_path": "frontend", "test_path": "src/app.test.ts"},
         ),
+        (
+            "workspace_project_search",
+            {"project_path": "backend", "query": "CapabilityRef"},
+            None,
+            WorkspaceProjectSearchExecutorInput,
+            {"project_path": "backend", "query": "CapabilityRef"},
+        ),
+        (
+            "workspace_project_batch_read",
+            {
+                "project_path": "backend",
+                "paths_json": '["pyproject.toml","src/deskpilot/main.py"]',
+            },
+            None,
+            WorkspaceProjectBatchReadExecutorInput,
+            {
+                "project_path": "backend",
+                "paths": ["pyproject.toml", "src/deskpilot/main.py"],
+            },
+        ),
+        (
+            "workspace_git_inspect",
+            {"project_path": ".", "operation": "status"},
+            {"project_path": ".", "operation": "STATUS"},
+            WorkspaceGitInspectExecutorInput,
+            {"project_path": ".", "operation": "status"},
+        ),
     ),
 )
 def test_catalog_binds_only_exact_persisted_step_parameters(
@@ -457,7 +487,7 @@ def test_catalog_consumes_only_exact_server_selected_artifact_dependencies() -> 
         assert bound.consumed_result_refs == (result_ref,)
 
 
-def test_catalog_exposes_eight_exact_runtime_capability_refs() -> None:
+def test_catalog_exposes_eleven_exact_runtime_capability_refs() -> None:
     catalog = CapabilityInputBindingCatalog(create_builtin_capability_catalog())
 
     refs = catalog.capabilities()
@@ -469,6 +499,9 @@ def test_catalog_exposes_eight_exact_runtime_capability_refs() -> None:
         ("workspace.python.test.v1", "1.0.0"),
         ("workspace.node.test.v1", "1.0.0"),
         ("workspace.patch.bundle.v1", "1.0.0"),
+        ("workspace.project.search.v1", "1.0.0"),
+        ("workspace.project.read_many.v1", "1.0.0"),
+        ("workspace.git.inspect.v1", "1.0.0"),
         ("artifact.html.v1", "1.2.0"),
         ("browser.verify.v1", "1.1.0"),
     }

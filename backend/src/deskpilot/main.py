@@ -129,6 +129,7 @@ from deskpilot.application.workbench_runtime_coordinator import (
 )
 from deskpilot.application.workspace_agent_runtime import WorkspaceAgentRuntime
 from deskpilot.application.workspace_check_runtime import WorkspaceCheckRuntime
+from deskpilot.application.workspace_coding_runtime import WorkspaceCodingRuntime
 from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
 from deskpilot.application.workspace_node_test_runtime import WorkspaceNodeTestRuntime
 from deskpilot.application.workspace_python_test_runtime import WorkspacePythonTestRuntime
@@ -378,6 +379,7 @@ def create_app(
             resolved_settings.conversation_workspace_root,
             resolved_settings.artifact_workspace_root,
         )
+        workspace_coding_runtime = WorkspaceCodingRuntime(workspace_file_runtime)
         agent_model_loop_runtime = AgentModelLoopRuntime(
             database,
             agent_execution_runtime,
@@ -453,6 +455,7 @@ def create_app(
             python_tests=resolved_workspace_python_test_runtime,
             node_tests=resolved_workspace_node_test_runtime,
             workspace_patches=workspace_file_runtime,
+            workspace_coding=workspace_coding_runtime,
             artifacts=artifact_delivery_runtime,
         )
         task_loop_agent_adapters = create_task_loop_agent_adapter_registry(
@@ -632,6 +635,7 @@ def create_app(
         app.state.task_loop_capability_runtime = task_loop_capability_runtime
         app.state.task_loop_agent_runtime = task_loop_agent_runtime
         app.state.workspace_file_runtime = workspace_file_runtime
+        app.state.workspace_coding_runtime = workspace_coding_runtime
         app.state.workspace_agent_runtime = workspace_agent_runtime
         app.state.workspace_check_runtime = resolved_workspace_check_runtime
         app.state.workspace_python_test_runtime = resolved_workspace_python_test_runtime

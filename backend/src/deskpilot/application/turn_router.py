@@ -92,6 +92,9 @@ RouteId = Literal[
     "workspace_snapshot_check",
     "workspace_python_test",
     "workspace_node_test",
+    "workspace_project_search",
+    "workspace_project_batch_read",
+    "workspace_git_inspect",
 ]
 CLASSIFIER_VERSION = "deskpilot.turn-router.rules.v5"
 MODEL_PLANNER_CLASSIFIER_VERSION = "deskpilot.turn-router.model-planner.v1"

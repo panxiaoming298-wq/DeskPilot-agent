@@ -163,6 +163,9 @@ class TurnRouteRead(BaseModel):
             "workspace_snapshot_check",
             "workspace_python_test",
             "workspace_node_test",
+            "workspace_project_search",
+            "workspace_project_batch_read",
+            "workspace_git_inspect",
         ]
         | None
     )

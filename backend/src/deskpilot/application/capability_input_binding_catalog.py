@@ -334,7 +334,7 @@ _INPUT_SCHEMA_BY_CAPABILITY = {
     "workspace.python.test.v1": "deskpilot.workspace-python-test-executor-input.v1",
     "workspace.node.test.v1": "deskpilot.workspace-node-test-executor-input.v1",
     "workspace.project.search.v1": "deskpilot.workspace-project-search-executor-input.v1",
-    "workspace.project.read-many.v1": (
+    "workspace.project.read_many.v1": (
         "deskpilot.workspace-project-batch-read-executor-input.v1"
     ),
     "workspace.git.inspect.v1": "deskpilot.workspace-git-inspect-executor-input.v1",
@@ -428,7 +428,7 @@ class CapabilityInputBindingCatalog:
             ),
             (
                 "workspace_project_batch_read",
-                "workspace.project.read-many.v1",
+                "workspace.project.read_many.v1",
                 "workspace_project_batch_read",
                 ("project_path", "paths_json"),
                 WorkspaceProjectBatchReadExecutorInput,

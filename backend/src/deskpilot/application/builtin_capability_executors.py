@@ -17,8 +17,11 @@ from deskpilot.application.capability_input_binding_catalog import (
     BrowserVerifyExecutorInput,
     KnowledgeLocalExecutorInput,
     McpTextMetricsExecutorInput,
+    WorkspaceGitInspectExecutorInput,
     WorkspaceNodeTestExecutorInput,
     WorkspacePatchBundleExecutorInput,
+    WorkspaceProjectBatchReadExecutorInput,
+    WorkspaceProjectSearchExecutorInput,
     WorkspacePythonTestExecutorInput,
     WorkspaceSnapshotCheckExecutorInput,
 )
@@ -35,6 +38,7 @@ from deskpilot.domain.capability_execution import (
     CapabilityResultKind,
     VerifiedCapabilityResultRef,
 )
+from deskpilot.domain.coding_tools import GitInspectionRead, ProjectBatchRead, ProjectSearchRead
 from deskpilot.domain.knowledge import KnowledgeSearchRead
 from deskpilot.domain.mcp import McpAuditPage, McpTextMetricsOutput, McpToolCallRead
 from deskpilot.domain.task_plans import CapabilityPack, CapabilityRef, DraftNodeKind
@@ -167,6 +171,24 @@ class WorkspacePatchPort(Protocol):
     ) -> WorkspacePatchPreview: ...
 
     def commit_patch(self, preview: WorkspacePatchPreview) -> WorkspacePatchReceipt: ...
+
+
+class WorkspaceCodingPort(Protocol):
+    @property
+    def enabled(self) -> bool: ...
+
+    @property
+    def git_enabled(self) -> bool: ...
+
+    def search(self, project_path: str, query: str) -> ProjectSearchRead: ...
+
+    def read_many(self, project_path: str, relative_paths: tuple[str, ...]) -> ProjectBatchRead: ...
+
+    def inspect_git(
+        self,
+        project_path: str,
+        operation: Literal["status", "diff", "log"],
+    ) -> GitInspectionRead: ...
 
 
 class ArtifactDeliveryPort(Protocol):
@@ -645,6 +667,122 @@ class WorkspaceNodeTestExecutor(_BuiltinExecutor):
         )
 
 
+class WorkspaceProjectSearchExecutor(_BuiltinExecutor):
+    def __init__(self, capability: CapabilityRef, runtime: WorkspaceCodingPort) -> None:
+        super().__init__(capability, CapabilityResultKind.PROJECT_SEARCH)
+        self._runtime = runtime
+
+    async def execute(self, context: CapabilityExecutionContext, arguments: BaseModel) -> BaseModel:
+        self._require_context(context)
+        if not isinstance(arguments, WorkspaceProjectSearchExecutorInput):
+            raise BuiltinCapabilityExecutionError("Project search input type changed")
+        if not self._runtime.enabled:
+            raise BuiltinCapabilityRuntimeUnavailableError("Project search runtime is disabled")
+        return await asyncio.to_thread(
+            self._runtime.search,
+            arguments.project_path,
+            arguments.query,
+        )
+
+    async def verify(self, context: CapabilityExecutionContext, candidate: BaseModel) -> BaseModel:
+        if not isinstance(candidate, ProjectSearchRead):
+            raise BuiltinCapabilityCandidateRejectedError("Project search candidate type changed")
+        return self._verification(
+            context=context,
+            candidate=candidate,
+            verifier_id="builtin.workspace.project.search.verifier.v1",
+            evidence={
+                "project_path": candidate.project_path,
+                "query_digest": candidate.query_digest,
+                "match_count": len(candidate.matches),
+                "scanned_file_count": candidate.scanned_file_count,
+                "scanned_byte_count": candidate.scanned_byte_count,
+                "truncated": candidate.truncated,
+                "result_digest": candidate.result_digest,
+            },
+        )
+
+
+class WorkspaceProjectBatchReadExecutor(_BuiltinExecutor):
+    def __init__(self, capability: CapabilityRef, runtime: WorkspaceCodingPort) -> None:
+        super().__init__(capability, CapabilityResultKind.PROJECT_BATCH_READ)
+        self._runtime = runtime
+
+    async def execute(self, context: CapabilityExecutionContext, arguments: BaseModel) -> BaseModel:
+        self._require_context(context)
+        if not isinstance(arguments, WorkspaceProjectBatchReadExecutorInput):
+            raise BuiltinCapabilityExecutionError("Project batch-read input type changed")
+        if not self._runtime.enabled:
+            raise BuiltinCapabilityRuntimeUnavailableError("Project batch-read runtime is disabled")
+        return await asyncio.to_thread(
+            self._runtime.read_many,
+            arguments.project_path,
+            arguments.paths,
+        )
+
+    async def verify(self, context: CapabilityExecutionContext, candidate: BaseModel) -> BaseModel:
+        if not isinstance(candidate, ProjectBatchRead):
+            raise BuiltinCapabilityCandidateRejectedError(
+                "Project batch-read candidate type changed"
+            )
+        return self._verification(
+            context=context,
+            candidate=candidate,
+            verifier_id="builtin.workspace.project.read_many.verifier.v1",
+            evidence={
+                "project_path": candidate.project_path,
+                "file_result_digests": [item.result_digest for item in candidate.files],
+                "total_byte_count": candidate.total_byte_count,
+                "result_digest": candidate.result_digest,
+            },
+        )
+
+
+class WorkspaceGitInspectExecutor(_BuiltinExecutor):
+    def __init__(self, capability: CapabilityRef, runtime: WorkspaceCodingPort) -> None:
+        super().__init__(capability, CapabilityResultKind.GIT_INSPECTION)
+        self._runtime = runtime
+
+    async def execute(self, context: CapabilityExecutionContext, arguments: BaseModel) -> BaseModel:
+        self._require_context(context)
+        if not isinstance(arguments, WorkspaceGitInspectExecutorInput):
+            raise BuiltinCapabilityExecutionError("Git inspection input type changed")
+        if not self._runtime.git_enabled:
+            raise BuiltinCapabilityRuntimeUnavailableError("Git inspection runtime is disabled")
+        return await asyncio.to_thread(
+            self._runtime.inspect_git,
+            arguments.project_path,
+            arguments.operation,
+        )
+
+    async def verify(self, context: CapabilityExecutionContext, candidate: BaseModel) -> BaseModel:
+        if (
+            not isinstance(candidate, GitInspectionRead)
+            or not candidate.hooks_disabled
+            or not candidate.external_diff_disabled
+            or not candidate.textconv_disabled
+            or not candidate.pager_disabled
+            or not candidate.optional_locks_disabled
+        ):
+            raise BuiltinCapabilityCandidateRejectedError(
+                "Git inspection candidate lost a fixed read-only guard"
+            )
+        return self._verification(
+            context=context,
+            candidate=candidate,
+            verifier_id="builtin.workspace.git.inspect.verifier.v1",
+            evidence={
+                "operation": candidate.operation,
+                "repository_digest": candidate.repository_digest,
+                "toolchain_digest": candidate.toolchain_digest,
+                "head_oid": candidate.head_oid,
+                "output_digest": candidate.output_digest,
+                "output_truncated": candidate.output_truncated,
+                "result_digest": candidate.result_digest,
+            },
+        )
+
+
 class WorkspacePatchBundleExecutor(_BuiltinExecutor):
     """R1 adapter whose write path exists only behind an exact preview digest."""
 
@@ -760,6 +898,7 @@ def create_builtin_capability_executor_registry(
     python_tests: WorkspacePythonTestPort | None = None,
     node_tests: WorkspaceNodeTestPort | None = None,
     workspace_patches: WorkspacePatchPort | None = None,
+    workspace_coding: WorkspaceCodingPort | None = None,
     artifacts: ArtifactDeliveryPort | None = None,
 ) -> CapabilityExecutorRegistry:
     """Register only exact packs whose concrete trusted runtime is available."""
@@ -836,6 +975,38 @@ def create_builtin_capability_executor_registry(
             recovery_policy=CapabilityRecoveryPolicy.RECEIPT_RECONCILE,
             executor=WorkspacePatchBundleExecutor(_ref(pack), workspace_patches),
         )
+    if workspace_coding is not None and workspace_coding.enabled:
+        search_pack = capabilities.resolve_preferred("workspace.project.search.v1")
+        _register(
+            registry,
+            search_pack,
+            executor_id="builtin.workspace.project.search.v1",
+            input_model=WorkspaceProjectSearchExecutorInput,
+            output_model=ProjectSearchRead,
+            result_kind=CapabilityResultKind.PROJECT_SEARCH,
+            executor=WorkspaceProjectSearchExecutor(_ref(search_pack), workspace_coding),
+        )
+        read_pack = capabilities.resolve_preferred("workspace.project.read_many.v1")
+        _register(
+            registry,
+            read_pack,
+            executor_id="builtin.workspace.project.read_many.v1",
+            input_model=WorkspaceProjectBatchReadExecutorInput,
+            output_model=ProjectBatchRead,
+            result_kind=CapabilityResultKind.PROJECT_BATCH_READ,
+            executor=WorkspaceProjectBatchReadExecutor(_ref(read_pack), workspace_coding),
+        )
+        if workspace_coding.git_enabled:
+            git_pack = capabilities.resolve_preferred("workspace.git.inspect.v1")
+            _register(
+                registry,
+                git_pack,
+                executor_id="builtin.workspace.git.inspect.v1",
+                input_model=WorkspaceGitInspectExecutorInput,
+                output_model=GitInspectionRead,
+                result_kind=CapabilityResultKind.GIT_INSPECTION,
+                executor=WorkspaceGitInspectExecutor(_ref(git_pack), workspace_coding),
+            )
     if artifacts is not None:
         artifact_pack = capabilities.resolve_preferred("artifact.html.v1")
         _register(
@@ -922,10 +1093,14 @@ __all__ = [
     "KnowledgeLocalExecutor",
     "McpTextMetricsExecutor",
     "WorkspaceNodeTestExecutor",
+    "WorkspaceGitInspectExecutor",
     "WorkspacePatchBundleExecutor",
     "WorkspacePatchCapabilityOutput",
     "WorkspacePatchPort",
     "WorkspacePythonTestExecutor",
+    "WorkspaceProjectBatchReadExecutor",
+    "WorkspaceProjectSearchExecutor",
+    "WorkspaceCodingPort",
     "WorkspaceSnapshotCheckExecutor",
     "create_builtin_capability_executor_registry",
 ]

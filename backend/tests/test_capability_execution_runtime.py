@@ -254,6 +254,7 @@ async def _runtime_fixture(
         database,
         planning._compiler,  # noqa: SLF001 - exact shared fixture
         planner._agents,  # noqa: SLF001 - exact shared fixture
+        clock=lambda: NOW,
     )
     activation = TaskLoopActivationRuntime(
         database,
@@ -480,6 +481,7 @@ async def test_workspace_patch_waits_for_exact_revision_and_recovers_after_appro
         database,
         planning._compiler,  # noqa: SLF001
         planner._agents,  # noqa: SLF001
+        clock=lambda: NOW,
     )
     activation = TaskLoopActivationRuntime(
         database,

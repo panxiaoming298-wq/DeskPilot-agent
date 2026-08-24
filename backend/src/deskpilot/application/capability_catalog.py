@@ -230,10 +230,10 @@ def create_builtin_capability_catalog(
                 workspace_write=False,
             ),
             _pack(
-                capability_id="workspace.project.read-many.v1",
+                capability_id="workspace.project.read_many.v1",
                 runtime_enabled=True,
                 description="在同一项目根下批量读取最多 32 个受限 UTF-8 文件。",
-                allowed_operations=("conversation-workspace.project.read-many",),
+                allowed_operations=("conversation-workspace.project.read_many",),
                 max_risk_level=ToolRiskLevel.R0,
                 external_ingress=True,
                 external_egress=False,

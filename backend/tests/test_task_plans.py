@@ -122,6 +122,9 @@ def test_research_to_html_fixture_is_sealed_deterministic_and_not_runnable() -> 
         ("workspace.snapshot.check.v1", "1.0.0"),
         ("workspace.python.test.v1", "1.0.0"),
         ("workspace.node.test.v1", "1.0.0"),
+        ("workspace.project.search.v1", "1.0.0"),
+        ("workspace.project.read_many.v1", "1.0.0"),
+        ("workspace.git.inspect.v1", "1.0.0"),
     }
     assert len(first.acceptance_coverage) == len(contract.acceptance_criteria)
     compiler.validate_manifest(first)
@@ -456,6 +459,9 @@ def test_capability_api_is_read_only_and_only_registered_runtimes_are_enabled(
         "workspace.snapshot.check.v1",
         "workspace.python.test.v1",
         "workspace.node.test.v1",
+        "workspace.project.search.v1",
+        "workspace.project.read_many.v1",
+        "workspace.git.inspect.v1",
     }
     assert {
         (item["capability_id"], item["version"])
@@ -477,4 +483,7 @@ def test_capability_api_is_read_only_and_only_registered_runtimes_are_enabled(
         ("workspace.snapshot.check.v1", "1.0.0"),
         ("workspace.python.test.v1", "1.0.0"),
         ("workspace.node.test.v1", "1.0.0"),
+        ("workspace.project.search.v1", "1.0.0"),
+        ("workspace.project.read_many.v1", "1.0.0"),
+        ("workspace.git.inspect.v1", "1.0.0"),
     }

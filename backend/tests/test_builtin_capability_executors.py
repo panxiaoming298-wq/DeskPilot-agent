@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import shutil
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -28,10 +30,14 @@ from deskpilot.application.capability_input_binding_catalog import (
     KnowledgeLocalExecutorInput,
     McpTextMetricsExecutorInput,
     WorkspaceNodeTestExecutorInput,
+    WorkspaceProjectBatchReadExecutorInput,
+    WorkspaceProjectSearchExecutorInput,
     WorkspacePythonTestExecutorInput,
     WorkspaceSnapshotCheckExecutorInput,
 )
 from deskpilot.application.mcp_control_plane import SERVER_ID
+from deskpilot.application.workspace_coding_runtime import WorkspaceCodingRuntime
+from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.artifact_runtime import (
     ArtifactRead,
@@ -415,9 +421,70 @@ BaseModelInput = (
     | WorkspaceSnapshotCheckExecutorInput
     | WorkspacePythonTestExecutorInput
     | WorkspaceNodeTestExecutorInput
+    | WorkspaceProjectSearchExecutorInput
+    | WorkspaceProjectBatchReadExecutorInput
     | ArtifactHtmlExecutorInput
     | BrowserVerifyExecutorInput
 )
+
+
+@pytest.mark.asyncio
+async def test_project_coding_adapters_execute_and_verify_through_generic_engine(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "a.py").write_bytes(b"needle\n")
+    (project / "README.md").write_bytes(b"DeskPilot\n")
+    coding = WorkspaceCodingRuntime(
+        WorkspaceFileRuntime(str(tmp_path)),
+        shutil.which("git"),
+    )
+    registry = create_builtin_capability_executor_registry(
+        create_builtin_capability_catalog(),
+        workspace_coding=coding,
+    )
+    engine = CapabilityExecutionEngine(registry)
+    cases = (
+        (
+            "workspace.project.search.v1",
+            WorkspaceProjectSearchExecutorInput(project_path="project", query="needle"),
+            "a",
+            CapabilityResultKind.PROJECT_SEARCH,
+        ),
+        (
+            "workspace.project.read_many.v1",
+            WorkspaceProjectBatchReadExecutorInput(
+                project_path="project",
+                paths=("README.md", "src/a.py"),
+            ),
+            "b",
+            CapabilityResultKind.PROJECT_BATCH_READ,
+        ),
+    )
+
+    for capability_id, arguments, digit, result_kind in cases:
+        bound = _bound(capability_id, arguments, digit=digit)
+        context = _context(bound)
+        candidate = await engine.execute_candidate(context, bound)
+        verified = await engine.verify_candidate(context, bound, candidate)
+
+        assert candidate.result_kind is result_kind
+        assert verified.candidate == candidate
+        assert verified.adapter_verification.result_digest == candidate.result_digest
+
+    manifests = {item.capability.capability_id: item for item in registry.manifests()}
+    assert {
+        "workspace.project.search.v1",
+        "workspace.project.read_many.v1",
+    } <= set(manifests)
+    assert all(
+        manifests[capability_id].effect_class is CapabilityEffectClass.READ_ONLY
+        for capability_id in (
+            "workspace.project.search.v1",
+            "workspace.project.read_many.v1",
+        )
+    )
 
 
 def _context(bound: BoundCapabilityInput) -> CapabilityExecutionContext:

@@ -1,5 +1,6 @@
 """Persistent ready/claim/lease runtime; results stop at verification boundary."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
@@ -89,11 +90,13 @@ class AgentExecutionRuntime:
         agents: AgentRegistry,
         *,
         max_parallel: int = 3,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._database = database
         self._compiler = compiler
         self._agents = agents
         self._max_parallel = max_parallel
+        self._clock = clock or utc_now
 
     async def start(self, task_id: str) -> ExecutionRunRead:
         try:
@@ -183,7 +186,7 @@ class AgentExecutionRuntime:
                     "Existing execution Run differs from the expected Plan"
                 )
             return await self._read_run(session, existing)
-        now = utc_now()
+        now = self._now()
         run = TaskExecutionRunRecord(
             run_id=run_id,
             task_id=expected_plan.task_id,
@@ -269,7 +272,7 @@ class AgentExecutionRuntime:
             }:
                 return await self._read_run(session, run)
 
-            now = utc_now()
+            now = self._now()
             run.status = ExecutionRunStatus.CANCELLED.value
             run.revision += 1
             run.updated_at = now
@@ -427,7 +430,7 @@ class AgentExecutionRuntime:
                 )
                 .with_for_update()
             )
-            claimed_at = utc_now()
+            claimed_at = self._now()
             node.status = ExecutionNodeStatus.CLAIMED.value
             node.claim_fencing_token += 1
             node.claim_owner_id = owner_id
@@ -538,7 +541,7 @@ class AgentExecutionRuntime:
                 InvocationExecutionStatus.WAITING_CHILDREN.value,
             }:
                 raise AgentRuntimeConflictError("Invocation is not claimable")
-            now = utc_now()
+            now = self._now()
             invocation.execution_status = InvocationExecutionStatus.RUNNING.value
             if invocation.started_at is None:
                 invocation.started_at = now
@@ -605,10 +608,10 @@ class AgentExecutionRuntime:
                     invocation_id=result.invocation_id,
                     manifest=result.model_dump(mode="json"),
                     result_digest=result.result_digest,
-                    created_at=utc_now(),
+                    created_at=self._now(),
                 )
             )
-            now = utc_now()
+            now = self._now()
             invocation.result_id = result.result_id
             invocation.execution_status = InvocationExecutionStatus.RESULT_SUBMITTED.value
             invocation.verification_status = InvocationVerificationStatus.PENDING.value
@@ -813,7 +816,7 @@ class AgentExecutionRuntime:
                 target_node_id=node.node_id,
                 manifest=handoff.model_dump(mode="json"),
                 handoff_digest=handoff.handoff_digest,
-                created_at=utc_now(),
+                created_at=self._now(),
             )
         )
         return handoff
@@ -832,7 +835,7 @@ class AgentExecutionRuntime:
         return handoff
 
     async def _reap_expired(self, session: AsyncSession, run: TaskExecutionRunRecord) -> None:
-        now = utc_now()
+        now = self._now()
         expired = tuple(
             (
                 await session.scalars(
@@ -1217,9 +1220,8 @@ class AgentExecutionRuntime:
             raise AgentRuntimeProofRejectedError("Invocation lineage changed concurrently")
         return run, node, invocation
 
-    @classmethod
     def _assert_worker_lease(
-        cls,
+        self,
         run: TaskExecutionRunRecord,
         node: TaskExecutionNodeRecord,
         invocation: AgentInvocationRecord,
@@ -1237,11 +1239,20 @@ class AgentExecutionRuntime:
             or invocation.attempt != node.attempt_count
         ):
             raise AgentLeaseRejectedError("Invocation lineage is no longer active")
-        cls._assert_lease(node, owner_id, fencing_token)
+        self._assert_lease(node, owner_id, fencing_token, now=self._now())
 
     @staticmethod
-    def _assert_lease(node: TaskExecutionNodeRecord, owner_id: str, fencing_token: int) -> None:
-        now = utc_now()
+    def _assert_lease(
+        node: TaskExecutionNodeRecord,
+        owner_id: str,
+        fencing_token: int,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        checked_at = now or utc_now()
+        if checked_at.tzinfo is None:
+            raise ValueError("Agent lease clock must be timezone-aware")
+        checked_at = checked_at.astimezone(UTC)
         expires = node.claim_expires_at
         normalized_expires = (
             expires.replace(tzinfo=UTC)
@@ -1252,7 +1263,7 @@ class AgentExecutionRuntime:
             node.claim_owner_id != owner_id
             or node.claim_fencing_token != fencing_token
             or normalized_expires is None
-            or normalized_expires <= now
+            or normalized_expires <= checked_at
         ):
             raise AgentLeaseRejectedError("Invocation lease or fencing token is stale")
 
@@ -1666,3 +1677,9 @@ class AgentExecutionRuntime:
             created_at=record.created_at,
             updated_at=record.updated_at,
         )
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None:
+            raise ValueError("Agent execution clock must be timezone-aware")
+        return value.astimezone(UTC)

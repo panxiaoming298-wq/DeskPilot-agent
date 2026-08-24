@@ -32,16 +32,16 @@ from deskpilot.application.plan_compiler import (
     workspace_file_rename_draft,
     workspace_file_replace_contract,
     workspace_file_replace_draft,
-    workspace_node_test_contract,
-    workspace_node_test_draft,
     workspace_git_inspect_contract,
     workspace_git_inspect_draft,
+    workspace_node_test_contract,
+    workspace_node_test_draft,
+    workspace_patch_bundle_contract,
+    workspace_patch_bundle_draft,
     workspace_project_batch_read_contract,
     workspace_project_batch_read_draft,
     workspace_project_search_contract,
     workspace_project_search_draft,
-    workspace_patch_bundle_contract,
-    workspace_patch_bundle_draft,
     workspace_python_test_contract,
     workspace_python_test_draft,
     workspace_snapshot_check_contract,
@@ -260,7 +260,7 @@ _PLANNER_ONLY_ROUTE_SPECS: Mapping[RouteId, dict[str, object]] = MappingProxyTyp
         "workspace_project_batch_read": {
             "route_id": "workspace_project_batch_read",
             "producer_ref": "workspace_project_batch_read.v1",
-            "capabilities": ("workspace.project.read-many.v1",),
+            "capabilities": ("workspace.project.read_many.v1",),
             "max_risk": "R0",
         },
         "workspace_git_inspect": {
@@ -435,7 +435,9 @@ class RouteRecipeCatalog:
             try:
                 return dict(_LEGACY_ROUTE_SPECS[route_id])
             except KeyError as error:
-                raise RouteRecipeError("Planner-only Route has no deterministic manifest") from error
+                raise RouteRecipeError(
+                    "Planner-only Route has no deterministic manifest"
+                ) from error
         try:
             current = _LEGACY_ROUTE_SPECS.get(route_id) or _PLANNER_ONLY_ROUTE_SPECS[route_id]
         except KeyError as error:

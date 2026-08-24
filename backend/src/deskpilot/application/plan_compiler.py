@@ -1011,7 +1011,7 @@ def workspace_project_batch_read_contract(
     return _direct_capability_contract(
         task_id,
         capabilities,
-        capability_id="workspace.project.read-many.v1",
+        capability_id="workspace.project.read_many.v1",
         objective="在显式项目根内批量读取受限 UTF-8 文件",
         criterion=AcceptanceCriterion(
             criterion_id="ac_workspace_project_batch_read",
@@ -1032,7 +1032,7 @@ def workspace_project_batch_read_draft(
         contract_version,
         producer_ref="workspace_project_batch_read.v1",
         local_key="workspace_project_batch_read",
-        capability_id="workspace.project.read-many.v1",
+        capability_id="workspace.project.read_many.v1",
         objective="批量读取项目文件并复核每个版本证明。",
         acceptance_ref="ac_workspace_project_batch_read",
         verification_profile=VerificationProfile.DETERMINISTIC,

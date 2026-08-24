@@ -82,6 +82,7 @@ def _activation_runtime(
         database,
         planning._compiler,  # noqa: SLF001 - shared exact test fixture
         planner._agents,  # noqa: SLF001 - shared exact test fixture
+        clock=lambda: NOW,
     )
     runtime = TaskLoopActivationRuntime(
         database,
@@ -509,6 +510,7 @@ async def test_binding_persistence_failure_rolls_back_plan_run_and_nodes(
         database,
         planning._compiler,  # noqa: SLF001
         planner._agents,  # noqa: SLF001
+        clock=lambda: NOW,
     )
     runtime = TaskLoopActivationRuntime(
         database,
@@ -805,6 +807,7 @@ async def test_activation_and_input_catalog_share_quoted_enum_canonicalization(
         database,
         planning._compiler,  # noqa: SLF001
         planner._agents,  # noqa: SLF001
+        clock=lambda: NOW,
     )
     runtime = TaskLoopActivationRuntime(
         database,
