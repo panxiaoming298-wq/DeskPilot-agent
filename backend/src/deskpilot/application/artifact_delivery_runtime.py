@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from html import escape
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
@@ -149,6 +150,14 @@ class _ResolvedResearch:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _ExecutionNodeLocator:
+    """Exact internal node address for namespaced composite Plan phases."""
+
+    local_key: str | None
+    node_id: str | None = None
+
+
 class ArtifactDeliveryRuntime:
     def __init__(
         self,
@@ -166,19 +175,75 @@ class ArtifactDeliveryRuntime:
         self._workspace_root.mkdir(parents=True, exist_ok=True)
 
     async def verify_research(self, run_id: str) -> VerificationRunRead:
+        return await self._verify_research(
+            run_id,
+            _ExecutionNodeLocator(local_key="research"),
+            defer_task_loop_edge=False,
+        )
+
+    async def verify_research_node(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        local_key: str | None = None,
+        defer_task_loop_edge: bool = False,
+    ) -> VerificationRunRead:
+        """Verify one exact, possibly namespaced Research node.
+
+        This API is intentionally internal-facing: the caller must obtain both
+        identifiers from a persisted server-authored node binding.  Supplying a
+        local key alone is reserved for the legacy trusted-template wrapper.
+        """
+
+        return await self._verify_research(
+            run_id,
+            _ExecutionNodeLocator(local_key=local_key, node_id=node_id),
+            defer_task_loop_edge=defer_task_loop_edge,
+        )
+
+    async def _verify_research(
+        self,
+        run_id: str,
+        locator: _ExecutionNodeLocator,
+        *,
+        defer_task_loop_edge: bool,
+    ) -> VerificationRunRead:
         try:
-            return await self.get_verification(run_id)
+            existing = await self.get_verification(run_id)
         except ArtifactDeliveryNotFoundError:
             pass
+        else:
+            await self._assert_exact_replay_node(
+                run_id,
+                locator,
+                persisted_node_id=existing.node_id,
+                allowed_statuses=(
+                    {"awaiting_verification", "verified"}
+                    if defer_task_loop_edge
+                    else {"verified"}
+                ),
+            )
+            return existing
         try:
-            resolved = await self._resolve_research(run_id)
+            resolved = await self._resolve_research(run_id, locator)
         except ValidationError as error:
             raise ArtifactDeliveryProofRejectedError(
                 "Research evidence schema or digest was rejected"
             ) from error
-        existing = await self._existing_verification(resolved.result.result_id)
-        if existing is not None:
-            return existing
+        current = await self._existing_verification(resolved.result.result_id)
+        if current is not None:
+            await self._assert_exact_replay_node(
+                run_id,
+                locator,
+                persisted_node_id=current.node_id,
+                allowed_statuses=(
+                    {"awaiting_verification", "verified"}
+                    if defer_task_loop_edge
+                    else {"verified"}
+                ),
+            )
+            return current
         request = self._verification_request(resolved)
         try:
             decision, response = await self._gateway.complete_structured(
@@ -208,9 +273,40 @@ class ArtifactDeliveryRuntime:
             grader_output_digest=sha256_digest(response),
             grader_provider_id=response.provider_id,
             grader_model=response.model,
+            locator=locator,
+            defer_task_loop_edge=defer_task_loop_edge,
         )
 
     async def build_html(self, run_id: str) -> TaskWorkspaceRead:
+        return await self._build_html(
+            run_id,
+            _ExecutionNodeLocator(local_key="build_html"),
+            defer_task_loop_edge=False,
+        )
+
+    async def build_html_node(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        local_key: str | None = None,
+        defer_task_loop_edge: bool = False,
+    ) -> TaskWorkspaceRead:
+        """Build artifacts for one exact, possibly namespaced Builder node."""
+
+        return await self._build_html(
+            run_id,
+            _ExecutionNodeLocator(local_key=local_key, node_id=node_id),
+            defer_task_loop_edge=defer_task_loop_edge,
+        )
+
+    async def _build_html(
+        self,
+        run_id: str,
+        locator: _ExecutionNodeLocator,
+        *,
+        defer_task_loop_edge: bool,
+    ) -> TaskWorkspaceRead:
         async with self._database.session() as session:
             existing = await session.scalar(
                 select(TaskArtifactWorkspaceRecord).where(
@@ -218,9 +314,23 @@ class ArtifactDeliveryRuntime:
                 )
             )
             if existing is not None:
+                await self._assert_exact_replay_node_in_session(
+                    session,
+                    run_id,
+                    locator,
+                    allowed_statuses=(
+                        {"running", "awaiting_verification", "verified"}
+                        if defer_task_loop_edge
+                        else {"verified"}
+                    ),
+                )
                 return await self._workspace_read(session, existing)
             run, node, task, contract = await self._phase_context(
-                session, run_id, "build_html", required_status="ready"
+                session,
+                run_id,
+                locator.local_key,
+                node_id=locator.node_id,
+                required_status=("running" if defer_task_loop_edge else "ready"),
             )
             verification = await session.scalar(
                 select(VerificationRunRecord).where(
@@ -231,6 +341,10 @@ class ArtifactDeliveryRuntime:
             if verification is None:
                 raise ArtifactDeliveryProofRejectedError(
                     "HTML Builder requires a verified research result"
+                )
+            if verification.node_id not in node.depends_on:
+                raise ArtifactDeliveryProofRejectedError(
+                    "HTML Builder does not depend on the verified Research node"
                 )
             verdicts = tuple(
                 (
@@ -351,8 +465,23 @@ class ArtifactDeliveryRuntime:
 
         async with self._database.session() as session, session.begin():
             run, node, task, contract = await self._phase_context(
-                session, run_id, "build_html", required_status="ready", lock=True
+                session,
+                run_id,
+                locator.local_key,
+                node_id=locator.node_id,
+                required_status=("running" if defer_task_loop_edge else "ready"),
+                lock=True,
             )
+            verification = await session.scalar(
+                select(VerificationRunRecord).where(
+                    VerificationRunRecord.run_id == run_id,
+                    VerificationRunRecord.outcome == "verified",
+                )
+            )
+            if verification is None or verification.node_id not in node.depends_on:
+                raise ArtifactDeliveryProofRejectedError(
+                    "HTML Builder verified Research predecessor changed"
+                )
             policy = contract.workspace
             if policy is None:
                 raise ArtifactDeliveryProofRejectedError("Task has no Workspace Contract")
@@ -436,20 +565,69 @@ class ArtifactDeliveryRuntime:
                         created_at=now,
                     )
                 )
-            await self._mark_verified_and_unlock(session, run, node)
+            if not defer_task_loop_edge:
+                await self._mark_verified_and_unlock(session, run, node)
             await session.flush()
             return await self._workspace_read(session, workspace)
 
     async def verify_browser(self, run_id: str) -> BrowserRenderRunRead:
+        return await self._verify_browser(
+            run_id,
+            _ExecutionNodeLocator(local_key="browser_verify"),
+            defer_task_loop_edge=False,
+        )
+
+    async def verify_browser_node(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        local_key: str | None = None,
+        defer_task_loop_edge: bool = False,
+    ) -> BrowserRenderRunRead:
+        """Verify artifacts for one exact, possibly namespaced Browser node."""
+
+        return await self._verify_browser(
+            run_id,
+            _ExecutionNodeLocator(local_key=local_key, node_id=node_id),
+            defer_task_loop_edge=defer_task_loop_edge,
+        )
+
+    async def _verify_browser(
+        self,
+        run_id: str,
+        locator: _ExecutionNodeLocator,
+        *,
+        defer_task_loop_edge: bool,
+    ) -> BrowserRenderRunRead:
         async with self._database.session() as session:
             existing = await session.scalar(
                 select(BrowserRenderRunRecord).where(BrowserRenderRunRecord.run_id == run_id)
             )
             if existing is not None:
+                if locator.node_id is not None and existing.node_id != locator.node_id:
+                    raise ArtifactDeliveryProofRejectedError(
+                        "Browser evidence belongs to another execution node"
+                    )
+                await self._assert_exact_replay_node_in_session(
+                    session,
+                    run_id,
+                    locator,
+                    allowed_statuses=(
+                        {"running", "awaiting_verification", "verified"}
+                        if defer_task_loop_edge
+                        else {"verified"}
+                    ),
+                )
                 return self._browser_read(existing)
-            _, _, _, _ = await self._phase_context(
-                session, run_id, "browser_verify", required_status="ready"
+            _, node, _, _ = await self._phase_context(
+                session,
+                run_id,
+                locator.local_key,
+                node_id=locator.node_id,
+                required_status=("running" if defer_task_loop_edge else "ready"),
             )
+            await self._assert_verified_predecessors(session, run_id, node)
             workspace, artifact, revision = await self._active_artifact(session, run_id)
             entry_path = self._blob_path(workspace.workspace_id, revision.blob_name)
             content = entry_path.read_bytes()
@@ -463,8 +641,14 @@ class ArtifactDeliveryRuntime:
 
         async with self._database.session() as session, session.begin():
             run, node, _, contract = await self._phase_context(
-                session, run_id, "browser_verify", required_status="ready", lock=True
+                session,
+                run_id,
+                locator.local_key,
+                node_id=locator.node_id,
+                required_status=("running" if defer_task_loop_edge else "ready"),
+                lock=True,
             )
+            await self._assert_verified_predecessors(session, run_id, node)
             workspace, _, revision = await self._active_artifact(session, run_id)
             if self._blob_path(workspace.workspace_id, revision.blob_name) != entry_path:
                 raise ArtifactDeliveryConflictError("Artifact revision changed during render")
@@ -492,10 +676,11 @@ class ArtifactDeliveryRuntime:
                 completed_at=now,
             )
             session.add(record)
-            if evidence.passed and evidence.external_request_count == 0:
-                await self._mark_verified_and_unlock(session, run, node)
-            else:
-                await self._mark_failed(session, run, node)
+            if not defer_task_loop_edge:
+                if evidence.passed and evidence.external_request_count == 0:
+                    await self._mark_verified_and_unlock(session, run, node)
+                else:
+                    await self._mark_failed(session, run, node)
             await session.flush()
             return self._browser_read(record)
 
@@ -670,10 +855,18 @@ class ArtifactDeliveryRuntime:
                 raise ArtifactDeliveryProofRejectedError("Delivery Manifest digest drifted")
             return manifest
 
-    async def _resolve_research(self, run_id: str) -> _ResolvedResearch:
+    async def _resolve_research(
+        self,
+        run_id: str,
+        locator: _ExecutionNodeLocator,
+    ) -> _ResolvedResearch:
         async with self._database.session() as session:
             run, node, task, contract = await self._phase_context(
-                session, run_id, "research", required_status="awaiting_verification"
+                session,
+                run_id,
+                locator.local_key,
+                node_id=locator.node_id,
+                required_status="awaiting_verification",
             )
             invocation = await session.scalar(
                 select(AgentInvocationRecord).where(
@@ -857,6 +1050,8 @@ class ArtifactDeliveryRuntime:
         grader_output_digest: str,
         grader_provider_id: str,
         grader_model: str,
+        locator: _ExecutionNodeLocator,
+        defer_task_loop_edge: bool,
     ) -> VerificationRunRead:
         identity = {
             "result_id": resolved.result.result_id,
@@ -873,7 +1068,11 @@ class ArtifactDeliveryRuntime:
         }
         snapshot_digest = sha256_digest(snapshot_manifest)
         async with self._database.session() as session, session.begin():
-            current = await self._resolve_research_locked(session, resolved.run.run_id)
+            current = await self._resolve_research_locked(
+                session,
+                resolved.run.run_id,
+                locator,
+            )
             if current.input_digest != resolved.input_digest:
                 raise ArtifactDeliveryConflictError("Research evidence changed during verification")
             now = utc_now()
@@ -925,7 +1124,12 @@ class ArtifactDeliveryRuntime:
                 current.research.status = "verified"
                 current.research.revision += 1
                 current.research.updated_at = now
-                await self._mark_verified_and_unlock(session, current.run, current.node)
+                if not defer_task_loop_edge:
+                    await self._mark_verified_and_unlock(
+                        session,
+                        current.run,
+                        current.node,
+                    )
             else:
                 current.invocation.verification_status = "rejected"
                 current.invocation.revision += 1
@@ -956,12 +1160,16 @@ class ArtifactDeliveryRuntime:
             )
 
     async def _resolve_research_locked(
-        self, session: AsyncSession, run_id: str
+        self,
+        session: AsyncSession,
+        run_id: str,
+        locator: _ExecutionNodeLocator,
     ) -> _ResolvedResearch:
         run, node, task, contract = await self._phase_context(
             session,
             run_id,
-            "research",
+            locator.local_key,
+            node_id=locator.node_id,
             required_status="awaiting_verification",
             lock=True,
         )
@@ -1033,16 +1241,24 @@ class ArtifactDeliveryRuntime:
         self,
         session: AsyncSession,
         run_id: str,
-        local_key: str,
+        local_key: str | None,
         *,
+        node_id: str | None = None,
         required_status: str,
         lock: bool = False,
     ) -> tuple[TaskExecutionRunRecord, TaskExecutionNodeRecord, TaskRecord, TaskContract]:
         run_query = select(TaskExecutionRunRecord).where(TaskExecutionRunRecord.run_id == run_id)
+        if local_key is None and node_id is None:
+            raise ArtifactDeliveryProofRejectedError(
+                "Execution phase requires a local key or exact node id"
+            )
         node_query = select(TaskExecutionNodeRecord).where(
             TaskExecutionNodeRecord.run_id == run_id,
-            TaskExecutionNodeRecord.local_key == local_key,
         )
+        if local_key is not None:
+            node_query = node_query.where(TaskExecutionNodeRecord.local_key == local_key)
+        if node_id is not None:
+            node_query = node_query.where(TaskExecutionNodeRecord.node_id == node_id)
         if lock:
             run_query = run_query.with_for_update()
             node_query = node_query.with_for_update()
@@ -1052,7 +1268,7 @@ class ArtifactDeliveryRuntime:
             raise ArtifactDeliveryNotFoundError("Execution phase does not exist")
         if node.status != required_status:
             raise ArtifactDeliveryConflictError(
-                f"{local_key} requires status {required_status}, got {node.status}"
+                f"{local_key or node_id} requires status {required_status}, got {node.status}"
             )
         task = await session.get(TaskRecord, run.task_id)
         plan = await session.get(TaskPlanGenerationRecord, (run.task_id, run.plan_generation))
@@ -1070,6 +1286,78 @@ class ArtifactDeliveryRuntime:
         ):
             raise ArtifactDeliveryProofRejectedError("Task Contract or Plan digest drifted")
         return run, node, task, contract
+
+    async def _assert_exact_replay_node(
+        self,
+        run_id: str,
+        locator: _ExecutionNodeLocator,
+        *,
+        persisted_node_id: str,
+        allowed_statuses: set[str] | None = None,
+    ) -> None:
+        if locator.node_id is None:
+            return
+        if persisted_node_id != locator.node_id:
+            raise ArtifactDeliveryProofRejectedError(
+                "Persisted proof belongs to another execution node"
+            )
+        async with self._database.session() as session:
+            await self._assert_exact_replay_node_in_session(
+                session,
+                run_id,
+                locator,
+                allowed_statuses=allowed_statuses,
+            )
+
+    @staticmethod
+    async def _assert_exact_replay_node_in_session(
+        session: AsyncSession,
+        run_id: str,
+        locator: _ExecutionNodeLocator,
+        *,
+        allowed_statuses: set[str] | None = None,
+    ) -> None:
+        if locator.node_id is None:
+            return
+        query = select(TaskExecutionNodeRecord).where(
+            TaskExecutionNodeRecord.run_id == run_id,
+            TaskExecutionNodeRecord.node_id == locator.node_id,
+        )
+        if locator.local_key is not None:
+            query = query.where(TaskExecutionNodeRecord.local_key == locator.local_key)
+        node = await session.scalar(query)
+        expected_statuses = allowed_statuses or {ExecutionNodeStatus.VERIFIED.value}
+        if node is None or node.status not in expected_statuses:
+            raise ArtifactDeliveryProofRejectedError(
+                "Namespaced execution node replay proof is incomplete"
+            )
+
+    @staticmethod
+    async def _assert_verified_predecessors(
+        session: AsyncSession,
+        run_id: str,
+        node: TaskExecutionNodeRecord,
+    ) -> None:
+        if not node.depends_on:
+            raise ArtifactDeliveryProofRejectedError(
+                "Artifact execution node has no verified predecessor"
+            )
+        predecessors = tuple(
+            (
+                await session.scalars(
+                    select(TaskExecutionNodeRecord).where(
+                        TaskExecutionNodeRecord.run_id == run_id,
+                        TaskExecutionNodeRecord.node_id.in_(node.depends_on),
+                    )
+                )
+            ).all()
+        )
+        if len(predecessors) != len(set(node.depends_on)) or any(
+            item.status != ExecutionNodeStatus.VERIFIED.value for item in predecessors
+        ):
+            raise ArtifactDeliveryProofRejectedError(
+                "Artifact execution node predecessor proof is incomplete"
+            )
 
     async def _mark_verified_and_unlock(
         self,

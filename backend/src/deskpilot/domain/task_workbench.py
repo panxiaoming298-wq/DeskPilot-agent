@@ -25,6 +25,7 @@ from deskpilot.domain.mcp import McpToolCallRead
 from deskpilot.domain.research import ResearchSessionRead
 from deskpilot.domain.schemas import TaskRead
 from deskpilot.domain.task_loop import TaskLoopWorkbenchRead
+from deskpilot.domain.task_loop_execution import TaskLoopExecutionWorkbenchRead
 from deskpilot.domain.task_plans import (
     CONVERSATION_ID_PATTERN,
     MESSAGE_ID_PATTERN,
@@ -105,6 +106,7 @@ class WorkbenchStage(StrEnum):
 class WorkbenchAction(StrEnum):
     INTERPRET_TURN = "interpret_turn"
     PLAN_TASK_LOOP = "plan_task_loop"
+    ADVANCE_TASK_LOOP = "advance_task_loop"
     ACTIVATE_RESEARCH_PLAN = "activate_research_plan"
     START_EXECUTION = "start_execution"
     RUN_RESEARCH = "run_research"
@@ -313,7 +315,7 @@ class TaskWorkbenchRead(BaseModel):
     conversation: tuple[ConversationMessageRead, ...]
     route: TurnRouteRead | None
     turn_planning: TurnPlanningWorkbenchRead | None
-    task_loop: TaskLoopWorkbenchRead | None
+    task_loop: TaskLoopWorkbenchRead | TaskLoopExecutionWorkbenchRead | None
     planning: PlanningStateRead | None
     contract: TaskContractVersionRead | None
     plans: ExecutablePlanPage

@@ -10,6 +10,9 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import select
 
+from deskpilot.application.artifact_delivery_runtime import (
+    ArtifactDeliveryProofRejectedError,
+)
 from deskpilot.application.browser_verifier import (
     BrowserEvidence,
     IsolatedChromiumVerifier,
@@ -23,10 +26,13 @@ from deskpilot.core.config import Settings
 from deskpilot.domain.artifact_runtime import PdfRenderVerificationRead, digested
 from deskpilot.domain.model_routing import ModelGatewayPolicy, ModelProviderPricing
 from deskpilot.domain.research import PageSnapshot, SearchHit, SearchProviderResult, SearchRequest
+from deskpilot.domain.task_plans import DraftPlan, PlanProducer
 from deskpilot.infrastructure.models import (
     ArtifactPatchReceiptRecord,
     ClaimVerdictRecord,
     ResearchCitationRecord,
+    TaskExecutionNodeRecord,
+    TaskExecutionRunRecord,
     TaskRecord,
     VerificationEvidenceSnapshotRecord,
 )
@@ -201,6 +207,32 @@ def _node_statuses(client: TestClient, run_id: str) -> dict[str, str]:
     return {item["local_key"]: item["status"] for item in body["nodes"]}
 
 
+def _namespaced_research_draft(task_id: str) -> DraftPlan:
+    source = research_to_html_draft(task_id)
+    key_map = {
+        "research": "s01_research",
+        "build_html": "s01_build_html",
+        "browser_verify": "s01_browser_verify",
+    }
+    return DraftPlan(
+        task_id=task_id,
+        contract_version=source.contract_version,
+        producer=PlanProducer(
+            kind="model_planner",
+            producer_ref="deskpilot.offer-composer.v1",
+        ),
+        nodes=tuple(
+            node.model_copy(
+                update={
+                    "local_key": key_map.get(node.local_key, node.local_key),
+                    "depends_on": tuple(key_map.get(item, item) for item in node.depends_on),
+                }
+            )
+            for node in source.nodes
+        ),
+    )
+
+
 def test_only_verified_edges_unlock_artifact_browser_and_delivery(
     delivery_client: TestClient,
 ) -> None:
@@ -284,6 +316,195 @@ def test_only_verified_edges_unlock_artifact_browser_and_delivery(
     assert verdict_count >= 1
     assert snapshot_count == 1
     assert receipt_count == 3
+
+
+def test_namespaced_research_artifact_and_browser_nodes_use_exact_internal_api(
+    delivery_client: TestClient,
+) -> None:
+    app = cast(FastAPI, delivery_client.app)
+    assert delivery_client.portal is not None
+    task_id = f"tsk_{'c' * 32}"
+
+    async def insert_and_activate() -> None:
+        async with app.state.database.session() as session, session.begin():
+            session.add(
+                TaskRecord(
+                    task_id=task_id,
+                    goal="namespaced research goal",
+                    status="submitted",
+                    privacy_mode="balanced",
+                    constraints=[],
+                )
+            )
+        contract = research_to_html_contract(task_id, app.state.capability_catalog)
+        await app.state.plan_compilation_service.activate(
+            contract,
+            _namespaced_research_draft(task_id),
+        )
+
+    delivery_client.portal.call(insert_and_activate)
+    started = delivery_client.post(f"/api/v1/tasks/{task_id}/execution-runs")
+    assert started.status_code == 201, started.text
+    run_id = started.json()["run_id"]
+    researched = delivery_client.post(f"/api/v1/execution-runs/{run_id}/research:run")
+    assert researched.status_code == 200, researched.text
+
+    async def exact_nodes() -> dict[str, str]:
+        async with app.state.database.session() as session:
+            nodes = tuple(
+                (
+                    await session.scalars(
+                        select(TaskExecutionNodeRecord).where(
+                            TaskExecutionNodeRecord.run_id == run_id
+                        )
+                    )
+                ).all()
+            )
+            return {item.local_key: item.node_id for item in nodes}
+
+    nodes = delivery_client.portal.call(exact_nodes)
+
+    async def run_exact_pipeline() -> tuple[str, str, str]:
+        verified = await app.state.artifact_delivery_runtime.verify_research_node(
+            run_id,
+            node_id=nodes["s01_research"],
+            local_key="s01_research",
+        )
+        workspace = await app.state.artifact_delivery_runtime.build_html_node(
+            run_id,
+            node_id=nodes["s01_build_html"],
+            local_key="s01_build_html",
+        )
+        browser = await app.state.artifact_delivery_runtime.verify_browser_node(
+            run_id,
+            node_id=nodes["s01_browser_verify"],
+            local_key="s01_browser_verify",
+        )
+        return verified.node_id, workspace.workspace_id, browser.node_id
+
+    research_node_id, workspace_id, browser_node_id = delivery_client.portal.call(
+        run_exact_pipeline
+    )
+    assert research_node_id == nodes["s01_research"]
+    assert workspace_id
+    assert browser_node_id == nodes["s01_browser_verify"]
+    statuses = _node_statuses(delivery_client, run_id)
+    assert statuses["s01_research"] == "verified"
+    assert statuses["s01_build_html"] == "verified"
+    assert statuses["s01_browser_verify"] == "verified"
+    assert statuses["final_acceptance"] == "ready"
+
+    async def replay_with_wrong_node() -> None:
+        await app.state.artifact_delivery_runtime.verify_research_node(
+            run_id,
+            node_id=nodes["s01_build_html"],
+            local_key="s01_research",
+        )
+
+    with pytest.raises(ArtifactDeliveryProofRejectedError, match="another execution node"):
+        delivery_client.portal.call(replay_with_wrong_node)
+
+
+def test_task_loop_artifact_api_persists_evidence_without_unlocking_edges(
+    delivery_client: TestClient,
+) -> None:
+    app = cast(FastAPI, delivery_client.app)
+    assert delivery_client.portal is not None
+    task_id = f"tsk_{'d' * 32}"
+
+    async def insert_and_activate() -> None:
+        async with app.state.database.session() as session, session.begin():
+            session.add(
+                TaskRecord(
+                    task_id=task_id,
+                    goal="deferred edge research goal",
+                    status="submitted",
+                    privacy_mode="balanced",
+                    constraints=[],
+                )
+            )
+        contract = research_to_html_contract(task_id, app.state.capability_catalog)
+        await app.state.plan_compilation_service.activate(
+            contract,
+            _namespaced_research_draft(task_id),
+        )
+
+    delivery_client.portal.call(insert_and_activate)
+    started = delivery_client.post(f"/api/v1/tasks/{task_id}/execution-runs")
+    assert started.status_code == 201, started.text
+    run_id = started.json()["run_id"]
+    researched = delivery_client.post(f"/api/v1/execution-runs/{run_id}/research:run")
+    assert researched.status_code == 200, researched.text
+
+    async def exact_nodes() -> dict[str, str]:
+        async with app.state.database.session() as session:
+            nodes = tuple(
+                (
+                    await session.scalars(
+                        select(TaskExecutionNodeRecord).where(
+                            TaskExecutionNodeRecord.run_id == run_id
+                        )
+                    )
+                ).all()
+            )
+            return {item.local_key: item.node_id for item in nodes}
+
+    nodes = delivery_client.portal.call(exact_nodes)
+
+    async def run_deferred_pipeline() -> tuple[str, str]:
+        await app.state.artifact_delivery_runtime.verify_research_node(
+            run_id,
+            node_id=nodes["s01_research"],
+            defer_task_loop_edge=True,
+        )
+        async with app.state.database.session() as session, session.begin():
+            run = await session.get(TaskExecutionRunRecord, run_id)
+            research = await session.get(
+                TaskExecutionNodeRecord,
+                nodes["s01_research"],
+            )
+            builder = await session.get(
+                TaskExecutionNodeRecord,
+                nodes["s01_build_html"],
+            )
+            assert run is not None and research is not None and builder is not None
+            assert research.status == "awaiting_verification"
+            assert builder.status == "pending"
+            research.status = "verified"
+            builder.status = "running"
+            run.status = "active"
+        workspace = await app.state.artifact_delivery_runtime.build_html_node(
+            run_id,
+            node_id=nodes["s01_build_html"],
+            defer_task_loop_edge=True,
+        )
+        async with app.state.database.session() as session, session.begin():
+            builder = await session.get(
+                TaskExecutionNodeRecord,
+                nodes["s01_build_html"],
+            )
+            browser = await session.get(
+                TaskExecutionNodeRecord,
+                nodes["s01_browser_verify"],
+            )
+            assert builder is not None and browser is not None
+            assert builder.status == "running"
+            assert browser.status == "pending"
+            builder.status = "verified"
+            browser.status = "running"
+        rendered = await app.state.artifact_delivery_runtime.verify_browser_node(
+            run_id,
+            node_id=nodes["s01_browser_verify"],
+            defer_task_loop_edge=True,
+        )
+        return workspace.workspace_id, rendered.status
+
+    workspace_id, browser_status = delivery_client.portal.call(run_deferred_pipeline)
+    assert workspace_id
+    assert browser_status == "passed"
+    statuses = _node_statuses(delivery_client, run_id)
+    assert statuses["s01_browser_verify"] == "running"
+    assert statuses["final_acceptance"] == "pending"
 
 
 def test_tampered_citation_cannot_unlock_verified_edge(

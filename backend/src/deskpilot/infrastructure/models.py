@@ -986,6 +986,384 @@ class ModelPlannerStepBindingRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class TaskLoopExecutionRecord(Base):
+    """Mutable pointer for one atomically activated model-planner Task Loop."""
+
+    __tablename__ = "task_loop_executions"
+    __table_args__ = (
+        CheckConstraint(
+            "plan_generation = 1 AND revision >= 1 AND event_count >= 1 "
+            "AND node_binding_count >= 1",
+            name="ck_task_loop_execution_versions",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'paused', 'awaiting_user', 'repairing', "
+            "'failed', 'succeeded', 'cancelled')",
+            name="ck_task_loop_execution_status",
+        ),
+        UniqueConstraint("loop_id", name="uq_task_loop_execution_loop"),
+        UniqueConstraint("draft_id", name="uq_task_loop_execution_draft"),
+        UniqueConstraint("run_id", name="uq_task_loop_execution_run"),
+        UniqueConstraint(
+            "execution_digest", name="uq_task_loop_execution_digest"
+        ),
+        Index(
+            "ix_task_loop_executions_recovery",
+            "status",
+            "updated_at",
+        ),
+        Index("ix_task_loop_executions_task", "task_id", "created_at"),
+    )
+
+    execution_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    loop_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loops.loop_id", ondelete="RESTRICT")
+    )
+    draft_id: Mapped[str] = mapped_column(
+        ForeignKey("model_planner_drafts.draft_id", ondelete="RESTRICT")
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE")
+    )
+    plan_id: Mapped[str] = mapped_column(String(68))
+    plan_generation: Mapped[int] = mapped_column(Integer)
+    plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="RESTRICT")
+    )
+    status: Mapped[str] = mapped_column(String(24))
+    revision: Mapped[int] = mapped_column(Integer)
+    event_count: Mapped[int] = mapped_column(Integer)
+    latest_event_id: Mapped[str] = mapped_column(String(68))
+    latest_event_digest: Mapped[str] = mapped_column(String(64))
+    node_binding_count: Mapped[int] = mapped_column(Integer)
+    binding_set_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    execution_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TaskLoopExecutionEventRecord(Base):
+    """Immutable digest-chained task-loop execution transition."""
+
+    __tablename__ = "task_loop_execution_events"
+    __table_args__ = (
+        CheckConstraint("sequence >= 1", name="ck_task_loop_execution_event_sequence"),
+        CheckConstraint(
+            "kind IN ('activated', 'paused', 'resumed', 'awaiting_user', "
+            "'repair_started', 'failed', 'succeeded', 'cancelled')",
+            name="ck_task_loop_execution_event_kind",
+        ),
+        CheckConstraint(
+            "(kind = 'activated' AND sequence = 1 AND previous_event_digest IS NULL) "
+            "OR (kind != 'activated' AND sequence > 1 AND "
+            "previous_event_digest IS NOT NULL)",
+            name="ck_task_loop_execution_event_lifecycle",
+        ),
+        UniqueConstraint(
+            "execution_id", "sequence", name="uq_task_loop_execution_event_sequence"
+        ),
+        UniqueConstraint(
+            "event_digest", name="uq_task_loop_execution_event_digest"
+        ),
+        UniqueConstraint(
+            "execution_id",
+            "event_digest",
+            name="uq_task_loop_execution_event_chain_target",
+        ),
+        ForeignKeyConstraint(
+            ["execution_id", "previous_event_digest"],
+            [
+                "task_loop_execution_events.execution_id",
+                "task_loop_execution_events.event_digest",
+            ],
+            name="fk_task_loop_execution_event_previous",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_task_loop_execution_events_chain",
+            "execution_id",
+            "sequence",
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE")
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    previous_event_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    kind: Mapped[str] = mapped_column(String(24))
+    plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(String(68))
+    binding_set_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    event_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ModelPlannerNodeBindingRecord(Base):
+    """Exact source-step and effective-authority proof for a runnable node."""
+
+    __tablename__ = "model_planner_node_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "step_ordinal BETWEEN 1 AND 8", name="ck_model_planner_node_step"
+        ),
+        UniqueConstraint(
+            "execution_id",
+            "composite_node_id",
+            name="uq_model_planner_node_composite",
+        ),
+        UniqueConstraint(
+            "execution_id",
+            "step_binding_id",
+            "source_node_id",
+            name="uq_model_planner_node_source",
+        ),
+        UniqueConstraint(
+            "binding_digest", name="uq_model_planner_node_binding_digest"
+        ),
+        Index(
+            "ix_model_planner_node_bindings_step",
+            "execution_id",
+            "step_ordinal",
+        ),
+    )
+
+    node_binding_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE")
+    )
+    user_message_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="RESTRICT")
+    )
+    draft_id: Mapped[str] = mapped_column(
+        ForeignKey("model_planner_drafts.draft_id", ondelete="RESTRICT")
+    )
+    step_binding_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "model_planner_step_bindings.step_binding_id",
+            ondelete="RESTRICT",
+        )
+    )
+    step_binding_digest: Mapped[str] = mapped_column(String(64))
+    step_ordinal: Mapped[int] = mapped_column(Integer)
+    offer_id: Mapped[str] = mapped_column(
+        ForeignKey("turn_planning_offers.offer_id", ondelete="RESTRICT")
+    )
+    offer_key: Mapped[str] = mapped_column(String(68))
+    offer_digest: Mapped[str] = mapped_column(String(64))
+    recipe_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    recipe_digest: Mapped[str] = mapped_column(String(64))
+    policy_snapshot_digest: Mapped[str] = mapped_column(String(64))
+    source_contract_digest: Mapped[str] = mapped_column(String(64))
+    source_plan_id: Mapped[str] = mapped_column(String(68))
+    source_plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    source_node_id: Mapped[str] = mapped_column(String(68))
+    source_node_spec_digest: Mapped[str] = mapped_column(String(64))
+    composite_contract_digest: Mapped[str] = mapped_column(String(64))
+    composite_plan_id: Mapped[str] = mapped_column(String(68))
+    composite_plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    composite_node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="RESTRICT")
+    )
+    composite_node_spec_digest: Mapped[str] = mapped_column(String(64))
+    mapping_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    mapping_digest: Mapped[str] = mapped_column(String(64))
+    parameter_bindings_manifest: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    parameter_bindings_digest: Mapped[str] = mapped_column(String(64))
+    bound_input_manifest: Mapped[dict[str, str]] = mapped_column(JSON)
+    bound_input_digest: Mapped[str] = mapped_column(String(64))
+    effective_authority_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    effective_authority_digest: Mapped[str] = mapped_column(String(64))
+    runtime_eligibility_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    runtime_eligibility_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    binding_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TaskLoopNodeAttemptRecord(Base):
+    """Fenced node-attempt state for the generic stage-112B reducer."""
+
+    __tablename__ = "task_loop_node_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt >= 1 AND revision >= 1 AND claim_fencing_token >= 0",
+            name="ck_task_loop_node_attempt_versions",
+        ),
+        CheckConstraint(
+            "status IN ('prepared', 'claimed', 'running', "
+            "'awaiting_verification', 'verified', 'failed', "
+            "'outcome_unknown', 'cancelled')",
+            name="ck_task_loop_node_attempt_status",
+        ),
+        CheckConstraint(
+            "((candidate_manifest IS NULL AND candidate_digest IS NULL AND "
+            "candidate_recorded_at IS NULL) OR "
+            "(candidate_manifest IS NOT NULL AND candidate_digest IS NOT NULL AND "
+            "candidate_recorded_at IS NOT NULL)) AND "
+            "((verification_manifest IS NULL AND verification_digest IS NULL AND "
+            "verified_at IS NULL) OR "
+            "(verification_manifest IS NOT NULL AND verification_digest IS NOT NULL AND "
+            "verified_at IS NOT NULL AND candidate_manifest IS NOT NULL))",
+            name="ck_task_loop_node_attempt_evidence",
+        ),
+        UniqueConstraint(
+            "execution_id", "node_id", "attempt", name="uq_task_loop_node_attempt"
+        ),
+        UniqueConstraint("attempt_digest", name="uq_task_loop_node_attempt_digest"),
+        Index(
+            "ix_task_loop_node_attempts_claim",
+            "status",
+            "claim_expires_at",
+        ),
+        Index(
+            "ix_task_loop_node_attempts_node",
+            "execution_id",
+            "node_id",
+            "attempt",
+        ),
+    )
+
+    attempt_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
+    )
+    node_binding_id: Mapped[str] = mapped_column(
+        ForeignKey("model_planner_node_bindings.node_binding_id", ondelete="RESTRICT")
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="RESTRICT")
+    )
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="RESTRICT")
+    )
+    attempt: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    revision: Mapped[int] = mapped_column(Integer)
+    claim_owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    claim_fencing_token: Mapped[int] = mapped_column(Integer)
+    claim_acquired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    input_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    input_digest: Mapped[str] = mapped_column(String(64))
+    context_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    context_digest: Mapped[str] = mapped_column(String(64))
+    candidate_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    candidate_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    candidate_recorded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    verification_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    verification_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    receipt_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    receipt_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    attempt_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TaskLoopVerifiedResultRecord(Base):
+    """Immutable verified ResultRef accepted by downstream task-loop nodes."""
+
+    __tablename__ = "task_loop_verified_results"
+    __table_args__ = (
+        CheckConstraint(
+            "producer_kind IN ('capability_executor', 'agent_bridge')",
+            name="ck_task_loop_verified_result_producer",
+        ),
+        CheckConstraint(
+            "(producer_kind = 'capability_executor' AND "
+            "agent_binding_manifest IS NULL AND agent_binding_digest IS NULL AND "
+            "agent_result_proof_digest IS NULL AND "
+            "executor_manifest_digest IS NOT NULL AND candidate_digest IS NOT NULL) "
+            "OR (producer_kind = 'agent_bridge' AND "
+            "agent_binding_manifest IS NOT NULL AND agent_binding_digest IS NOT NULL AND "
+            "agent_result_proof_digest IS NOT NULL AND "
+            "executor_manifest_digest IS NULL AND candidate_digest IS NULL)",
+            name="ck_task_loop_verified_result_producer_evidence",
+        ),
+        UniqueConstraint("attempt_id", name="uq_task_loop_verified_result_attempt"),
+        UniqueConstraint(
+            "result_ref_digest", name="uq_task_loop_verified_result_digest"
+        ),
+        Index(
+            "ix_task_loop_verified_results_node",
+            "execution_id",
+            "node_id",
+            "created_at",
+        ),
+    )
+
+    result_ref_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loop_node_attempts.attempt_id", ondelete="RESTRICT")
+    )
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
+    )
+    node_binding_id: Mapped[str] = mapped_column(
+        ForeignKey("model_planner_node_bindings.node_binding_id", ondelete="RESTRICT")
+    )
+    node_binding_digest: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="RESTRICT")
+    )
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="RESTRICT")
+    )
+    producer_kind: Mapped[str] = mapped_column(String(24))
+    capability_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    capability_digest: Mapped[str] = mapped_column(String(64))
+    agent_binding_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    agent_binding_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    executor_manifest_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    agent_result_proof_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    input_binding_digest: Mapped[str] = mapped_column(String(64))
+    context_digest: Mapped[str] = mapped_column(String(64))
+    candidate_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_kind: Mapped[str] = mapped_column(String(64))
+    output_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    output_schema_digest: Mapped[str] = mapped_column(String(64))
+    output_digest: Mapped[str] = mapped_column(String(64))
+    verification_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    verification_digest: Mapped[str] = mapped_column(String(64))
+    result_ref_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result_ref_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class TurnRouteRecord(Base):
     __tablename__ = "turn_routes"
     __table_args__ = (

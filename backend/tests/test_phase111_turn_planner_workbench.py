@@ -404,6 +404,23 @@ def _assert_minimized_task_loop(task_loop: dict[str, object]) -> None:
     assert task_loop["schema_version"] == "deskpilot.task-loop-workbench.v1"
 
 
+def _assert_minimized_task_loop_execution(task_loop: dict[str, object]) -> None:
+    """Prove execution progress exposes summaries, never authority or inputs."""
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            leaked = PRIVATE_TASK_LOOP_KEYS.intersection(value)
+            assert not leaked, f"private Task Loop keys leaked: {sorted(leaked)}"
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(task_loop)
+    assert task_loop["schema_version"] == ("deskpilot.task-loop-execution-workbench.v1")
+
+
 def test_all_legacy_routes_bypass_model_and_keep_v1_recipe(
     tmp_path: Path,
 ) -> None:
@@ -635,11 +652,19 @@ def test_multi_step_deferred_becomes_sanitized_planned_task_loop_without_model_r
         assert route["turn_plan_binding_id"] is None
         assert route["turn_planning_provenance_digest"] is None
 
-        stable = client.post(f"/api/v1/tasks/{task_id}/workbench:advance")
-        assert stable.status_code == 200, stable.text
-        stable_body = cast(dict[str, object], stable.json())
-        assert stable_body["projection_digest"] == body["projection_digest"]
-        assert stable_body["task_loop"] == task_loop
+        activated = client.post(f"/api/v1/tasks/{task_id}/workbench:advance")
+        assert activated.status_code == 200, activated.text
+        activated_body = cast(dict[str, object], activated.json())
+        active_loop = cast(dict[str, object], activated_body["task_loop"])
+        _assert_minimized_task_loop_execution(active_loop)
+        assert activated_body["projection_digest"] != body["projection_digest"]
+        assert activated_body["stage"] == "executing"
+        assert active_loop["execution_status"] == "active"
+        assert active_loop["execution_event_count"] == 1
+        assert active_loop["node_count"] == 4
+        assert active_loop["verified_result_count"] == 0
+        assert len(cast(dict[str, list[object]], activated_body["plans"])["plans"]) == 1
+        assert len(cast(dict[str, list[object]], activated_body["executions"])["runs"]) == 1
 
     assert provider.planner_calls == 1
     assert provider.total_calls == 1
@@ -675,6 +700,59 @@ def test_restart_recovers_deferred_task_loop_without_replaying_planner(
     # Startup may resume unrelated legacy TaskProcessor model work for the
     # persisted Task.  The stage-112 guarantee is narrower and explicit: the
     # terminal Turn Planner reservation is never dispatched again.
+
+
+def test_stage112_task_loop_executes_two_capabilities_and_reaches_delivery(
+    tmp_path: Path,
+) -> None:
+    provider = PlannerScriptProvider("multi")
+    with _open_client(tmp_path, provider, name="stage-112-capability-loop") as (
+        client,
+        _workspace,
+    ):
+        enabled = client.post(
+            "/api/v1/mcp/servers/deskpilot.readonly-text:enable"
+        )
+        assert enabled.status_code == 200, enabled.text
+        created = _create_unmatched_turn(client)
+        task_id = _task_id(created)
+
+        interpreted = client.post(
+            f"/api/v1/tasks/{task_id}/workbench:interpret-turn"
+        )
+        assert interpreted.status_code == 200, interpreted.text
+        planned = client.post(f"/api/v1/tasks/{task_id}/workbench:advance")
+        assert planned.status_code == 200, planned.text
+        _assert_minimized_task_loop(
+            cast(dict[str, object], planned.json()["task_loop"])
+        )
+        activated = client.post(f"/api/v1/tasks/{task_id}/workbench:advance")
+        assert activated.status_code == 200, activated.text
+        active_loop = cast(dict[str, object], activated.json()["task_loop"])
+        _assert_minimized_task_loop_execution(active_loop)
+        assert active_loop["execution_status"] == "active"
+
+        latest = cast(dict[str, object], activated.json())
+        for _ in range(4):
+            response = client.post(f"/api/v1/tasks/{task_id}/workbench:advance")
+            assert response.status_code == 200, response.text
+            latest = cast(dict[str, object], response.json())
+
+        completed = cast(dict[str, object], latest["task_loop"])
+        _assert_minimized_task_loop_execution(completed)
+        assert latest["stage"] == "delivered"
+        assert completed["execution_status"] == "succeeded"
+        assert completed["execution_event_count"] == 2
+        assert completed["verified_count"] == completed["node_count"] == 4
+        assert completed["verified_result_count"] == 2
+        assert completed["recoverable"] is False
+        audit = client.get("/api/v1/mcp/audit")
+        assert audit.status_code == 200, audit.text
+        audit_events = cast(dict[str, list[dict[str, object]]], audit.json())["events"]
+        assert [item["action"] for item in audit_events] == ["enabled", "tool_called"]
+
+    assert provider.planner_calls == 1
+    assert provider.total_calls == 1
 
 
 @pytest.mark.parametrize(

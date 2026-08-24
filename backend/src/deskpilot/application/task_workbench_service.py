@@ -67,6 +67,14 @@ from deskpilot.application.plan_compiler import (
     workspace_snapshot_check_draft,
 )
 from deskpilot.application.research_runtime import ResearchRuntime, ResearchRuntimeError
+from deskpilot.application.task_loop_activation_runtime import (
+    TaskLoopActivationError,
+    TaskLoopActivationRuntime,
+)
+from deskpilot.application.task_loop_execution_coordinator import (
+    TaskLoopExecutionCoordinator,
+    TaskLoopExecutionCoordinatorError,
+)
 from deskpilot.application.task_service import TaskNotFoundError, TaskService
 from deskpilot.application.turn_planner_runtime import (
     BoundTurnRoute,
@@ -115,6 +123,7 @@ from deskpilot.domain.research import (
 )
 from deskpilot.domain.schemas import TaskCreate
 from deskpilot.domain.task_loop import TaskLoop, TaskLoopWorkbenchRead
+from deskpilot.domain.task_loop_execution import TaskLoopExecutionRead
 from deskpilot.domain.task_plans import (
     ExecutablePlanPage,
     PlanningStateRead,
@@ -189,6 +198,8 @@ class TaskWorkbenchService:
         router: TurnRouter,
         turn_planner: TurnPlannerRuntime | None = None,
         task_loop: MultiStepPlanRuntime | None = None,
+        task_loop_activation: TaskLoopActivationRuntime | None = None,
+        task_loop_execution: TaskLoopExecutionCoordinator | None = None,
     ) -> None:
         self._database = database
         self._tasks = tasks
@@ -204,6 +215,8 @@ class TaskWorkbenchService:
         self._router = router
         self._turn_planner = turn_planner
         self._task_loop = task_loop
+        self._task_loop_activation = task_loop_activation
+        self._task_loop_execution = task_loop_execution
         self._auto_advance: WorkbenchAutoAdvancePort | None = None
 
     def bind_auto_advance(self, auto_advance: WorkbenchAutoAdvancePort) -> None:
@@ -225,9 +238,17 @@ class TaskWorkbenchService:
         *,
         limit: int = 1_000,
     ) -> tuple[str, ...]:
-        if self._task_loop is None:
-            return ()
-        return await self._task_loop.recoverable_task_ids(limit=limit)
+        planned = (
+            await self._task_loop_activation.recoverable_task_ids(limit=limit)
+            if self._task_loop_activation is not None
+            else ()
+        )
+        deferred = (
+            await self._task_loop.recoverable_task_ids(limit=limit)
+            if self._task_loop is not None
+            else ()
+        )
+        return tuple(dict.fromkeys((*planned, *deferred)))[:limit]
 
     @staticmethod
     def automatic_action(workbench: TaskWorkbenchRead) -> WorkbenchAction | None:
@@ -236,6 +257,7 @@ class TaskWorkbenchService:
         allowed = {
             WorkbenchAction.INTERPRET_TURN,
             WorkbenchAction.PLAN_TASK_LOOP,
+            WorkbenchAction.ADVANCE_TASK_LOOP,
             WorkbenchAction.START_EXECUTION,
             WorkbenchAction.RUN_RESEARCH,
             WorkbenchAction.VERIFY_CLAIMS,
@@ -785,6 +807,20 @@ class TaskWorkbenchService:
             for item in workbench.actions
         ):
             return await self.plan_task_loop(task_id)
+        if any(
+            item.action is WorkbenchAction.ADVANCE_TASK_LOOP and item.enabled
+            for item in workbench.actions
+        ):
+            if self._task_loop_execution is None:
+                raise TaskWorkbenchConflictError("Task Loop execution coordinator is unavailable")
+            try:
+                await self._task_loop_execution.advance(
+                    task_id,
+                    f"workbench:{task_id}",
+                )
+            except TaskLoopExecutionCoordinatorError as error:
+                raise TaskWorkbenchConflictError(str(error)) from error
+            return await self.get(task_id)
         if any(
             item.action is WorkbenchAction.START_EXECUTION and item.enabled
             for item in workbench.actions
@@ -1672,6 +1708,14 @@ class TaskWorkbenchService:
         except MultiStepPlanRuntimeError as error:
             raise TaskWorkbenchConflictError(str(error)) from error
         try:
+            task_loop_execution = (
+                await self._task_loop_activation.get(task_id)
+                if self._task_loop_activation is not None
+                else None
+            )
+        except TaskLoopActivationError as error:
+            raise TaskWorkbenchConflictError(str(error)) from error
+        try:
             planning = await self._planning.get_state(task_id)
             contract = await self._planning.get_current_contract(task_id)
             plans = await self._planning.list_plans(task_id)
@@ -1750,6 +1794,7 @@ class TaskWorkbenchService:
             route,
             turn_planning,
             task_loop,
+            task_loop_execution,
         )
         repair_loop = self._repair_loop_status(executions, contract, route)
         actions = self._actions(
@@ -1761,6 +1806,7 @@ class TaskWorkbenchService:
             repair_loop,
             turn_planning,
             task_loop,
+            task_loop_execution,
         )
         material = {
             "schema_version": "deskpilot.task-workbench.v1",
@@ -1775,7 +1821,16 @@ class TaskWorkbenchService:
                 else None
             ),
             "task_loop": (
-                TaskLoopWorkbenchRead.from_internal(task_loop) if task_loop is not None else None
+                task_loop_execution.workbench
+                if (
+                    task_loop_execution is not None
+                    and task_loop_execution.execution is not None
+                )
+                else (
+                    TaskLoopWorkbenchRead.from_internal(task_loop)
+                    if task_loop is not None
+                    else None
+                )
             ),
             "planning": planning,
             "contract": contract,
@@ -1896,7 +1951,23 @@ class TaskWorkbenchService:
         route: TurnRouteRead | None,
         turn_planning: TurnPlanningRead | None,
         task_loop: TaskLoop | None,
+        task_loop_execution: TaskLoopExecutionRead | None,
     ) -> WorkbenchStage:
+        if task_loop_execution is not None:
+            execution = task_loop_execution.execution
+            if task_loop_execution.loop_status == "observed":
+                return WorkbenchStage.INTERPRETING
+            if execution is None:
+                return WorkbenchStage.PLANNED
+            if execution.status == "succeeded":
+                return WorkbenchStage.DELIVERED
+            if execution.status in {"failed", "cancelled"}:
+                return WorkbenchStage.BLOCKED
+            if task_loop_execution.phase == "awaiting_user":
+                return WorkbenchStage.NEEDS_USER_ACTION
+            if task_loop_execution.phase == "verify":
+                return WorkbenchStage.AWAITING_VERIFICATION
+            return WorkbenchStage.EXECUTING
         if task_loop is not None:
             if task_loop.status == "observed":
                 return WorkbenchStage.INTERPRETING
@@ -2050,6 +2121,7 @@ class TaskWorkbenchService:
         repair_loop: AgentRepairLoopStatus | None,
         turn_planning: TurnPlanningRead | None,
         task_loop: TaskLoop | None,
+        task_loop_execution: TaskLoopExecutionRead | None,
     ) -> tuple[WorkbenchActionRead, ...]:
         run = executions.runs[-1] if executions.runs else None
         nodes = {item.local_key: item for item in run.nodes} if run else {}
@@ -2077,6 +2149,10 @@ class TaskWorkbenchService:
             and contract.contract.workspace is not None
             and contract.contract.workspace.allow_user_path_export
         )
+        uses_generic_task_loop = task_loop_execution is not None
+        generic_execution = (
+            task_loop_execution.execution if task_loop_execution is not None else None
+        )
         conditions = {
             WorkbenchAction.INTERPRET_TURN: (
                 bool(turn_planning is not None and turn_planning.run.status == "prepared"),
@@ -2094,14 +2170,27 @@ class TaskWorkbenchService:
                 ),
                 "DEFERRED_MULTI_STEP_PLAN_NOT_RECOVERABLE",
             ),
+            WorkbenchAction.ADVANCE_TASK_LOOP: (
+                bool(
+                    task_loop_execution is not None
+                    and task_loop_execution.loop_status == "planned"
+                    and task_loop_execution.recoverable
+                    and (
+                        generic_execution is None
+                        or generic_execution.status in {"active", "repairing"}
+                    )
+                ),
+                "TASK_LOOP_NOT_RECOVERABLE",
+            ),
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: (
-                is_research and route is None and not has_plan,
+                not uses_generic_task_loop and is_research and route is None and not has_plan,
                 "TASK_ALREADY_PLANNED_OR_NOT_RESEARCH",
             ),
             WorkbenchAction.START_EXECUTION: (
                 bool(
                     has_plan
                     and run is None
+                    and not uses_generic_task_loop
                     and (
                         route is None
                         or (
@@ -2114,34 +2203,40 @@ class TaskWorkbenchService:
             ),
             WorkbenchAction.RUN_RESEARCH: (
                 bool(
-                    nodes.get("research") and nodes["research"].status is ExecutionNodeStatus.READY
+                    not uses_generic_task_loop
+                    and nodes.get("research")
+                    and nodes["research"].status is ExecutionNodeStatus.READY
                 ),
                 "RESEARCH_NOT_READY",
             ),
             WorkbenchAction.VERIFY_CLAIMS: (
                 bool(
-                    nodes.get("research")
+                    not uses_generic_task_loop
+                    and nodes.get("research")
                     and nodes["research"].status is ExecutionNodeStatus.AWAITING_VERIFICATION
                 ),
                 "CLAIMS_NOT_AWAITING_VERIFICATION",
             ),
             WorkbenchAction.BUILD_ARTIFACT: (
                 bool(
-                    nodes.get("build_html")
+                    not uses_generic_task_loop
+                    and nodes.get("build_html")
                     and nodes["build_html"].status is ExecutionNodeStatus.READY
                 ),
                 "VERIFIED_EDGE_NOT_READY",
             ),
             WorkbenchAction.VERIFY_BROWSER: (
                 bool(
-                    nodes.get("browser_verify")
+                    not uses_generic_task_loop
+                    and nodes.get("browser_verify")
                     and nodes["browser_verify"].status is ExecutionNodeStatus.READY
                 ),
                 "ARTIFACT_EDGE_NOT_READY",
             ),
             WorkbenchAction.FINALIZE_DELIVERY: (
                 bool(
-                    delivery is None
+                    not uses_generic_task_loop
+                    and delivery is None
                     and nodes.get("final_acceptance")
                     and nodes["final_acceptance"].status is ExecutionNodeStatus.READY
                 ),
@@ -2149,7 +2244,8 @@ class TaskWorkbenchService:
             ),
             WorkbenchAction.EXECUTE_ROUTE: (
                 bool(
-                    is_direct
+                    not uses_generic_task_loop
+                    and is_direct
                     and run is not None
                     and run.status is ExecutionRunStatus.ACTIVE
                     and route is not None
@@ -2305,7 +2401,8 @@ class TaskWorkbenchService:
             ),
             WorkbenchAction.STOP_EXECUTION: (
                 bool(
-                    (
+                    not uses_generic_task_loop
+                    and (
                         run is not None
                         and run.status.value in {"active", "awaiting_verification", "paused"}
                     )
@@ -2323,6 +2420,9 @@ class TaskWorkbenchService:
             ),
             WorkbenchAction.PLAN_TASK_LOOP: (
                 "复验已持久化 Offer，并组合一个不授予新权限的多步骤 DraftPlan。"
+            ),
+            WorkbenchAction.ADVANCE_TASK_LOOP: (
+                "按持久 reducer 只推进一个已绑定节点，并在重启后从证明状态恢复。"
             ),
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: "启用受信 research_to_html 计划。",
             WorkbenchAction.START_EXECUTION: "创建绑定当前计划的执行运行。",
@@ -2346,6 +2446,7 @@ class TaskWorkbenchService:
         effects = {
             WorkbenchAction.INTERPRET_TURN: "read_only",
             WorkbenchAction.PLAN_TASK_LOOP: "read_only",
+            WorkbenchAction.ADVANCE_TASK_LOOP: "execution_control",
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: "read_only",
             WorkbenchAction.START_EXECUTION: "read_only",
             WorkbenchAction.RUN_RESEARCH: "read_only",

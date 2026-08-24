@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0052_model_planner_task_loop"
+CURRENT_REVISION = "0053_task_loop_execution"
 
 
 def _sync_url(path: Path) -> str:
@@ -148,6 +148,15 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
             "turn_planner_runs",
             "turn_planner_adjudications",
             "turn_plan_bindings",
+            "task_loops",
+            "task_loop_events",
+            "model_planner_drafts",
+            "model_planner_step_bindings",
+            "task_loop_executions",
+            "task_loop_execution_events",
+            "model_planner_node_bindings",
+            "task_loop_node_attempts",
+            "task_loop_verified_results",
         }.issubset(inspector.get_table_names())
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
@@ -822,10 +831,11 @@ def test_stage_112_model_planner_task_loop_migration_round_trips(
     }.issubset(step_foreign_keys)
     assert revision == CURRENT_REVISION
 
+    command.downgrade(config, "0052_model_planner_task_loop")
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0052_model_planner_task_loop",
         target_revision="0051_turn_planning_offers",
         insert_statement="""
             INSERT INTO task_loops (
@@ -885,6 +895,194 @@ def test_stage_112_model_planner_task_loop_migration_round_trips(
         "model_planner_step_bindings",
     } & tables
     assert revision == "0051_turn_planning_offers"
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_112_task_loop_execution_migration_round_trips(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-112-task-loop-execution.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        tables = set(inspector.get_table_names())
+        execution_columns = {
+            item["name"] for item in inspector.get_columns("task_loop_executions")
+        }
+        binding_columns = {
+            item["name"]
+            for item in inspector.get_columns("model_planner_node_bindings")
+        }
+        attempt_columns = {
+            item["name"] for item in inspector.get_columns("task_loop_node_attempts")
+        }
+        attempt_constraints = {
+            item["name"]
+            for item in inspector.get_check_constraints("task_loop_node_attempts")
+        }
+        result_foreign_keys = {
+            item["referred_table"]
+            for item in inspector.get_foreign_keys("task_loop_verified_results")
+        }
+        result_columns = {
+            item["name"]
+            for item in inspector.get_columns("task_loop_verified_results")
+        }
+        result_constraints = {
+            item["name"]
+            for item in inspector.get_check_constraints("task_loop_verified_results")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+
+    assert {
+        "task_loop_executions",
+        "task_loop_execution_events",
+        "model_planner_node_bindings",
+        "task_loop_node_attempts",
+        "task_loop_verified_results",
+    }.issubset(tables)
+    assert {
+        "loop_id",
+        "draft_id",
+        "plan_id",
+        "plan_generation",
+        "run_id",
+        "latest_event_digest",
+        "binding_set_digest",
+        "execution_digest",
+    }.issubset(execution_columns)
+    assert {
+        "step_binding_id",
+        "offer_id",
+        "policy_snapshot_digest",
+        "source_contract_digest",
+        "source_node_id",
+        "composite_contract_digest",
+        "composite_node_id",
+        "bound_input_manifest",
+        "bound_input_digest",
+        "effective_authority_manifest",
+        "effective_authority_digest",
+        "runtime_eligibility_manifest",
+        "runtime_eligibility_digest",
+    }.issubset(binding_columns)
+    assert {
+        "claim_fencing_token",
+        "input_manifest",
+        "context_manifest",
+        "receipt_manifest",
+        "candidate_manifest",
+        "candidate_digest",
+        "candidate_recorded_at",
+        "verification_manifest",
+        "verification_digest",
+        "verified_at",
+        "attempt_digest",
+    }.issubset(attempt_columns)
+    assert "ck_task_loop_node_attempt_evidence" in attempt_constraints
+    assert {
+        "node_binding_id",
+        "node_binding_digest",
+        "producer_kind",
+        "capability_manifest",
+        "capability_digest",
+        "agent_binding_manifest",
+        "agent_binding_digest",
+        "executor_manifest_digest",
+        "agent_result_proof_digest",
+        "input_binding_digest",
+        "context_digest",
+        "candidate_digest",
+        "output_manifest",
+        "output_schema_digest",
+        "output_digest",
+        "verification_manifest",
+        "verification_digest",
+        "result_ref_manifest",
+        "result_ref_digest",
+    }.issubset(result_columns)
+    assert {
+        "ck_task_loop_verified_result_producer",
+        "ck_task_loop_verified_result_producer_evidence",
+    }.issubset(result_constraints)
+    assert {
+        "task_loop_node_attempts",
+        "task_loop_executions",
+        "model_planner_node_bindings",
+        "task_execution_runs",
+        "task_execution_nodes",
+    } == result_foreign_keys
+    assert revision == CURRENT_REVISION
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0052_model_planner_task_loop",
+        insert_statement="""
+            INSERT INTO task_loop_executions (
+                execution_id, loop_id, draft_id, task_id,
+                plan_id, plan_generation, plan_manifest_digest, run_id,
+                status, revision, event_count,
+                latest_event_id, latest_event_digest,
+                node_binding_count, binding_set_digest,
+                manifest, execution_digest, created_at, updated_at
+            ) VALUES (
+                :row_id, :loop_id, :draft_id, :task_id,
+                :plan_id, 1, :digest, :run_id,
+                'active', 1, 1,
+                :event_id, :digest,
+                1, :digest,
+                :manifest, :execution_digest, :created_at, :created_at
+            )
+        """,
+        parameters={
+            "row_id": "tlx_" + "1" * 64,
+            "loop_id": "tlp_" + "2" * 64,
+            "draft_id": "mpd_" + "3" * 64,
+            "task_id": "tsk_" + "4" * 32,
+            "plan_id": "epl_" + "5" * 64,
+            "run_id": "run_" + "6" * 64,
+            "event_id": "txe_" + "7" * 64,
+            "digest": "8" * 64,
+            "execution_digest": "9" * 64,
+            "manifest": "{}",
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT execution_id, status, revision, run_id, execution_digest
+            FROM task_loop_executions WHERE execution_id = :row_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM task_loop_executions WHERE execution_id = :row_id"
+        ),
+    )
+
+    command.downgrade(config, "0052_model_planner_task_loop")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert not {
+        "task_loop_executions",
+        "task_loop_execution_events",
+        "model_planner_node_bindings",
+        "task_loop_node_attempts",
+        "task_loop_verified_results",
+    } & tables
+    assert revision == "0052_model_planner_task_loop"
 
     command.upgrade(config, "head")
     command.check(config)

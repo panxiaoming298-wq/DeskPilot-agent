@@ -109,94 +109,147 @@ class AgentExecutionRuntime:
                 if record is None:
                     raise AgentRuntimeNotFoundError("Task has no active Executable Plan")
                 plan = self._validated_plan(record)
-                runnable = [
-                    node
-                    for node in plan.nodes
-                    if (node.bound_agent is not None or node.capability is not None)
-                    and node.runtime_enabled
-                ]
-                if not runnable:
-                    raise AgentRuntimeDisabledError(
-                        "Active plan has no enabled Agent or capability node"
-                    )
-                run_identity = {
-                    "task_id": task_id,
-                    "generation": record.generation,
-                    "plan_digest": plan.plan_manifest_digest,
-                }
-                run_id = f"run_{sha256_digest(run_identity)}"
-                existing = await session.get(TaskExecutionRunRecord, run_id)
-                if existing is not None:
-                    return await self._read_run(session, existing)
-                now = utc_now()
-                run = TaskExecutionRunRecord(
+                return await self.start_exact_in_session(session, plan)
+        except IntegrityError as error:
+            raise AgentRuntimeConflictError("Execution run changed concurrently") from error
+
+    async def start_exact_in_session(
+        self,
+        session: AsyncSession,
+        expected_plan: ExecutablePlan,
+    ) -> ExecutionRunRead:
+        """Create one exact Run/Nodes/Edges inside the caller's transaction.
+
+        This method performs no external I/O.  It exists so a model-planner
+        generation-1 Plan, its generic Agent Run and its task-loop activation
+        evidence can commit or roll back as one authority boundary.
+        """
+
+        record = await session.scalar(
+            select(TaskPlanGenerationRecord)
+            .where(
+                TaskPlanGenerationRecord.task_id == expected_plan.task_id,
+                TaskPlanGenerationRecord.generation
+                == expected_plan.plan_generation,
+            )
+            .with_for_update()
+        )
+        if record is None:
+            raise AgentRuntimeNotFoundError("Exact Executable Plan is not active")
+        plan = self._validated_plan(record)
+        if (
+            record.status != "active"
+            or plan != expected_plan
+            or record.plan_id != expected_plan.plan_id
+            or record.plan_manifest_digest
+            != expected_plan.plan_manifest_digest
+        ):
+            raise AgentRuntimeProofRejectedError(
+                "Active Executable Plan differs from the expected manifest"
+            )
+        runnable = [
+            node
+            for node in plan.nodes
+            if (node.bound_agent is not None or node.capability is not None)
+            and node.runtime_enabled
+        ]
+        if not runnable:
+            raise AgentRuntimeDisabledError(
+                "Active plan has no enabled Agent or capability node"
+            )
+        for node in runnable:
+            if node.bound_agent is not None:
+                self._agents.resolve_exact(
+                    node.bound_agent.agent_id,
+                    node.bound_agent.version,
+                    contract_digest=node.bound_agent.contract_digest,
+                    prompt_package_digest=node.bound_agent.prompt_package_digest,
+                )
+        run_identity = {
+            "task_id": expected_plan.task_id,
+            "generation": record.generation,
+            "plan_digest": plan.plan_manifest_digest,
+        }
+        run_id = f"run_{sha256_digest(run_identity)}"
+        existing = await session.get(TaskExecutionRunRecord, run_id)
+        if existing is not None:
+            if (
+                existing.task_id != expected_plan.task_id
+                or existing.plan_generation != expected_plan.plan_generation
+                or existing.plan_digest != expected_plan.plan_manifest_digest
+                or existing.status != ExecutionRunStatus.ACTIVE.value
+            ):
+                raise AgentRuntimeProofRejectedError(
+                    "Existing execution Run differs from the expected Plan"
+                )
+            return await self._read_run(session, existing)
+        now = utc_now()
+        run = TaskExecutionRunRecord(
+            run_id=run_id,
+            task_id=expected_plan.task_id,
+            plan_generation=record.generation,
+            plan_digest=plan.plan_manifest_digest,
+            status=ExecutionRunStatus.ACTIVE.value,
+            revision=1,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(run)
+        await session.flush()
+        for node in plan.nodes:
+            is_ready = (
+                not node.depends_on
+                and node.handoff_parent_node_id is None
+                and (node.bound_agent is not None or node.capability is not None)
+                and node.runtime_enabled
+            )
+            session.add(
+                TaskExecutionNodeRecord(
+                    node_id=node.node_id,
                     run_id=run_id,
-                    task_id=task_id,
-                    plan_generation=record.generation,
-                    plan_digest=plan.plan_manifest_digest,
-                    status=ExecutionRunStatus.ACTIVE.value,
+                    local_key=node.local_key,
+                    node_kind=node.kind.value,
+                    node_spec_digest=node.node_spec_digest,
+                    depends_on=list(node.depends_on),
+                    handoff_parent_node_id=node.handoff_parent_node_id,
+                    bound_agent=(
+                        node.bound_agent.model_dump(mode="json")
+                        if node.bound_agent is not None
+                        else None
+                    ),
+                    capability=(
+                        node.capability.model_dump(mode="json")
+                        if node.capability is not None
+                        else None
+                    ),
+                    acceptance_refs=list(node.acceptance_refs),
+                    budget=node.budget.model_dump(mode="json"),
+                    runtime_enabled=node.runtime_enabled,
+                    status=(
+                        ExecutionNodeStatus.READY.value
+                        if is_ready
+                        else ExecutionNodeStatus.PENDING.value
+                    ),
                     revision=1,
+                    attempt_count=0,
+                    claim_fencing_token=0,
                     created_at=now,
                     updated_at=now,
                 )
-                session.add(run)
-                await session.flush()
-                for node in plan.nodes:
-                    is_ready = (
-                        not node.depends_on
-                        and node.handoff_parent_node_id is None
-                        and (node.bound_agent is not None or node.capability is not None)
-                        and node.runtime_enabled
+            )
+        await session.flush()
+        for node in plan.nodes:
+            for source in node.depends_on:
+                session.add(
+                    TaskExecutionEdgeRecord(
+                        run_id=run_id,
+                        from_node_id=source,
+                        to_node_id=node.node_id,
+                        requirement="verified",
                     )
-                    session.add(
-                        TaskExecutionNodeRecord(
-                            node_id=node.node_id,
-                            run_id=run_id,
-                            local_key=node.local_key,
-                            node_kind=node.kind.value,
-                            node_spec_digest=node.node_spec_digest,
-                            depends_on=list(node.depends_on),
-                            handoff_parent_node_id=node.handoff_parent_node_id,
-                            bound_agent=(
-                                node.bound_agent.model_dump(mode="json")
-                                if node.bound_agent is not None
-                                else None
-                            ),
-                            capability=(
-                                node.capability.model_dump(mode="json")
-                                if node.capability is not None
-                                else None
-                            ),
-                            acceptance_refs=list(node.acceptance_refs),
-                            budget=node.budget.model_dump(mode="json"),
-                            runtime_enabled=node.runtime_enabled,
-                            status=(
-                                ExecutionNodeStatus.READY.value
-                                if is_ready
-                                else ExecutionNodeStatus.PENDING.value
-                            ),
-                            revision=1,
-                            attempt_count=0,
-                            claim_fencing_token=0,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                    )
-                await session.flush()
-                for node in plan.nodes:
-                    for source in node.depends_on:
-                        session.add(
-                            TaskExecutionEdgeRecord(
-                                run_id=run_id,
-                                from_node_id=source,
-                                to_node_id=node.node_id,
-                                requirement="verified",
-                            )
-                        )
-                await session.flush()
-                return await self._read_run(session, run)
-        except IntegrityError as error:
-            raise AgentRuntimeConflictError("Execution run changed concurrently") from error
+                )
+        await session.flush()
+        return await self._read_run(session, run)
 
     async def cancel(self, run_id: str) -> ExecutionRunRead:
         """Fence all unfinished work so a stale Agent result cannot unlock successors."""

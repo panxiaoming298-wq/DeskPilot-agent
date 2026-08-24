@@ -979,6 +979,7 @@ export type WorkbenchStage =
 export type WorkbenchAction =
   | 'interpret_turn'
   | 'plan_task_loop'
+  | 'advance_task_loop'
   | 'activate_research_plan'
   | 'start_execution'
   | 'run_research'
@@ -1471,7 +1472,7 @@ export interface TaskLoopFailureSummary {
   failure_digest: string
 }
 
-export interface TaskLoopWorkbenchRead {
+export interface TaskLoopPlanWorkbenchRead {
   schema_version: 'deskpilot.task-loop-workbench.v1'
   loop_id: string
   phase: TaskLoopPhase
@@ -1488,6 +1489,81 @@ export interface TaskLoopWorkbenchRead {
   updated_at: string
   projection_digest: string
 }
+
+export type TaskLoopExecutionPhase =
+  | 'observe'
+  | 'plan'
+  | 'execute'
+  | 'verify'
+  | 'awaiting_user'
+  | 'repair'
+
+export type TaskLoopExecutionStatus =
+  | 'active'
+  | 'paused'
+  | 'awaiting_user'
+  | 'repairing'
+  | 'failed'
+  | 'succeeded'
+  | 'cancelled'
+
+export interface TaskLoopExecutionWorkbenchNodeRead {
+  schema_version: 'deskpilot.task-loop-workbench-node.v1'
+  local_key: string
+  kind: 'agent' | 'capability' | 'final_acceptance' | 'delivery'
+  status:
+    | 'pending'
+    | 'ready'
+    | 'claimed'
+    | 'running'
+    | 'awaiting_verification'
+    | 'verified'
+    | 'cancelled'
+    | 'failed'
+    | 'waiting_user'
+    | 'waiting_children'
+  dependency_count: number
+  verified_dependency_count: number
+  dependencies_verified: boolean
+  attempt_count: number
+  max_attempts: number
+  candidate_present: boolean
+  verified_result_present: boolean
+  updated_at: string
+  summary_digest: string
+}
+
+export interface TaskLoopExecutionWorkbenchRead {
+  schema_version: 'deskpilot.task-loop-execution-workbench.v1'
+  task_id: string
+  phase: TaskLoopExecutionPhase
+  loop_status: TaskLoopStatus
+  execution_status: TaskLoopExecutionStatus | null
+  loop_revision: number
+  loop_event_count: number
+  execution_revision: number | null
+  execution_event_count: number
+  node_count: number
+  pending_count: number
+  ready_count: number
+  active_count: number
+  awaiting_verification_count: number
+  verified_count: number
+  waiting_user_count: number
+  failed_count: number
+  cancelled_count: number
+  candidate_count: number
+  verified_result_count: number
+  nodes: TaskLoopExecutionWorkbenchNodeRead[]
+  recoverable: boolean
+  created_at: string
+  updated_at: string
+  projection_digest: string
+}
+
+export type TaskLoopWorkbenchRead =
+  | TaskLoopPlanWorkbenchRead
+  | TaskLoopExecutionWorkbenchRead
 
 export interface ArtifactExport {
   export_id: string

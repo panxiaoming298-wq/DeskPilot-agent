@@ -168,8 +168,8 @@ jobs:
           )
           rabbitmq_cases, rabbitmq_skips = junit_cases("pytest-rabbitmq-integration.xml")
 
-          assert len(default_cases) == 653, (
-              f"stage-111 default suite must contain exactly 653 tests; "
+          assert len(default_cases) >= 653, (
+              f"stage-111 lineage suite must retain at least 653 tests; "
               f"got {len(default_cases)}"
           )
           assert len(default_skips) == 12, (
@@ -198,12 +198,13 @@ jobs:
           assert expected_skips.issubset(default_cases), (
               "marker-derived skip allowlist is not present in the default suite"
           )
-          assert len(default_cases - default_skips) == 641, (
-              "stage-111 default suite must contain exactly 641 non-skipped tests; "
+          assert len(default_cases - default_skips) >= 641, (
+              "stage-111 lineage suite must retain at least 641 non-skipped tests; "
               f"got {len(default_cases - default_skips)}"
           )
           print(
-              "Verified exactly 653 backend tests: 641 passed and 12 external-service skips"
+              f"Verified stage-111 floor: {len(default_cases - default_skips)} passed "
+              "and 12 external-service skips"
           )
           '@
           $skipValidator | uv run python -
@@ -255,9 +256,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
           $fileCount = @($report.testResults).Count
-          if ($fileCount -ne 22 -or [int]$report.numTotalTests -ne 155) {
+          if ($fileCount -lt 22 -or [int]$report.numTotalTests -lt 155) {
             throw (
-              "Stage-111 frontend suite must contain exactly 22 files / 155 tests: " +
+              "Stage-111 frontend floor must retain at least 22 files / 155 tests: " +
               "files=$fileCount tests=$($report.numTotalTests)"
             )
           }

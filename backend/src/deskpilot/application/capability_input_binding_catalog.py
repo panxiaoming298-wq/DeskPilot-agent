@@ -1,0 +1,555 @@
+"""Server-only input bindings for the first generic read-only capability set.
+
+The catalog accepts persisted ``ModelPlannerStepBinding`` proofs rather than a
+planner-authored argument dictionary.  Verified predecessor results are
+checked as dependency gates; none of the first five direct capabilities
+semantically consumes those payloads.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal, cast
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from deskpilot.application.capability_catalog import CapabilityCatalog
+from deskpilot.application.route_recipe_catalog import RouteId, RouteRecipeCatalog
+from deskpilot.core.canonical_json import sha256_digest
+from deskpilot.domain.agent_contracts import DIGEST_PATTERN
+from deskpilot.domain.capability_execution import (
+    CapabilityResultKind,
+    VerifiedCapabilityResultRef,
+)
+from deskpilot.domain.task_loop_execution import (
+    MODEL_PLANNER_NODE_BINDING_ID_PATTERN,
+    ModelPlannerNodeBinding,
+)
+from deskpilot.domain.task_plans import (
+    PLAN_NODE_ID_PATTERN,
+    TASK_ID_PATTERN,
+    CapabilityRef,
+)
+
+
+class CapabilityInputBindingError(RuntimeError):
+    code = "CAPABILITY_INPUT_BINDING_REJECTED"
+
+
+class CapabilityInputProfileNotFoundError(CapabilityInputBindingError):
+    code = "CAPABILITY_INPUT_PROFILE_NOT_FOUND"
+
+
+def canonicalize_capability_parameter(
+    raw_value: str,
+    *,
+    enum_value: bool = False,
+) -> str:
+    """Canonicalize one trusted recipe value for persistence and execution.
+
+    The node binder and the execution-time catalog intentionally share this
+    function so a quoted substring or case-insensitive enum cannot acquire two
+    different digests at activation and dispatch.
+    """
+
+    value = raw_value.strip()
+    if len(value) >= 2 and value[0] + value[-1] in {'""', "“”"}:
+        value = value[1:-1]
+    if enum_value:
+        value = value.casefold()
+    if not value:
+        raise CapabilityInputLineageRejectedError(
+            "Capability input contains an empty persisted parameter"
+        )
+    return value
+
+
+class CapabilityInputLineageRejectedError(CapabilityInputBindingError):
+    code = "CAPABILITY_INPUT_LINEAGE_REJECTED"
+
+
+class CapabilityInputDependencyRejectedError(CapabilityInputBindingError):
+    code = "CAPABILITY_INPUT_DEPENDENCY_REJECTED"
+
+
+class KnowledgeLocalExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.knowledge-local-executor-input.v1"] = (
+        "deskpilot.knowledge-local-executor-input.v1"
+    )
+    query: str = Field(min_length=1, max_length=500)
+    limit: Literal[10] = 10
+
+
+class McpTextMetricsExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.mcp-text-metrics-executor-input.v1"] = (
+        "deskpilot.mcp-text-metrics-executor-input.v1"
+    )
+    text: str = Field(min_length=1, max_length=4_000)
+
+
+class WorkspaceSnapshotCheckExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-check-executor-input.v1"] = (
+        "deskpilot.workspace-check-executor-input.v1"
+    )
+    profile: Literal["python-syntax", "json-parse"]
+    path: str = Field(min_length=1, max_length=32_767)
+
+
+class WorkspacePythonTestExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-python-test-executor-input.v1"] = (
+        "deskpilot.workspace-python-test-executor-input.v1"
+    )
+    project_path: str = Field(min_length=1, max_length=32_767)
+    test_path: str = Field(min_length=1, max_length=32_767)
+
+
+class WorkspaceNodeTestExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-node-test-executor-input.v1"] = (
+        "deskpilot.workspace-node-test-executor-input.v1"
+    )
+    project_path: str = Field(min_length=1, max_length=32_767)
+    test_path: str = Field(min_length=1, max_length=32_767)
+
+
+class ArtifactHtmlExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.artifact-html-executor-input.v1"] = (
+        "deskpilot.artifact-html-executor-input.v1"
+    )
+    verified_claims_digest: str = Field(pattern=DIGEST_PATTERN)
+
+
+class BrowserVerifyExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.browser-verify-executor-input.v1"] = (
+        "deskpilot.browser-verify-executor-input.v1"
+    )
+    artifact_digest: str = Field(pattern=DIGEST_PATTERN)
+
+
+CapabilityExecutorInput = Annotated[
+    KnowledgeLocalExecutorInput
+    | McpTextMetricsExecutorInput
+    | WorkspaceSnapshotCheckExecutorInput
+    | WorkspacePythonTestExecutorInput
+    | WorkspaceNodeTestExecutorInput
+    | ArtifactHtmlExecutorInput
+    | BrowserVerifyExecutorInput,
+    Field(discriminator="schema_version"),
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedVerifiedCapabilityResult:
+    """One persisted verified ResultRef paired with its server-resolved value."""
+
+    result_ref: VerifiedCapabilityResultRef
+    output_manifest: Mapping[str, Any]
+    output_schema_digest: str
+
+    def __post_init__(self) -> None:
+        if self.output_manifest.get("result_digest") != self.result_ref.result_digest:
+            raise CapabilityInputDependencyRejectedError(
+                "Resolved result does not match its verified ResultRef"
+            )
+        if self.output_schema_digest != self.result_ref.result_schema_digest:
+            raise CapabilityInputDependencyRejectedError(
+                "Resolved result Schema does not match its verified ResultRef"
+            )
+
+    @classmethod
+    def from_model(
+        cls,
+        *,
+        result_ref: VerifiedCapabilityResultRef,
+        value: BaseModel,
+    ) -> ResolvedVerifiedCapabilityResult:
+        return cls(
+            result_ref=result_ref,
+            output_manifest=value.model_dump(mode="json"),
+            output_schema_digest=sha256_digest(type(value).model_json_schema()),
+        )
+
+
+class BoundCapabilityInput(BaseModel):
+    """Content-addressed executor arguments and their least-authority lineage."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.bound-capability-input.v1"] = (
+        "deskpilot.bound-capability-input.v1"
+    )
+    task_id: str = Field(pattern=TASK_ID_PATTERN)
+    node_id: str = Field(pattern=PLAN_NODE_ID_PATTERN)
+    node_spec_digest: str = Field(pattern=DIGEST_PATTERN)
+    node_binding_id: str = Field(pattern=MODEL_PLANNER_NODE_BINDING_ID_PATTERN)
+    node_binding_digest: str = Field(pattern=DIGEST_PATTERN)
+    effective_authority_digest: str = Field(pattern=DIGEST_PATTERN)
+    runtime_eligibility_digest: str = Field(pattern=DIGEST_PATTERN)
+    capability: CapabilityRef
+    source_step_binding_id: str
+    source_step_binding_digest: str = Field(pattern=DIGEST_PATTERN)
+    source_offer_key: str
+    route_id: str
+    route_version: Literal["2"] = "2"
+    route_manifest_digest: str = Field(pattern=DIGEST_PATTERN)
+    parameter_bindings_digest: str = Field(pattern=DIGEST_PATTERN)
+    arguments: CapabilityExecutorInput
+    arguments_digest: str = Field(pattern=DIGEST_PATTERN)
+    dependency_result_refs: tuple[VerifiedCapabilityResultRef, ...] = Field(
+        default=(), max_length=20
+    )
+    consumed_result_refs: tuple[VerifiedCapabilityResultRef, ...] = Field(default=(), max_length=16)
+    binding_digest: str = Field(pattern=DIGEST_PATTERN)
+
+    @model_validator(mode="after")
+    def identity_and_digest_match(self) -> BoundCapabilityInput:
+        expected_schema = _INPUT_SCHEMA_BY_CAPABILITY.get(self.capability.capability_id)
+        if expected_schema is None or self.arguments.schema_version != expected_schema:
+            raise ValueError("Bound capability input model does not match its capability")
+        if self.arguments_digest != sha256_digest(self.arguments):
+            raise ValueError("Bound capability argument digest does not match")
+        dependency_digests = tuple(item.result_ref_digest for item in self.dependency_result_refs)
+        consumed_digests = tuple(item.result_ref_digest for item in self.consumed_result_refs)
+        if len(dependency_digests) != len(set(dependency_digests)):
+            raise ValueError("Bound capability dependencies must be unique")
+        if len(consumed_digests) != len(set(consumed_digests)):
+            raise ValueError("Bound capability semantic inputs must be unique")
+        if not set(consumed_digests).issubset(dependency_digests):
+            raise ValueError("Consumed ResultRefs must be verified dependencies")
+        if any(item.task_id != self.task_id for item in self.dependency_result_refs):
+            raise ValueError("Bound capability dependencies cross Task scope")
+        material = self.model_dump(mode="json", exclude={"binding_digest"})
+        if self.binding_digest != sha256_digest(material):
+            raise ValueError("Bound capability input digest does not match")
+        return self
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        node_binding: ModelPlannerNodeBinding,
+        capability: CapabilityRef,
+        arguments: CapabilityExecutorInput,
+        dependency_result_refs: tuple[VerifiedCapabilityResultRef, ...],
+        consumed_result_refs: tuple[VerifiedCapabilityResultRef, ...] = (),
+    ) -> BoundCapabilityInput:
+        values = {
+            "schema_version": "deskpilot.bound-capability-input.v1",
+            "task_id": node_binding.task_id,
+            "node_id": node_binding.composite_node_id,
+            "node_spec_digest": node_binding.composite_node_spec_digest,
+            "node_binding_id": node_binding.node_binding_id,
+            "node_binding_digest": node_binding.binding_digest,
+            "effective_authority_digest": (node_binding.effective_authority.authority_digest),
+            "runtime_eligibility_digest": (node_binding.runtime_eligibility.eligibility_digest),
+            "capability": capability,
+            "source_step_binding_id": node_binding.step_binding_id,
+            "source_step_binding_digest": node_binding.step_binding_digest,
+            "source_offer_key": node_binding.offer_key,
+            "route_id": node_binding.recipe.route_id,
+            "route_version": "2",
+            "route_manifest_digest": node_binding.recipe.route_manifest_digest,
+            "parameter_bindings_digest": node_binding.parameter_bindings_digest,
+            "arguments": arguments,
+            "arguments_digest": sha256_digest(arguments),
+            "dependency_result_refs": dependency_result_refs,
+            "consumed_result_refs": consumed_result_refs,
+        }
+        return cls.model_validate({**values, "binding_digest": sha256_digest(values)})
+
+
+_INPUT_SCHEMA_BY_CAPABILITY = {
+    "knowledge.local.v1": "deskpilot.knowledge-local-executor-input.v1",
+    "mcp.text.metrics.v1": "deskpilot.mcp-text-metrics-executor-input.v1",
+    "workspace.snapshot.check.v1": "deskpilot.workspace-check-executor-input.v1",
+    "workspace.python.test.v1": "deskpilot.workspace-python-test-executor-input.v1",
+    "workspace.node.test.v1": "deskpilot.workspace-node-test-executor-input.v1",
+    "artifact.html.v1": "deskpilot.artifact-html-executor-input.v1",
+    "browser.verify.v1": "deskpilot.browser-verify-executor-input.v1",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _InputProfile:
+    capability: CapabilityRef
+    route_id: RouteId
+    route_manifest_digest: str
+    source_local_key: str
+    parameter_names: tuple[str, ...]
+    input_model: type[BaseModel]
+    enum_parameters: frozenset[str] = frozenset()
+    consumes: tuple[CapabilityResultKind, ...] = ()
+
+
+class CapabilityInputBindingCatalog:
+    """Reconstruct exact arguments from persisted stage-111 substring proofs."""
+
+    def __init__(self, capabilities: CapabilityCatalog) -> None:
+        definitions: tuple[
+            tuple[
+                RouteId,
+                str,
+                str,
+                tuple[str, ...],
+                type[BaseModel],
+                frozenset[str],
+                tuple[CapabilityResultKind, ...],
+            ],
+            ...,
+        ] = (
+            (
+                "knowledge_lookup",
+                "knowledge.local.v1",
+                "knowledge_lookup",
+                ("query",),
+                KnowledgeLocalExecutorInput,
+                frozenset(),
+                (),
+            ),
+            (
+                "mcp_text_metrics",
+                "mcp.text.metrics.v1",
+                "mcp_text_metrics",
+                ("text",),
+                McpTextMetricsExecutorInput,
+                frozenset(),
+                (),
+            ),
+            (
+                "workspace_snapshot_check",
+                "workspace.snapshot.check.v1",
+                "workspace_snapshot_check",
+                ("profile", "path"),
+                WorkspaceSnapshotCheckExecutorInput,
+                frozenset({"profile"}),
+                (),
+            ),
+            (
+                "workspace_python_test",
+                "workspace.python.test.v1",
+                "workspace_python_test",
+                ("project_path", "test_path"),
+                WorkspacePythonTestExecutorInput,
+                frozenset(),
+                (),
+            ),
+            (
+                "workspace_node_test",
+                "workspace.node.test.v1",
+                "workspace_node_test",
+                ("project_path", "test_path"),
+                WorkspaceNodeTestExecutorInput,
+                frozenset(),
+                (),
+            ),
+            (
+                "research_to_html",
+                "artifact.html.v1",
+                "build_html",
+                (),
+                ArtifactHtmlExecutorInput,
+                frozenset(),
+                (CapabilityResultKind.VERIFIED_CLAIMS,),
+            ),
+            (
+                "research_to_html",
+                "browser.verify.v1",
+                "browser_verify",
+                (),
+                BrowserVerifyExecutorInput,
+                frozenset(),
+                (CapabilityResultKind.ARTIFACT,),
+            ),
+        )
+        profiles: dict[tuple[str, str, str], _InputProfile] = {}
+        for (
+            route_id,
+            capability_id,
+            local_key,
+            names,
+            model,
+            enum_names,
+            consumes,
+        ) in definitions:
+            pack = capabilities.resolve_preferred(capability_id)
+            capability = CapabilityRef(
+                capability_id=pack.capability_id,
+                version=pack.version,
+                digest=pack.digest,
+            )
+            profiles[(pack.capability_id, pack.version, pack.digest)] = _InputProfile(
+                capability=capability,
+                route_id=route_id,
+                route_manifest_digest=sha256_digest(
+                    {
+                        **RouteRecipeCatalog.manifest(route_id, "2"),
+                        "variant_key": route_id,
+                        "fixed_parameters": {},
+                    }
+                ),
+                source_local_key=local_key,
+                parameter_names=names,
+                input_model=model,
+                enum_parameters=enum_names,
+                consumes=consumes,
+            )
+        self._profiles = profiles
+
+    def bind_node(
+        self,
+        *,
+        node_binding: ModelPlannerNodeBinding,
+        dependencies: tuple[ResolvedVerifiedCapabilityResult, ...] = (),
+    ) -> BoundCapabilityInput:
+        authority = node_binding.effective_authority
+        eligibility = node_binding.runtime_eligibility
+        capability = authority.capability
+        if (
+            authority.node_kind.value != "capability"
+            or capability is None
+            or eligibility.runtime_kind != "capability_executor"
+            or eligibility.capability != capability
+            or not eligibility.runtime_enabled
+        ):
+            raise CapabilityInputLineageRejectedError(
+                "Capability input requires exact eligible capability-node authority"
+            )
+        profile = self._profiles.get(
+            (capability.capability_id, capability.version, capability.digest)
+        )
+        if profile is None:
+            raise CapabilityInputProfileNotFoundError(
+                "Capability input profile has no exact registration"
+            )
+        if (
+            node_binding.recipe.route_id != profile.route_id
+            or node_binding.recipe.route_version != "2"
+            or node_binding.recipe.route_manifest_digest != profile.route_manifest_digest
+        ):
+            raise CapabilityInputLineageRejectedError("Capability input source recipe changed")
+        if (
+            node_binding.mapping.source_local_key != profile.source_local_key
+            or node_binding.mapping.composite_node_id != node_binding.composite_node_id
+            or node_binding.mapping.composite_node_spec_digest
+            != node_binding.composite_node_spec_digest
+        ):
+            raise CapabilityInputLineageRejectedError(
+                "Capability input source node mapping changed"
+            )
+        if not all(isinstance(item, ResolvedVerifiedCapabilityResult) for item in dependencies):
+            raise CapabilityInputDependencyRejectedError(
+                "Capability dependencies must be resolved verified ResultRefs"
+            )
+        dependency_refs = tuple(item.result_ref for item in dependencies)
+        if any(item.task_id != node_binding.task_id for item in dependency_refs):
+            raise CapabilityInputDependencyRejectedError("Capability dependency crosses Task scope")
+        consumed = self._consumed_dependencies(profile, dependencies)
+        parameters = self._parameters(node_binding, profile, consumed)
+        try:
+            arguments = profile.input_model.model_validate(parameters)
+        except ValueError as error:
+            raise CapabilityInputLineageRejectedError(
+                "Capability input parameters failed the trusted Schema"
+            ) from error
+        return BoundCapabilityInput.build(
+            node_binding=node_binding,
+            capability=profile.capability,
+            arguments=cast(CapabilityExecutorInput, arguments),
+            dependency_result_refs=dependency_refs,
+            consumed_result_refs=tuple(item.result_ref for item in consumed),
+        )
+
+    @staticmethod
+    def _consumed_dependencies(
+        profile: _InputProfile,
+        dependencies: tuple[ResolvedVerifiedCapabilityResult, ...],
+    ) -> tuple[ResolvedVerifiedCapabilityResult, ...]:
+        selected: list[ResolvedVerifiedCapabilityResult] = []
+        for result_kind in profile.consumes:
+            matches = tuple(
+                item
+                for item in dependencies
+                if item.result_ref.result_kind is result_kind
+            )
+            if len(matches) != 1:
+                raise CapabilityInputDependencyRejectedError(
+                    "Capability semantic input has no unique verified ResultRef"
+                )
+            selected.append(matches[0])
+        return tuple(selected)
+
+    @staticmethod
+    def _parameters(
+        node_binding: ModelPlannerNodeBinding,
+        profile: _InputProfile,
+        consumed: tuple[ResolvedVerifiedCapabilityResult, ...],
+    ) -> dict[str, object]:
+        if profile.consumes:
+            if profile.parameter_names or len(consumed) != 1:
+                raise CapabilityInputLineageRejectedError(
+                    "Derived capability input profile is invalid"
+                )
+            digest = consumed[0].result_ref.result_digest
+            if profile.capability.capability_id == "artifact.html.v1":
+                return {"verified_claims_digest": digest}
+            if profile.capability.capability_id == "browser.verify.v1":
+                return {"artifact_digest": digest}
+            raise CapabilityInputProfileNotFoundError(
+                "Derived capability input has no server binding"
+            )
+        by_name = {item.parameter_name: item for item in node_binding.parameter_bindings}
+        if set(by_name) != set(profile.parameter_names):
+            raise CapabilityInputLineageRejectedError(
+                "Capability input parameters do not match the trusted recipe"
+            )
+        normalized: dict[str, str] = {}
+        for name in profile.parameter_names:
+            normalized[name] = canonicalize_capability_parameter(
+                by_name[name].value,
+                enum_value=name in profile.enum_parameters,
+            )
+        if normalized != node_binding.bound_input_manifest:
+            raise CapabilityInputLineageRejectedError(
+                "Capability normalized input changed from its persisted node binding"
+            )
+        result: dict[str, object] = dict(normalized)
+        if profile.route_id == "knowledge_lookup":
+            result["limit"] = 10
+        return result
+
+    def capabilities(self) -> tuple[CapabilityRef, ...]:
+        return tuple(self._profiles[key].capability for key in sorted(self._profiles))
+
+
+__all__ = [
+    "ArtifactHtmlExecutorInput",
+    "BoundCapabilityInput",
+    "BrowserVerifyExecutorInput",
+    "CapabilityExecutorInput",
+    "CapabilityInputBindingCatalog",
+    "CapabilityInputBindingError",
+    "CapabilityInputDependencyRejectedError",
+    "CapabilityInputLineageRejectedError",
+    "CapabilityInputProfileNotFoundError",
+    "KnowledgeLocalExecutorInput",
+    "McpTextMetricsExecutorInput",
+    "ResolvedVerifiedCapabilityResult",
+    "WorkspaceNodeTestExecutorInput",
+    "WorkspacePythonTestExecutorInput",
+    "WorkspaceSnapshotCheckExecutorInput",
+    "canonicalize_capability_parameter",
+]

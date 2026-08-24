@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 import os
 import shutil
+import stat
 import sys
 import time
 from dataclasses import dataclass
@@ -57,17 +58,43 @@ class WorkerRuntimeBundle:
     capability_sid: str
 
 
+def _io_path(path: Path) -> str:
+    """Return an extended-length absolute Windows path for bundle file I/O."""
+
+    value = str(path.absolute())
+    if os.name != "nt" or value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return f"\\\\?\\UNC\\{value[2:]}"
+    return f"\\\\?\\{value}"
+
+
+def _file_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+    return os.stat(_io_path(path), follow_symlinks=follow_symlinks)
+
+
+def _is_file(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(_file_stat(path).st_mode)
+    except OSError:
+        return False
+
+
 def _hash_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with open(_io_path(path), "rb") as stream:
         for chunk in iter(lambda: stream.read(1_048_576), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
 
 def _is_reparse_point(path: Path) -> bool:
-    attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
-    return path.is_symlink() or bool(attributes & REPARSE_POINT_ATTRIBUTE)
+    attributes = getattr(
+        _file_stat(path, follow_symlinks=False),
+        "st_file_attributes",
+        0,
+    )
+    return bool(attributes & REPARSE_POINT_ATTRIBUTE)
 
 
 def _iter_tree(
@@ -263,14 +290,14 @@ def _verify_bundle(
         relative = PurePosixPath(path.relative_to(bundle_root).as_posix())
         if _is_reparse_point(path):
             raise WorkerRuntimeIntegrityError("Worker runtime contains a reparse point")
-        if path.is_file() and relative != PurePosixPath("manifest.json"):
+        if _is_file(path) and relative != PurePosixPath("manifest.json"):
             actual_paths.add(relative)
     if actual_paths != expected_paths:
         raise WorkerRuntimeIntegrityError("Worker runtime file set does not match its manifest")
     for source in sources:
         target = bundle_root.joinpath(*source.destination.parts)
         try:
-            size = target.stat().st_size
+            size = _file_stat(target).st_size
         except OSError as error:
             raise WorkerRuntimeIntegrityError("Worker runtime file is unavailable") from error
         if size != source.size or _hash_file(target) != source.sha256:
@@ -326,13 +353,13 @@ def load_worker_runtime(bundle_root: Path) -> WorkerRuntimeBundle:
         relative = PurePosixPath(path.relative_to(resolved).as_posix())
         if _is_reparse_point(path):
             raise WorkerRuntimeIntegrityError("Published worker runtime has a reparse point")
-        if path.is_file() and relative != PurePosixPath("manifest.json"):
+        if _is_file(path) and relative != PurePosixPath("manifest.json"):
             actual.add(relative)
     if actual != set(expected):
         raise WorkerRuntimeIntegrityError("Published worker runtime file set is invalid")
     for relative, (size, sha256) in expected.items():
         target = resolved.joinpath(*relative.parts)
-        if target.stat().st_size != size or _hash_file(target) != sha256:
+        if _file_stat(target).st_size != size or _hash_file(target) != sha256:
             raise WorkerRuntimeIntegrityError(
                 f"Published worker runtime file failed verification: {relative}"
             )

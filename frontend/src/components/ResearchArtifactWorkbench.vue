@@ -18,6 +18,8 @@ import {
 } from '../api'
 import type {
   ArtifactExport,
+  TaskLoopExecutionWorkbenchRead,
+  TaskLoopWorkbenchRead,
   TaskWorkbench,
   WorkbenchAction,
   WorkbenchNode,
@@ -94,7 +96,7 @@ const researchFlow: FlowItem[] = [
 ]
 
 const autoActions = new Set<WorkbenchAction>([
-  'interpret_turn', 'plan_task_loop', 'run_research', 'verify_claims', 'build_artifact', 'verify_browser', 'finalize_delivery', 'execute_route', 'replan_failed_execution',
+  'interpret_turn', 'plan_task_loop', 'advance_task_loop', 'run_research', 'verify_claims', 'build_artifact', 'verify_browser', 'finalize_delivery', 'execute_route', 'replan_failed_execution',
 ])
 
 const routeLabels: Record<string, string> = {
@@ -218,7 +220,14 @@ const evidenceCount = computed(() => (
   + (workbench.value?.task_loop ? 1 : 0)
 ))
 const routeFlow = computed<FlowItem[]>(() => {
-  if (workbench.value?.task_loop) {
+  const taskLoop = workbench.value?.task_loop
+  if (taskLoop) {
+    if (isExecutionTaskLoop(taskLoop)) {
+      return [{ key: 'advance_task_loop', action: 'advance_task_loop', label: '推进通用任务循环', detail: `按持久 reducer 推进一个节点；${taskLoop.verified_count}/${taskLoop.node_count} 个节点已验证` }]
+    }
+    if (taskLoop.status === 'planned') {
+      return [{ key: 'advance_task_loop', action: 'advance_task_loop', label: '启动通用任务循环', detail: '原子绑定 generation-1 Plan、Run、节点权限与执行事件；不会再次调用模型或重放 Planner' }]
+    }
     return [{ key: 'plan_task_loop', action: 'plan_task_loop', label: '组合通用任务计划', detail: '只按已裁决 Offer 顺序重编 Contract、预算与 verified edge；不会再次调用模型' }]
   }
   if (workbench.value?.stage === 'interpreting') {
@@ -293,9 +302,16 @@ const routeName = computed(() => {
 const routeExplanation = computed(() => {
   const value = workbench.value
   if (!value) return ''
-  if (value.task_loop?.status === 'observed') return '已封存阶段 111 的多步骤裁决；服务器正在重编精确 Contract、预算、节点和依赖，不会重放 Planner。'
-  if (value.task_loop?.status === 'planned') return `已建立 ${value.task_loop.step_count} 步 model_planner Draft；阶段 112A 只保存计划证明，尚未启动执行。`
-  if (value.task_loop?.status === 'failed') return '多步骤组合已稳定终止；失败证明禁止自动重放模型，也没有创建执行 Run。'
+  const taskLoop = value.task_loop
+  if (taskLoop && isExecutionTaskLoop(taskLoop)) {
+    if (taskLoop.execution_status === 'succeeded') return '通用循环已稳定完成；所有可运行节点都具有持久 verified ResultRef，控制边已经闭合。'
+    if (taskLoop.execution_status === 'failed') return '通用循环已稳定失败；失败节点和事件链会保留，系统不会静默重放 Provider 或外部副作用。'
+    if (taskLoop.phase === 'verify') return '候选结果已持久化，正在通过独立验证器形成 ResultRef；候选本身不能解锁下游。'
+    return `通用循环正在按一个持久命令逐步推进；${taskLoop.verified_count}/${taskLoop.node_count} 个节点已验证，切换页面或重启后可恢复。`
+  }
+  if (taskLoop?.status === 'observed') return '已封存阶段 111 的多步骤裁决；服务器正在重编精确 Contract、预算、节点和依赖，不会重放 Planner。'
+  if (taskLoop?.status === 'planned') return `已建立 ${taskLoop.step_count} 步 model_planner Draft；下一步将原子建立执行证明。`
+  if (taskLoop?.status === 'failed') return '多步骤组合已稳定终止；失败证明禁止自动重放模型，也没有创建执行 Run。'
   if (value.stage === 'interpreting') return '服务器已冻结可用能力、契约、预算与参数边界；本地 Planner 只能从这些 opaque Offer 中提案。'
   if (value.stage === 'needs_clarification') return '请说明要研究公开来源、查询本地知识、统计文本，还是读取、修改或检查工作区。'
   if (value.stage === 'unsupported') return '这条指令没有被偷偷执行；系统只会运行已声明且当前可用的安全路由。'
@@ -330,6 +346,12 @@ function shortDigest(value: string | null | undefined): string {
   return value ? `${value.slice(0, 9)}…${value.slice(-5)}` : '无'
 }
 
+function isExecutionTaskLoop(
+  value: TaskLoopWorkbenchRead | null | undefined,
+): value is TaskLoopExecutionWorkbenchRead {
+  return value?.schema_version === 'deskpilot.task-loop-execution-workbench.v1'
+}
+
 function problemMessage(caught: unknown): string {
   if (caught instanceof ApiProblemError) return `${caught.message}（${caught.code}）`
   return caught instanceof Error ? caught.message : '操作失败，请重试。'
@@ -338,7 +360,16 @@ function problemMessage(caught: unknown): string {
 function nodeState(node: WorkbenchNode | undefined, action: WorkbenchAction): 'done' | 'active' | 'queued' {
   if (actionMap.value.get(action)?.enabled) return 'active'
   if (action === 'interpret_turn' && workbench.value?.stage === 'interpreting') return 'active'
-  if (action === 'plan_task_loop' && workbench.value?.task_loop?.status === 'planned') return 'done'
+  const taskLoop = workbench.value?.task_loop
+  if (
+    action === 'plan_task_loop'
+    && taskLoop
+    && !isExecutionTaskLoop(taskLoop)
+    && taskLoop.status === 'planned'
+  ) return 'done'
+  if (action === 'advance_task_loop' && isExecutionTaskLoop(taskLoop)) {
+    return taskLoop?.execution_status === 'succeeded' ? 'done' : 'active'
+  }
   if (!node) return 'queued'
   if (action === 'run_research') {
     return ['awaiting_verification', 'verified'].includes(node.status) ? 'done' : 'queued'
@@ -1051,8 +1082,17 @@ onBeforeUnmount(() => {
       </details>
 
       <details v-if="workbench?.task_loop" open>
-        <summary>Task Loop Proof <span>{{ workbench.task_loop.status }}</span></summary>
-        <dl class="route-proof">
+        <summary>Task Loop Proof <span>{{ isExecutionTaskLoop(workbench.task_loop) ? (workbench.task_loop.execution_status ?? workbench.task_loop.loop_status) : workbench.task_loop.status }}</span></summary>
+        <dl v-if="isExecutionTaskLoop(workbench.task_loop)" class="route-proof">
+          <div><dt>循环阶段</dt><dd>{{ workbench.task_loop.phase }} · execution revision {{ workbench.task_loop.execution_revision ?? 0 }}</dd></div>
+          <div><dt>节点进度</dt><dd>{{ workbench.task_loop.verified_count }} / {{ workbench.task_loop.node_count }} 已验证</dd></div>
+          <div><dt>运行中</dt><dd>{{ workbench.task_loop.active_count }} 个 · 候选 {{ workbench.task_loop.candidate_count }} 个</dd></div>
+          <div><dt>等待验证</dt><dd>{{ workbench.task_loop.awaiting_verification_count }} 个 · ResultRef {{ workbench.task_loop.verified_result_count }} 个</dd></div>
+          <div><dt>执行事件链</dt><dd>{{ workbench.task_loop.execution_event_count }} 个</dd></div>
+          <div><dt>恢复状态</dt><dd>{{ workbench.task_loop.recoverable ? '可从持久证明恢复' : '终态或尚未激活' }}</dd></div>
+          <div><dt>公开投影</dt><dd>{{ shortDigest(workbench.task_loop.projection_digest) }}</dd></div>
+        </dl>
+        <dl v-else class="route-proof">
           <div><dt>循环阶段</dt><dd>{{ workbench.task_loop.phase }} · revision {{ workbench.task_loop.revision }}</dd></div>
           <div><dt>已绑定步骤</dt><dd>{{ workbench.task_loop.step_count }} 个</dd></div>
           <div><dt>事件链</dt><dd>{{ workbench.task_loop.event_count }} 个 · {{ shortDigest(workbench.task_loop.progress_digest) }}</dd></div>

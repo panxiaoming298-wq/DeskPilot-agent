@@ -49,7 +49,15 @@ from deskpilot.application.browser_verifier import (
     BrowserVerifier,
     IsolatedChromiumVerifier,
 )
+from deskpilot.application.builtin_capability_executors import (
+    create_builtin_capability_executor_registry,
+)
 from deskpilot.application.capability_catalog import create_builtin_capability_catalog
+from deskpilot.application.capability_execution_engine import CapabilityExecutionEngine
+from deskpilot.application.capability_execution_runtime import CapabilityExecutionRuntime
+from deskpilot.application.capability_input_binding_catalog import (
+    CapabilityInputBindingCatalog,
+)
 from deskpilot.application.context_memory_runtime import ContextMemoryRuntime
 from deskpilot.application.credential_resolver import CredentialResolver
 from deskpilot.application.effect_dag_cluster_admission import (
@@ -72,6 +80,7 @@ from deskpilot.application.model_gateway import (
     ModelProvider,
 )
 from deskpilot.application.model_planner_composer import ModelPlannerComposer
+from deskpilot.application.model_planner_node_binder import ModelPlannerNodeBinder
 from deskpilot.application.multi_step_plan_runtime import MultiStepPlanRuntime
 from deskpilot.application.outbox_publisher import DeliveryPublisher, OutboxPublisher
 from deskpilot.application.pdf_artifact_renderer import (
@@ -93,6 +102,14 @@ from deskpilot.application.research_runtime import ResearchRuntime
 from deskpilot.application.runner_client import RunnerClient
 from deskpilot.application.runner_supervisor import RunnerSupervisor
 from deskpilot.application.task_checkpoint_codec import TaskCheckpointCodec
+from deskpilot.application.task_loop_activation_runtime import TaskLoopActivationRuntime
+from deskpilot.application.task_loop_agent_adapter_registry import (
+    create_task_loop_agent_adapter_registry,
+)
+from deskpilot.application.task_loop_agent_runtime import TaskLoopAgentRuntime
+from deskpilot.application.task_loop_execution_coordinator import (
+    TaskLoopExecutionCoordinator,
+)
 from deskpilot.application.task_service import TaskService
 from deskpilot.application.task_workbench_service import TaskWorkbenchService
 from deskpilot.application.turn_planner_runtime import TurnPlannerRuntime
@@ -427,6 +444,53 @@ def create_app(
             turn_planner_runtime,
             model_planner_composer,
         )
+        task_loop_capability_executors = create_builtin_capability_executor_registry(
+            capability_catalog,
+            knowledge=knowledge_base,
+            mcp=mcp_control_plane,
+            workspace=workspace_file_runtime,
+            workspace_checks=resolved_workspace_check_runtime,
+            python_tests=resolved_workspace_python_test_runtime,
+            node_tests=resolved_workspace_node_test_runtime,
+            artifacts=artifact_delivery_runtime,
+        )
+        task_loop_agent_adapters = create_task_loop_agent_adapter_registry(
+            research_available=research_runtime is not None,
+            workspace_file_available=True,
+        )
+        task_loop_activation_runtime = TaskLoopActivationRuntime(
+            database,
+            task_loop_runtime,
+            turn_planner_runtime,
+            plan_compilation_service,
+            agent_execution_runtime,
+            ModelPlannerNodeBinder(
+                agent_registry,
+                task_loop_capability_executors,
+                task_loop_agent_adapters,
+            ),
+        )
+        task_loop_capability_runtime = CapabilityExecutionRuntime(
+            database,
+            CapabilityInputBindingCatalog(capability_catalog),
+            task_loop_capability_executors,
+            CapabilityExecutionEngine(task_loop_capability_executors),
+        )
+        task_loop_agent_runtime = TaskLoopAgentRuntime(
+            database,
+            agent_execution_runtime,
+            task_loop_agent_adapters,
+            research=research_runtime,
+            workspace=workspace_file_runtime,
+        )
+        task_loop_execution_runtime = TaskLoopExecutionCoordinator(
+            database,
+            task_loop_activation_runtime,
+            capabilities=task_loop_capability_runtime,
+            agents=task_loop_agent_runtime,
+            artifacts=artifact_delivery_runtime,
+            turn_planner=turn_planner_runtime,
+        )
         task_workbench_service = TaskWorkbenchService(
             database,
             task_service,
@@ -442,6 +506,8 @@ def create_app(
             turn_router,
             turn_planner_runtime,
             task_loop_runtime,
+            task_loop_activation_runtime,
+            task_loop_execution_runtime,
         )
         workbench_runtime = (
             WorkbenchRuntimeCoordinator(
@@ -560,6 +626,10 @@ def create_app(
         app.state.turn_router = turn_router
         app.state.turn_planner_runtime = turn_planner_runtime
         app.state.task_loop_runtime = task_loop_runtime
+        app.state.task_loop_activation_runtime = task_loop_activation_runtime
+        app.state.task_loop_execution_runtime = task_loop_execution_runtime
+        app.state.task_loop_capability_runtime = task_loop_capability_runtime
+        app.state.task_loop_agent_runtime = task_loop_agent_runtime
         app.state.workspace_file_runtime = workspace_file_runtime
         app.state.workspace_agent_runtime = workspace_agent_runtime
         app.state.workspace_check_runtime = resolved_workspace_check_runtime

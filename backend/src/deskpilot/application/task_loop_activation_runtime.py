@@ -1,0 +1,1319 @@
+"""Atomic generation-1 activation for sealed model-planner Task Loops."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+
+from pydantic import ValidationError
+from sqlalchemy import and_, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from deskpilot.application.agent_execution_runtime import (
+    AgentExecutionRuntime,
+    AgentRuntimeError,
+)
+from deskpilot.application.model_planner_node_binder import (
+    ModelPlannerNodeBinder,
+    ModelPlannerNodeBindingError,
+)
+from deskpilot.application.multi_step_plan_runtime import (
+    MultiStepPlanRuntime,
+    MultiStepPlanRuntimeError,
+)
+from deskpilot.application.plan_compilation_service import (
+    PlanCompilationService,
+    PlanningError,
+)
+from deskpilot.application.turn_planner_runtime import (
+    TurnPlannerRuntime,
+    TurnPlannerRuntimeError,
+)
+from deskpilot.core.canonical_json import sha256_digest
+from deskpilot.domain.capability_execution import VerifiedCapabilityResultRef
+from deskpilot.domain.task_loop import ModelPlannerDraft, TaskLoop
+from deskpilot.domain.task_loop_execution import (
+    ModelPlannerNodeBinding,
+    TaskLoopExecution,
+    TaskLoopExecutionEvent,
+    TaskLoopExecutionNodeRead,
+    TaskLoopExecutionRead,
+    TaskLoopNodeAttempt,
+    TaskLoopVerifiedResult,
+)
+from deskpilot.domain.task_plans import DraftNodeKind, ExecutablePlan
+from deskpilot.infrastructure.database import Database
+from deskpilot.infrastructure.models import (
+    ModelPlannerDraftRecord,
+    ModelPlannerNodeBindingRecord,
+    TaskExecutionEdgeRecord,
+    TaskExecutionNodeRecord,
+    TaskExecutionRunRecord,
+    TaskLoopExecutionEventRecord,
+    TaskLoopExecutionRecord,
+    TaskLoopNodeAttemptRecord,
+    TaskLoopRecord,
+    TaskLoopVerifiedResultRecord,
+    TaskPlanGenerationRecord,
+    TaskPlanningStateRecord,
+)
+
+
+class TaskLoopActivationError(RuntimeError):
+    code = "TASK_LOOP_ACTIVATION_ERROR"
+
+
+class TaskLoopActivationNotFoundError(TaskLoopActivationError):
+    code = "TASK_LOOP_ACTIVATION_NOT_FOUND"
+
+
+class TaskLoopActivationNotEligibleError(TaskLoopActivationError):
+    code = "TASK_LOOP_ACTIVATION_NOT_ELIGIBLE"
+
+
+class TaskLoopActivationProofRejectedError(TaskLoopActivationError):
+    code = "TASK_LOOP_ACTIVATION_PROOF_REJECTED"
+
+
+class TaskLoopActivationConflictError(TaskLoopActivationError):
+    code = "TASK_LOOP_ACTIVATION_CONFLICT"
+
+
+class TaskLoopActivationRuntime:
+    """Seal Plan, Run, node authority bindings and activation in one commit."""
+
+    def __init__(
+        self,
+        database: Database,
+        task_loops: MultiStepPlanRuntime,
+        turn_planner: TurnPlannerRuntime,
+        planning: PlanCompilationService,
+        execution: AgentExecutionRuntime,
+        node_binder: ModelPlannerNodeBinder,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._database = database
+        self._task_loops = task_loops
+        self._turn_planner = turn_planner
+        self._planning = planning
+        self._execution = execution
+        self._node_binder = node_binder
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    async def activate(self, task_id: str) -> TaskLoopExecution:
+        """Activate only a planned Task Loop; no Provider or executor is invoked."""
+
+        try:
+            bundle = await self._task_loops.get_bundle(task_id)
+            if bundle is None:
+                raise TaskLoopActivationNotFoundError("Task has no model-planner Task Loop")
+            if bundle.loop.status != "planned" or bundle.draft is None:
+                raise TaskLoopActivationNotEligibleError(
+                    "Task Loop does not contain a sealed planned Draft"
+                )
+            revalidated = await self._turn_planner.revalidate_deferred_plan(task_id)
+            if bundle.loop.source.turn_plan_binding_digest != (
+                revalidated.planning.binding.binding_digest
+                if revalidated.planning.binding is not None
+                else None
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Deferred Turn Planner lineage changed before activation"
+                )
+            bindings = self._node_binder.bind(
+                bundle.draft,
+                bundle.steps,
+                revalidated,
+            )
+        except TaskLoopActivationError:
+            raise
+        except (
+            MultiStepPlanRuntimeError,
+            TurnPlannerRuntimeError,
+            ModelPlannerNodeBindingError,
+            ValidationError,
+            ValueError,
+        ) as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Task-loop activation preflight proof was rejected"
+            ) from error
+
+        try:
+            async with self._database.session() as session, session.begin():
+                loop_record = await session.scalar(
+                    select(TaskLoopRecord)
+                    .where(TaskLoopRecord.loop_id == bundle.loop.loop_id)
+                    .with_for_update()
+                )
+                draft_record = await session.scalar(
+                    select(ModelPlannerDraftRecord)
+                    .where(ModelPlannerDraftRecord.draft_id == bundle.draft.draft_id)
+                    .with_for_update()
+                )
+                if loop_record is None or draft_record is None:
+                    raise TaskLoopActivationNotFoundError(
+                        "Task Loop or sealed Draft disappeared before activation"
+                    )
+                self._assert_locked_source(loop_record, draft_record, bundle.loop, bundle.draft)
+                existing = await session.scalar(
+                    select(TaskLoopExecutionRecord)
+                    .where(TaskLoopExecutionRecord.loop_id == bundle.loop.loop_id)
+                    .with_for_update()
+                )
+                if existing is not None:
+                    return await self._read_exact(
+                        session,
+                        existing,
+                        draft=bundle.draft,
+                        expected_bindings=bindings,
+                    )
+
+                # Recheck current registry eligibility at the write boundary.
+                # Registries are in-memory and this call performs no external I/O.
+                bindings = self._node_binder.bind(
+                    bundle.draft,
+                    bundle.steps,
+                    revalidated,
+                )
+                activated_plan = await self._planning.activate_initial_once_in_session(
+                    session,
+                    bundle.draft.task_contract,
+                    bundle.draft.draft_plan,
+                )
+                if activated_plan.plan != bundle.draft.expected_plan:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Activated generation-1 Plan differs from the sealed preview"
+                    )
+                run = await self._execution.start_exact_in_session(
+                    session,
+                    bundle.draft.expected_plan,
+                )
+                created_at = self._now()
+                execution, event = TaskLoopExecution.activate(
+                    loop_id=bundle.loop.loop_id,
+                    draft_id=bundle.draft.draft_id,
+                    task_id=task_id,
+                    plan_id=bundle.draft.expected_plan.plan_id,
+                    plan_manifest_digest=(bundle.draft.expected_plan_manifest_digest),
+                    run_id=run.run_id,
+                    bindings=bindings,
+                    created_at=created_at,
+                )
+                session.add(self._execution_record(execution))
+                await session.flush()
+                session.add_all(
+                    self._binding_record(item, execution.execution_id, created_at)
+                    for item in bindings
+                )
+                session.add(self._event_record(event))
+                await session.flush()
+                return await self._read_exact(
+                    session,
+                    await self._required_execution_record(
+                        session,
+                        execution.execution_id,
+                    ),
+                    draft=bundle.draft,
+                    expected_bindings=bindings,
+                )
+        except IntegrityError:
+            # SQLite has no row-level FOR UPDATE. Uniqueness elects one writer;
+            # a concurrent loser may accept only the fully matching winner.
+            persisted_read = await self.get(task_id)
+            if persisted_read is None or persisted_read.execution is None:
+                raise TaskLoopActivationConflictError(
+                    "Concurrent Task Loop activation did not converge"
+                ) from None
+            await self._assert_persisted_exact(task_id, bundle.draft, bindings)
+            return persisted_read.execution
+        except TaskLoopActivationError:
+            raise
+        except (PlanningError, AgentRuntimeError) as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Atomic Plan or Run activation was rejected"
+            ) from error
+
+    async def get(self, task_id: str) -> TaskLoopExecutionRead | None:
+        """Reconstruct one proof-checked internal read without external I/O."""
+
+        try:
+            bundle = await self._task_loops.get_bundle(task_id)
+        except (MultiStepPlanRuntimeError, ValidationError, ValueError) as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Persisted Task Loop proof was rejected during execution recovery"
+            ) from error
+        if bundle is None:
+            return None
+        async with self._database.session() as session:
+            records = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopExecutionRecord)
+                        .where(TaskLoopExecutionRecord.task_id == task_id)
+                        .order_by(TaskLoopExecutionRecord.created_at)
+                    )
+                ).all()
+            )
+            if bundle.loop.status != "planned" or bundle.draft is None:
+                if records:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Unplanned Task Loop unexpectedly has an execution"
+                    )
+                return self._pre_execution_read(bundle.loop, draft=None)
+            if not records:
+                return self._pre_execution_read(bundle.loop, draft=bundle.draft)
+            if len(records) != 1:
+                raise TaskLoopActivationProofRejectedError(
+                    "Task has more than one model-planner execution"
+                )
+            return await self._read_internal(
+                session,
+                records[0],
+                loop=bundle.loop,
+                draft=bundle.draft,
+            )
+
+    async def recoverable_task_ids(self, *, limit: int = 100) -> tuple[str, ...]:
+        """Return bounded, revalidated nonterminal Task Loop task ids."""
+
+        if not 1 <= limit <= 1_000:
+            raise ValueError("Task Loop execution recovery limit is invalid")
+        async with self._database.session() as session:
+            candidates = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopRecord.task_id)
+                        .outerjoin(
+                            TaskLoopExecutionRecord,
+                            TaskLoopExecutionRecord.loop_id == TaskLoopRecord.loop_id,
+                        )
+                        .where(
+                            or_(
+                                TaskLoopRecord.status == "observed",
+                                and_(
+                                    TaskLoopRecord.status == "planned",
+                                    or_(
+                                        TaskLoopExecutionRecord.execution_id.is_(None),
+                                        TaskLoopExecutionRecord.status.in_(
+                                            (
+                                                "active",
+                                                "paused",
+                                                "awaiting_user",
+                                                "repairing",
+                                            )
+                                        ),
+                                    ),
+                                ),
+                            )
+                        )
+                        .order_by(TaskLoopRecord.updated_at, TaskLoopRecord.task_id)
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        recovered: list[str] = []
+        for candidate in candidates:
+            read = await self.get(candidate)
+            if read is None:
+                raise TaskLoopActivationProofRejectedError(
+                    "Recovery candidate disappeared during proof reconstruction"
+                )
+            if read.recoverable:
+                recovered.append(candidate)
+        return tuple(dict.fromkeys(recovered))
+
+    def _pre_execution_read(
+        self,
+        loop: TaskLoop,
+        *,
+        draft: ModelPlannerDraft | None,
+    ) -> TaskLoopExecutionRead:
+        nodes: tuple[TaskLoopExecutionNodeRead, ...] = ()
+        if draft is not None:
+            nodes = tuple(
+                TaskLoopExecutionNodeRead.build(
+                    node_id=node.node_id,
+                    local_key=node.local_key,
+                    kind=node.kind,
+                    status="ready" if not node.depends_on else "pending",
+                    depends_on=node.depends_on,
+                    verified_dependency_node_ids=(),
+                    dependency_count=len(node.depends_on),
+                    verified_dependency_count=0,
+                    dependencies_verified=not node.depends_on,
+                    attempt_count=0,
+                    max_attempts=node.budget.retries + 1,
+                    candidate_present=False,
+                    verified_result_present=False,
+                    created_at=loop.updated_at,
+                    updated_at=loop.updated_at,
+                )
+                for node in sorted(
+                    draft.expected_plan.nodes,
+                    key=lambda item: item.local_key,
+                )
+            )
+        return TaskLoopExecutionRead.build(
+            task_id=loop.source.task_id,
+            loop_id=loop.loop_id,
+            loop_status=loop.status,
+            phase=loop.phase,
+            loop_revision=loop.revision,
+            loop_event_count=loop.event_count,
+            loop_progress_digest=loop.progress_digest,
+            execution=None,
+            nodes=nodes,
+            recoverable=loop.status in {"observed", "planned"},
+            created_at=loop.created_at,
+            updated_at=loop.updated_at,
+        )
+
+    async def _read_internal(
+        self,
+        session: AsyncSession,
+        record: TaskLoopExecutionRecord,
+        *,
+        loop: TaskLoop,
+        draft: ModelPlannerDraft,
+    ) -> TaskLoopExecutionRead:
+        execution = await self._read_exact(
+            session,
+            record,
+            draft=draft,
+            expected_bindings=None,
+        )
+        binding_records = tuple(
+            (
+                await session.scalars(
+                    select(ModelPlannerNodeBindingRecord)
+                    .where(ModelPlannerNodeBindingRecord.execution_id == execution.execution_id)
+                    .order_by(ModelPlannerNodeBindingRecord.composite_node_id)
+                )
+            ).all()
+        )
+        bindings = tuple(self._binding_from_record(item) for item in binding_records)
+        bindings_by_id = {item.node_binding_id: item for item in bindings}
+        bindings_by_node = {item.composite_node_id: item for item in bindings}
+        if len(bindings_by_id) != len(bindings) or len(bindings_by_node) != len(bindings):
+            raise TaskLoopActivationProofRejectedError("Task Loop execution repeats a node binding")
+
+        node_records = tuple(
+            (
+                await session.scalars(
+                    select(TaskExecutionNodeRecord)
+                    .where(TaskExecutionNodeRecord.run_id == execution.run_id)
+                    .order_by(TaskExecutionNodeRecord.local_key)
+                )
+            ).all()
+        )
+        nodes_by_id = {item.node_id: item for item in node_records}
+        attempt_records = tuple(
+            (
+                await session.scalars(
+                    select(TaskLoopNodeAttemptRecord)
+                    .where(TaskLoopNodeAttemptRecord.execution_id == execution.execution_id)
+                    .order_by(
+                        TaskLoopNodeAttemptRecord.node_id,
+                        TaskLoopNodeAttemptRecord.attempt,
+                    )
+                )
+            ).all()
+        )
+        attempts: list[TaskLoopNodeAttempt] = []
+        attempts_by_node: dict[str, list[TaskLoopNodeAttempt]] = {}
+        attempts_by_id: dict[str, TaskLoopNodeAttempt] = {}
+        for attempt_record in attempt_records:
+            attempt = self._attempt_from_record(attempt_record)
+            binding = bindings_by_id.get(attempt.node_binding_id)
+            if (
+                attempt.execution_id != execution.execution_id
+                or attempt.run_id != execution.run_id
+                or binding is None
+                or binding.composite_node_id != attempt.node_id
+                or attempt.node_id not in nodes_by_id
+                or attempt.attempt_id in attempts_by_id
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Task Loop attempt crosses its exact execution binding"
+                )
+            attempts.append(attempt)
+            attempts_by_id[attempt.attempt_id] = attempt
+            attempts_by_node.setdefault(attempt.node_id, []).append(attempt)
+
+        result_records = tuple(
+            (
+                await session.scalars(
+                    select(TaskLoopVerifiedResultRecord)
+                    .where(TaskLoopVerifiedResultRecord.execution_id == execution.execution_id)
+                    .order_by(
+                        TaskLoopVerifiedResultRecord.node_id,
+                        TaskLoopVerifiedResultRecord.created_at,
+                    )
+                )
+            ).all()
+        )
+        results_by_node: dict[str, TaskLoopVerifiedResult] = {}
+        for result_record in result_records:
+            result = self._verified_result_from_record(result_record)
+            result_attempt = attempts_by_id.get(result.attempt_id)
+            binding = bindings_by_id.get(result.node_binding_id)
+            if result_attempt is None or binding is None:
+                raise TaskLoopActivationProofRejectedError(
+                    "Verified ResultRef lost its attempt or node binding"
+                )
+            self._validate_verified_result(
+                execution=execution,
+                result=result,
+                attempt=result_attempt,
+                binding=binding,
+            )
+            if result.node_id in results_by_node:
+                raise TaskLoopActivationProofRejectedError(
+                    "Task Loop node has more than one verified ResultRef"
+                )
+            results_by_node[result.node_id] = result
+
+        node_reads: list[TaskLoopExecutionNodeRead] = []
+        for node in node_records:
+            node_attempts = attempts_by_node.get(node.node_id, [])
+            if [item.attempt for item in node_attempts] != list(range(1, node.attempt_count + 1)):
+                raise TaskLoopActivationProofRejectedError(
+                    "Task Loop node attempt sequence is incomplete"
+                )
+            binding = bindings_by_node.get(node.node_id)
+            if node.node_kind in {
+                DraftNodeKind.AGENT.value,
+                DraftNodeKind.CAPABILITY.value,
+            }:
+                if binding is None:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Runnable Task Loop node lost its exact binding"
+                    )
+            elif binding is not None or node_attempts or node.node_id in results_by_node:
+                raise TaskLoopActivationProofRejectedError(
+                    "Control node contains dispatch or ResultRef evidence"
+                )
+
+            latest_attempt = node_attempts[-1] if node_attempts else None
+            verified_result = results_by_node.get(node.node_id)
+            if any(
+                item.status == "verified"
+                and item.attempt_id
+                != (verified_result.attempt_id if verified_result is not None else None)
+                for item in node_attempts
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Verified attempt has no exact immutable ResultRef"
+                )
+            if verified_result is not None and (
+                latest_attempt is None
+                or latest_attempt.attempt_id != verified_result.attempt_id
+                or latest_attempt.status != "verified"
+                or node.status != "verified"
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Verified ResultRef differs from the current node state"
+                )
+            if node.status == "verified" and (
+                node.node_kind in {DraftNodeKind.AGENT.value, DraftNodeKind.CAPABILITY.value}
+                and verified_result is None
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Runnable verified node has no verified ResultRef"
+                )
+
+            verified_dependencies = tuple(
+                dependency_id
+                for dependency_id in node.depends_on
+                if self._dependency_is_verified(
+                    dependency_id,
+                    nodes_by_id=nodes_by_id,
+                    results_by_node=results_by_node,
+                )
+            )
+            dependencies_verified = len(verified_dependencies) == len(node.depends_on)
+            if (
+                node.status
+                in {
+                    "ready",
+                    "claimed",
+                    "running",
+                    "awaiting_verification",
+                    "verified",
+                    "waiting_user",
+                    "waiting_children",
+                }
+                and not dependencies_verified
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Node advanced without verified dependency ResultRefs"
+                )
+            candidate_present = bool(
+                latest_attempt is not None
+                and latest_attempt.status == "awaiting_verification"
+                and latest_attempt.candidate_manifest is not None
+                and latest_attempt.verification_manifest is None
+                and verified_result is None
+            )
+            if latest_attempt is not None and latest_attempt.candidate_manifest is not None:
+                if (
+                    latest_attempt.status == "awaiting_verification"
+                    and verified_result is None
+                    and not candidate_present
+                ):
+                    raise TaskLoopActivationProofRejectedError(
+                        "Unverified candidate evidence is incomplete"
+                    )
+            max_attempts = int(node.budget["retries"]) + 1
+            node_reads.append(
+                TaskLoopExecutionNodeRead.build(
+                    node_id=node.node_id,
+                    local_key=node.local_key,
+                    kind=DraftNodeKind(node.node_kind),
+                    status=node.status,
+                    depends_on=tuple(node.depends_on),
+                    verified_dependency_node_ids=verified_dependencies,
+                    dependency_count=len(node.depends_on),
+                    verified_dependency_count=len(verified_dependencies),
+                    dependencies_verified=dependencies_verified,
+                    attempt_count=node.attempt_count,
+                    max_attempts=max_attempts,
+                    candidate_present=candidate_present,
+                    verified_result_present=verified_result is not None,
+                    created_at=self._aware(node.created_at),
+                    updated_at=self._aware(node.updated_at),
+                )
+            )
+
+        phase = self._execution_phase(execution, tuple(node_reads))
+        updated_at = max(
+            loop.updated_at,
+            execution.updated_at,
+            *(item.updated_at for item in node_reads),
+        )
+        return TaskLoopExecutionRead.build(
+            task_id=execution.task_id,
+            loop_id=execution.loop_id,
+            loop_status=loop.status,
+            phase=phase,
+            loop_revision=loop.revision,
+            loop_event_count=loop.event_count,
+            loop_progress_digest=loop.progress_digest,
+            execution=execution,
+            nodes=tuple(node_reads),
+            recoverable=execution.status in {"active", "paused", "awaiting_user", "repairing"},
+            created_at=loop.created_at,
+            updated_at=updated_at,
+        )
+
+    @staticmethod
+    def _dependency_is_verified(
+        node_id: str,
+        *,
+        nodes_by_id: dict[str, TaskExecutionNodeRecord],
+        results_by_node: dict[str, TaskLoopVerifiedResult],
+    ) -> bool:
+        dependency = nodes_by_id.get(node_id)
+        if dependency is None:
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop dependency points outside its exact Run"
+            )
+        if dependency.node_kind in {
+            DraftNodeKind.AGENT.value,
+            DraftNodeKind.CAPABILITY.value,
+        }:
+            return node_id in results_by_node
+        return dependency.status == "verified"
+
+    @staticmethod
+    def _execution_phase(
+        execution: TaskLoopExecution,
+        nodes: tuple[TaskLoopExecutionNodeRead, ...],
+    ) -> str:
+        if execution.status == "awaiting_user":
+            return "awaiting_user"
+        if execution.status in {"repairing", "failed"}:
+            return "repair"
+        if any(item.status == "awaiting_verification" or item.candidate_present for item in nodes):
+            return "verify"
+        return "execute"
+
+    async def _assert_persisted_exact(
+        self,
+        task_id: str,
+        draft: ModelPlannerDraft,
+        bindings: tuple[ModelPlannerNodeBinding, ...],
+    ) -> None:
+        async with self._database.session() as session:
+            record = await session.scalar(
+                select(TaskLoopExecutionRecord).where(TaskLoopExecutionRecord.task_id == task_id)
+            )
+            if record is None:
+                raise TaskLoopActivationConflictError("Concurrent activation winner is missing")
+            await self._read_exact(
+                session,
+                record,
+                draft=draft,
+                expected_bindings=bindings,
+            )
+
+    async def _read_exact(
+        self,
+        session: AsyncSession,
+        record: TaskLoopExecutionRecord,
+        *,
+        draft: ModelPlannerDraft,
+        expected_bindings: tuple[ModelPlannerNodeBinding, ...] | None,
+    ) -> TaskLoopExecution:
+        try:
+            execution = TaskLoopExecution.model_validate(record.manifest)
+        except ValidationError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Persisted Task Loop execution manifest is invalid"
+            ) from error
+        expected_record = self._execution_record(execution)
+        for field in (
+            "execution_id",
+            "loop_id",
+            "draft_id",
+            "task_id",
+            "plan_id",
+            "plan_generation",
+            "plan_manifest_digest",
+            "run_id",
+            "status",
+            "revision",
+            "event_count",
+            "latest_event_id",
+            "latest_event_digest",
+            "node_binding_count",
+            "binding_set_digest",
+            "manifest",
+            "execution_digest",
+        ):
+            if getattr(record, field) != getattr(expected_record, field):
+                raise TaskLoopActivationProofRejectedError(
+                    "Task Loop execution columns diverge from its manifest"
+                )
+        if (
+            self._aware(record.created_at) != execution.created_at
+            or self._aware(record.updated_at) != execution.updated_at
+            or execution.draft_id != draft.draft_id
+            or execution.plan_id != draft.expected_plan.plan_id
+            or execution.plan_manifest_digest != draft.expected_plan_manifest_digest
+        ):
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution scope differs from the sealed Draft"
+            )
+        events = tuple(
+            (
+                await session.scalars(
+                    select(TaskLoopExecutionEventRecord)
+                    .where(TaskLoopExecutionEventRecord.execution_id == execution.execution_id)
+                    .order_by(TaskLoopExecutionEventRecord.sequence)
+                )
+            ).all()
+        )
+        if not events or len(events) != execution.event_count:
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution event chain is incomplete"
+            )
+        parsed_events = tuple(self._event_from_record(item) for item in events)
+        previous_digest: str | None = None
+        for sequence, event in enumerate(parsed_events, start=1):
+            if (
+                event.sequence != sequence
+                or event.previous_event_digest != previous_digest
+                or event.execution_id != execution.execution_id
+                or event.task_id != execution.task_id
+                or event.plan_manifest_digest != execution.plan_manifest_digest
+                or event.run_id != execution.run_id
+                or event.binding_set_digest != execution.binding_set_digest
+                or (sequence == 1 and event.kind != "activated")
+                or (sequence > 1 and event.kind == "activated")
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Task Loop execution event chain changed"
+                )
+            previous_digest = event.event_digest
+        event = parsed_events[-1]
+        status_by_event = {
+            "activated": "active",
+            "paused": "paused",
+            "resumed": "active",
+            "awaiting_user": "awaiting_user",
+            "repair_started": "repairing",
+            "failed": "failed",
+            "succeeded": "succeeded",
+            "cancelled": "cancelled",
+        }
+        if (
+            event.event_id != execution.latest_event_id
+            or event.event_digest != execution.latest_event_digest
+            or event.binding_set_digest != execution.binding_set_digest
+            or status_by_event[event.kind] != execution.status
+            or execution.revision != execution.event_count
+        ):
+            raise TaskLoopActivationProofRejectedError("Task Loop execution event pointer changed")
+        binding_records = tuple(
+            (
+                await session.scalars(
+                    select(ModelPlannerNodeBindingRecord)
+                    .where(ModelPlannerNodeBindingRecord.execution_id == execution.execution_id)
+                    .order_by(ModelPlannerNodeBindingRecord.composite_node_id)
+                )
+            ).all()
+        )
+        bindings = tuple(self._binding_from_record(item) for item in binding_records)
+        if len(bindings) != execution.node_binding_count:
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution node-binding set is incomplete"
+            )
+        binding_set_digest = sha256_digest(
+            {
+                "node_bindings": [
+                    {
+                        "node_binding_id": item.node_binding_id,
+                        "binding_digest": item.binding_digest,
+                    }
+                    for item in bindings
+                ]
+            }
+        )
+        if binding_set_digest != execution.binding_set_digest:
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution binding-set digest changed"
+            )
+        if expected_bindings is not None and bindings != tuple(
+            sorted(expected_bindings, key=lambda item: item.composite_node_id)
+        ):
+            raise TaskLoopActivationProofRejectedError(
+                "Persisted node authorities differ from current exact bindings"
+            )
+        await self._validate_plan_run_lineage(session, execution, bindings)
+        return execution
+
+    @staticmethod
+    async def _validate_plan_run_lineage(
+        session: AsyncSession,
+        execution: TaskLoopExecution,
+        bindings: tuple[ModelPlannerNodeBinding, ...],
+    ) -> None:
+        state = await session.get(TaskPlanningStateRecord, execution.task_id)
+        plan = await session.get(
+            TaskPlanGenerationRecord,
+            (execution.task_id, execution.plan_generation),
+        )
+        run = await session.get(TaskExecutionRunRecord, execution.run_id)
+        try:
+            executable = ExecutablePlan.model_validate(plan.manifest) if plan is not None else None
+        except ValidationError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution Plan manifest is invalid"
+            ) from error
+        if (
+            state is None
+            or plan is None
+            or run is None
+            or state.active_plan_generation != 1
+            or state.active_plan_digest != execution.plan_manifest_digest
+            or plan.status != "active"
+            or plan.plan_id != execution.plan_id
+            or plan.plan_manifest_digest != execution.plan_manifest_digest
+            or run.task_id != execution.task_id
+            or run.plan_generation != 1
+            or run.plan_digest != execution.plan_manifest_digest
+            or executable is None
+            or executable.plan_manifest_digest != execution.plan_manifest_digest
+        ):
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution Plan or Run lineage changed"
+            )
+        node_records = tuple(
+            (
+                await session.scalars(
+                    select(TaskExecutionNodeRecord).where(
+                        TaskExecutionNodeRecord.run_id == execution.run_id
+                    )
+                )
+            ).all()
+        )
+        nodes_by_id = {item.node_id: item for item in node_records}
+        if len(node_records) != len(executable.nodes):
+            raise TaskLoopActivationProofRejectedError("Task Loop execution node set changed")
+        for expected in executable.nodes:
+            actual = nodes_by_id.get(expected.node_id)
+            if actual is None or (
+                actual.run_id != execution.run_id
+                or actual.local_key != expected.local_key
+                or actual.node_kind != expected.kind.value
+                or actual.node_spec_digest != expected.node_spec_digest
+                or tuple(actual.depends_on) != expected.depends_on
+                or actual.handoff_parent_node_id != expected.handoff_parent_node_id
+                or actual.bound_agent
+                != (
+                    expected.bound_agent.model_dump(mode="json")
+                    if expected.bound_agent is not None
+                    else None
+                )
+                or actual.capability
+                != (
+                    expected.capability.model_dump(mode="json")
+                    if expected.capability is not None
+                    else None
+                )
+                or tuple(actual.acceptance_refs) != expected.acceptance_refs
+                or actual.budget != expected.budget.model_dump(mode="json")
+                or actual.runtime_enabled is not expected.runtime_enabled
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Task Loop execution node differs from its exact Plan"
+                )
+        edge_records = tuple(
+            (
+                await session.scalars(
+                    select(TaskExecutionEdgeRecord).where(
+                        TaskExecutionEdgeRecord.run_id == execution.run_id
+                    )
+                )
+            ).all()
+        )
+        expected_edges = {
+            (source, node.node_id, "verified")
+            for node in executable.nodes
+            for source in node.depends_on
+        }
+        actual_edges = {
+            (item.from_node_id, item.to_node_id, item.requirement) for item in edge_records
+        }
+        if actual_edges != expected_edges:
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution edges differ from its exact Plan"
+            )
+        if any(item.composite_node_id not in nodes_by_id for item in bindings):
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop node binding points outside its exact Run"
+            )
+
+    @staticmethod
+    def _assert_locked_source(
+        loop_record: TaskLoopRecord,
+        draft_record: ModelPlannerDraftRecord,
+        loop: TaskLoop,
+        draft: ModelPlannerDraft,
+    ) -> None:
+        if (
+            loop_record.status != "planned"
+            or loop_record.loop_digest != loop.loop_digest
+            or loop_record.active_draft_id != draft.draft_id
+            or loop_record.active_draft_record_digest != draft.draft_record_digest
+            or draft_record.loop_id != loop.loop_id
+            or draft_record.task_id != loop.source.task_id
+            or draft_record.draft_record_digest != draft.draft_record_digest
+            or draft_record.expected_plan_manifest_digest != draft.expected_plan_manifest_digest
+            or draft_record.manifest != draft.model_dump(mode="json")
+        ):
+            raise TaskLoopActivationProofRejectedError(
+                "Locked Task Loop or Draft proof changed before activation"
+            )
+
+    @staticmethod
+    async def _required_execution_record(
+        session: AsyncSession,
+        execution_id: str,
+    ) -> TaskLoopExecutionRecord:
+        record = await session.get(TaskLoopExecutionRecord, execution_id)
+        if record is None:
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution disappeared inside activation transaction"
+            )
+        return record
+
+    @staticmethod
+    def _execution_record(execution: TaskLoopExecution) -> TaskLoopExecutionRecord:
+        return TaskLoopExecutionRecord(
+            execution_id=execution.execution_id,
+            loop_id=execution.loop_id,
+            draft_id=execution.draft_id,
+            task_id=execution.task_id,
+            plan_id=execution.plan_id,
+            plan_generation=execution.plan_generation,
+            plan_manifest_digest=execution.plan_manifest_digest,
+            run_id=execution.run_id,
+            status=execution.status,
+            revision=execution.revision,
+            event_count=execution.event_count,
+            latest_event_id=execution.latest_event_id,
+            latest_event_digest=execution.latest_event_digest,
+            node_binding_count=execution.node_binding_count,
+            binding_set_digest=execution.binding_set_digest,
+            manifest=execution.model_dump(mode="json"),
+            execution_digest=execution.execution_digest,
+            created_at=execution.created_at,
+            updated_at=execution.updated_at,
+        )
+
+    @staticmethod
+    def _event_record(event: TaskLoopExecutionEvent) -> TaskLoopExecutionEventRecord:
+        return TaskLoopExecutionEventRecord(
+            event_id=event.event_id,
+            execution_id=event.execution_id,
+            task_id=event.task_id,
+            sequence=event.sequence,
+            previous_event_digest=event.previous_event_digest,
+            kind=event.kind,
+            plan_manifest_digest=event.plan_manifest_digest,
+            run_id=event.run_id,
+            binding_set_digest=event.binding_set_digest,
+            manifest=event.model_dump(mode="json"),
+            event_digest=event.event_digest,
+            created_at=event.created_at,
+        )
+
+    @staticmethod
+    def _binding_record(
+        binding: ModelPlannerNodeBinding,
+        execution_id: str,
+        created_at: datetime,
+    ) -> ModelPlannerNodeBindingRecord:
+        return ModelPlannerNodeBindingRecord(
+            node_binding_id=binding.node_binding_id,
+            execution_id=execution_id,
+            task_id=binding.task_id,
+            user_message_id=binding.user_message_id,
+            draft_id=binding.draft_id,
+            step_binding_id=binding.step_binding_id,
+            step_binding_digest=binding.step_binding_digest,
+            step_ordinal=binding.step_ordinal,
+            offer_id=binding.offer_id,
+            offer_key=binding.offer_key,
+            offer_digest=binding.offer_digest,
+            recipe_manifest=binding.recipe.model_dump(mode="json"),
+            recipe_digest=binding.recipe.route_manifest_digest,
+            policy_snapshot_digest=binding.policy_snapshot_digest,
+            source_contract_digest=binding.source_contract_digest,
+            source_plan_id=binding.source_plan_id,
+            source_plan_manifest_digest=binding.source_plan_manifest_digest,
+            source_node_id=binding.source_node_id,
+            source_node_spec_digest=binding.source_node_spec_digest,
+            composite_contract_digest=binding.composite_contract_digest,
+            composite_plan_id=binding.composite_plan_id,
+            composite_plan_manifest_digest=(binding.composite_plan_manifest_digest),
+            composite_node_id=binding.composite_node_id,
+            composite_node_spec_digest=binding.composite_node_spec_digest,
+            mapping_manifest=binding.mapping.model_dump(mode="json"),
+            mapping_digest=binding.mapping.mapping_digest,
+            parameter_bindings_manifest=[
+                item.model_dump(mode="json") for item in binding.parameter_bindings
+            ],
+            parameter_bindings_digest=binding.parameter_bindings_digest,
+            bound_input_manifest=binding.bound_input_manifest,
+            bound_input_digest=binding.bound_input_digest,
+            effective_authority_manifest=(binding.effective_authority.model_dump(mode="json")),
+            effective_authority_digest=(binding.effective_authority.authority_digest),
+            runtime_eligibility_manifest=(binding.runtime_eligibility.model_dump(mode="json")),
+            runtime_eligibility_digest=(binding.runtime_eligibility.eligibility_digest),
+            manifest=binding.model_dump(mode="json"),
+            binding_digest=binding.binding_digest,
+            created_at=created_at,
+        )
+
+    @staticmethod
+    def _event_from_record(
+        record: TaskLoopExecutionEventRecord,
+    ) -> TaskLoopExecutionEvent:
+        try:
+            event = TaskLoopExecutionEvent.model_validate(record.manifest)
+        except ValidationError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Persisted Task Loop execution event is invalid"
+            ) from error
+        expected = TaskLoopActivationRuntime._event_record(event)
+        for field in (
+            "event_id",
+            "execution_id",
+            "task_id",
+            "sequence",
+            "previous_event_digest",
+            "kind",
+            "plan_manifest_digest",
+            "run_id",
+            "binding_set_digest",
+            "manifest",
+            "event_digest",
+        ):
+            if getattr(record, field) != getattr(expected, field):
+                raise TaskLoopActivationProofRejectedError(
+                    "Task Loop execution event columns diverge from its manifest"
+                )
+        if TaskLoopActivationRuntime._aware(record.created_at) != event.created_at:
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution event timestamp changed"
+            )
+        return event
+
+    @staticmethod
+    def _binding_from_record(
+        record: ModelPlannerNodeBindingRecord,
+    ) -> ModelPlannerNodeBinding:
+        try:
+            binding = ModelPlannerNodeBinding.model_validate(record.manifest)
+        except ValidationError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Persisted model-planner node binding is invalid"
+            ) from error
+        expected = TaskLoopActivationRuntime._binding_record(
+            binding,
+            record.execution_id,
+            record.created_at,
+        )
+        for field in (
+            "node_binding_id",
+            "execution_id",
+            "task_id",
+            "user_message_id",
+            "draft_id",
+            "step_binding_id",
+            "step_binding_digest",
+            "step_ordinal",
+            "offer_id",
+            "offer_key",
+            "offer_digest",
+            "recipe_manifest",
+            "recipe_digest",
+            "policy_snapshot_digest",
+            "source_contract_digest",
+            "source_plan_id",
+            "source_plan_manifest_digest",
+            "source_node_id",
+            "source_node_spec_digest",
+            "composite_contract_digest",
+            "composite_plan_id",
+            "composite_plan_manifest_digest",
+            "composite_node_id",
+            "composite_node_spec_digest",
+            "mapping_manifest",
+            "mapping_digest",
+            "parameter_bindings_manifest",
+            "parameter_bindings_digest",
+            "bound_input_manifest",
+            "bound_input_digest",
+            "effective_authority_manifest",
+            "effective_authority_digest",
+            "runtime_eligibility_manifest",
+            "runtime_eligibility_digest",
+            "manifest",
+            "binding_digest",
+        ):
+            if getattr(record, field) != getattr(expected, field):
+                raise TaskLoopActivationProofRejectedError(
+                    "Model Planner node binding columns diverge from its manifest"
+                )
+        return binding
+
+    @staticmethod
+    def _attempt_from_record(
+        record: TaskLoopNodeAttemptRecord,
+    ) -> TaskLoopNodeAttempt:
+        try:
+            attempt = TaskLoopNodeAttempt.model_validate(record.manifest)
+        except ValidationError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Persisted Task Loop node attempt is invalid"
+            ) from error
+        for field in (
+            "attempt_id",
+            "execution_id",
+            "node_binding_id",
+            "run_id",
+            "node_id",
+            "attempt",
+            "status",
+            "revision",
+            "claim_owner_id",
+            "claim_fencing_token",
+            "input_manifest",
+            "input_digest",
+            "context_manifest",
+            "context_digest",
+            "candidate_manifest",
+            "candidate_digest",
+            "verification_manifest",
+            "verification_digest",
+            "receipt_manifest",
+            "receipt_digest",
+            "error_code",
+            "error_digest",
+            "manifest",
+            "attempt_digest",
+        ):
+            expected = (
+                attempt.model_dump(mode="json") if field == "manifest" else getattr(attempt, field)
+            )
+            if getattr(record, field) != expected:
+                raise TaskLoopActivationProofRejectedError(
+                    "Task Loop attempt columns diverge from its manifest"
+                )
+        for field in (
+            "claim_acquired_at",
+            "claim_expires_at",
+            "candidate_recorded_at",
+            "verified_at",
+            "created_at",
+            "updated_at",
+        ):
+            if TaskLoopActivationRuntime._aware_optional(getattr(record, field)) != getattr(
+                attempt, field
+            ):
+                raise TaskLoopActivationProofRejectedError("Task Loop attempt timestamp changed")
+        return attempt
+
+    @staticmethod
+    def _verified_result_from_record(
+        record: TaskLoopVerifiedResultRecord,
+    ) -> TaskLoopVerifiedResult:
+        values = {
+            **{
+                field: getattr(record, field)
+                for field in (
+                    "result_ref_id",
+                    "attempt_id",
+                    "execution_id",
+                    "node_binding_id",
+                    "node_binding_digest",
+                    "run_id",
+                    "node_id",
+                    "producer_kind",
+                    "capability_manifest",
+                    "capability_digest",
+                    "agent_binding_manifest",
+                    "agent_binding_digest",
+                    "executor_manifest_digest",
+                    "agent_result_proof_digest",
+                    "input_binding_digest",
+                    "context_digest",
+                    "candidate_digest",
+                    "result_kind",
+                    "output_manifest",
+                    "output_schema_digest",
+                    "output_digest",
+                    "verification_manifest",
+                    "verification_digest",
+                    "result_ref_manifest",
+                    "result_ref_digest",
+                )
+            },
+            "created_at": TaskLoopActivationRuntime._aware(record.created_at),
+        }
+        try:
+            result = TaskLoopVerifiedResult.model_validate(values)
+        except ValidationError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Persisted verified ResultRef proof is invalid"
+            ) from error
+        for field, value in values.items():
+            if field == "created_at":
+                continue
+            if getattr(record, field) != value:
+                raise TaskLoopActivationProofRejectedError(
+                    "Verified ResultRef columns changed during reconstruction"
+                )
+        return result
+
+    @staticmethod
+    def _validate_verified_result(
+        *,
+        execution: TaskLoopExecution,
+        result: TaskLoopVerifiedResult,
+        attempt: TaskLoopNodeAttempt,
+        binding: ModelPlannerNodeBinding,
+    ) -> None:
+        try:
+            result_ref = VerifiedCapabilityResultRef.model_validate(result.result_ref_manifest)
+        except ValidationError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Persisted ResultRef does not match the strict verified Schema"
+            ) from error
+        result_id_material = {
+            "attempt_id": attempt.attempt_id,
+            "result_ref_digest": result_ref.result_ref_digest,
+        }
+        expected_result_id = f"tlr_{sha256_digest(result_id_material)}"
+        capability_manifest = result_ref.capability.model_dump(mode="json")
+        if (
+            result.result_ref_id != expected_result_id
+            or result.execution_id != execution.execution_id
+            or result.run_id != execution.run_id
+            or result.node_id != binding.composite_node_id
+            or result.node_binding_id != binding.node_binding_id
+            or result.node_binding_digest != binding.binding_digest
+            or result.attempt_id != attempt.attempt_id
+            or attempt.status != "verified"
+            or attempt.execution_id != execution.execution_id
+            or attempt.run_id != execution.run_id
+            or attempt.node_id != binding.composite_node_id
+            or attempt.node_binding_id != binding.node_binding_id
+            or attempt.input_digest != result.input_binding_digest
+            or attempt.context_digest != result.context_digest
+            or attempt.verification_digest != result.verification_digest
+            or attempt.verification_manifest is None
+            or attempt.verified_at is None
+            or result_ref.task_id != execution.task_id
+            or result_ref.run_id != execution.run_id
+            or result_ref.plan_generation != execution.plan_generation
+            or result_ref.producer_node_id != binding.composite_node_id
+            or result_ref.producer_attempt != attempt.attempt
+            or result_ref.capability.model_dump(mode="json") != result.capability_manifest
+            or result.capability_digest != sha256_digest(capability_manifest)
+            or result_ref.result_kind.value != result.result_kind
+            or result_ref.result_schema_digest != result.output_schema_digest
+            or result_ref.result_digest != result.output_digest
+            or result_ref.verification_digest != result.verification_digest
+            or result_ref.result_ref_digest != result.result_ref_digest
+            or result.created_at < attempt.created_at
+        ):
+            raise TaskLoopActivationProofRejectedError(
+                "Verified ResultRef lineage differs from its exact attempt"
+            )
+        if result.producer_kind == "capability_executor":
+            capability = binding.effective_authority.capability
+            if (
+                binding.runtime_eligibility.runtime_kind != "capability_executor"
+                or capability is None
+                or result_ref.capability != capability
+                or result.executor_manifest_digest
+                != binding.runtime_eligibility.executor_manifest_digest
+                or result.candidate_digest != attempt.candidate_digest
+                or attempt.candidate_manifest is None
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Capability ResultRef producer proof changed"
+                )
+        else:
+            bound_agent = binding.effective_authority.bound_agent
+            if (
+                binding.runtime_eligibility.runtime_kind != "agent"
+                or bound_agent is None
+                or result.agent_binding_manifest != bound_agent.model_dump(mode="json")
+                or result.agent_binding_digest != sha256_digest(bound_agent.model_dump(mode="json"))
+                or result.agent_result_proof_digest is None
+            ):
+                raise TaskLoopActivationProofRejectedError(
+                    "Agent-bridge ResultRef producer proof changed"
+                )
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None:
+            raise ValueError("Task-loop activation clock must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @staticmethod
+    def _aware(value: datetime) -> datetime:
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+    @staticmethod
+    def _aware_optional(value: datetime | None) -> datetime | None:
+        return None if value is None else TaskLoopActivationRuntime._aware(value)

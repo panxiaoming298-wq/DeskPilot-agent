@@ -296,6 +296,41 @@ describe('ResearchArtifactWorkbench', () => {
     expect(advanceTaskWorkbench).not.toHaveBeenCalled()
   })
 
+  it('shows restart-safe task-loop execution progress without authority inputs', async () => {
+    const executing = {
+      ...workbench,
+      stage: 'executing',
+      actions: [],
+      task_loop: {
+        schema_version: 'deskpilot.task-loop-execution-workbench.v1',
+        task_id: preview.task_id,
+        phase: 'execute', loop_status: 'planned', execution_status: 'active',
+        loop_revision: 2, loop_event_count: 2,
+        execution_revision: 1, execution_event_count: 1,
+        node_count: 4, pending_count: 3, ready_count: 1, active_count: 0,
+        awaiting_verification_count: 0, verified_count: 0, waiting_user_count: 0,
+        failed_count: 0, cancelled_count: 0, candidate_count: 0,
+        verified_result_count: 0, nodes: [], recoverable: true,
+        created_at: '2026-08-18T00:00:00Z', updated_at: '2026-08-18T00:00:02Z',
+        projection_digest: '8'.repeat(64),
+      },
+      projection_digest: '9'.repeat(64),
+    } as unknown as TaskWorkbench
+    vi.mocked(createConversationTurn).mockResolvedValue(executing)
+
+    const wrapper = mount(ResearchArtifactWorkbench)
+    await wrapper.get('#agent-prompt').setValue('先查询 alpha 再统计 alpha')
+    await wrapper.get('.agent-composer').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Task Loop Proof')
+    expect(wrapper.text()).toContain('通用循环正在按一个持久命令逐步推进')
+    expect(wrapper.text()).toContain('0 / 4 已验证')
+    expect(wrapper.text()).toContain('可从持久证明恢复')
+    expect(JSON.stringify(executing.task_loop)).not.toContain('parameters')
+    expect(JSON.stringify(executing.task_loop)).not.toContain('offer')
+  })
+
   it('shows clarification without inventing an executable run', async () => {
     const clarification = {
       ...workbench,

@@ -62,7 +62,7 @@
 
 ### 112A：版本化多步骤 Planner
 
-> 实施状态（2026-08-24）：112A 实现、独立 staged 里程碑门禁与中文提交 `完成阶段112A多步骤计划检查点` 已完成，未 push；当前进入 112B。实际边界与验证记录见[阶段 112：通用持久任务循环](112-通用持久任务循环.md)。阶段 112 的完整全量/外部门禁在 112C 结束后统一执行。
+> 实施状态（2026-08-24）：112A 实现、独立 staged 里程碑门禁与中文提交 `完成阶段112A多步骤计划检查点` 已完成，未 push；112B 的通用 Execute/Verify 实现与本地里程碑门禁已通过，下一步进入 112C。实际边界与验证记录见[阶段 112：通用持久任务循环](112-通用持久任务循环.md)。阶段 112 的 PostgreSQL/RabbitMQ 外部门禁在 112C 结束后统一执行。
 
 - 整体规划支持 1～8 个服务器 Offer：单步骤继续走阶段 111 已验收的 trusted recipe 路径，112A 的 TaskLoop 多步骤入口只消费 2～8 步 `MULTI_STEP_PLAN_DEFERRED`，不改旧 digest/行为。
 - 每一步只引用 Offer 与已持久输入；服务器重新验证消息片段、Offer、recipe、exact Contract/Capability/Policy/预算绑定，全程不进行第二次 Provider 调用。
@@ -76,6 +76,8 @@
 - 研究、知识、MCP、Workspace 读取与固定测试可以组合。
 - 节点只能消费类型匹配、digest 闭合的 verified ResultRef；Memory、Summary、MCP 或 UI 状态不能替代 verified edge。
 - 激活必须在 expected generation-1 Plan、逐 source-step 权限/输入绑定与当前 runtime eligibility 原子闭合之后发生；112A Draft 本身不具有执行权限。
+- `0053_task_loop_execution` 保存逐节点 authority/eligibility binding、generation-1 execution/event、attempt 与 verified ResultRef；Workbench 通过 `advance_task_loop` 每次只提交一个持久 reducer command。
+- Capability 与 Agent 执行均在事务外做受控工作、事务内复核 owner/fence 和结果证明；重启从 planned/active execution 的持久真值恢复，不重放 Turn Planner Provider 或 outcome unknown 副作用。
 
 ### 112C：Patch/Test/Approval 与 Repair
 
