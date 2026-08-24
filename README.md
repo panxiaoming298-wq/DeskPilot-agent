@@ -4,7 +4,7 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 77～110 checkpoint 与阶段 111 均已通过本地全量门禁；下一步从阶段 111 提交建立 `codex/stage-112`。** 阶段 111 保留 15 条确定性 Route 的旧 digest/行为，并在无法路由时增加 LOCAL-only Turn Planner 与服务器预编译 Capability Offer；模型提案不授予权限。当前没有真实模型/Judge/真人 production admission，既有 Agent 仍保持 LOCAL-only。详细进度和续接入口见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 77～110 checkpoint、阶段 111 与阶段 112A 里程碑均已通过；当前在 `codex/stage-112` 进入 112B 通用执行/验证循环。** 阶段 111 保留 15 条确定性 Route 的旧 digest/行为，并在无法路由时增加 LOCAL-only Turn Planner 与服务器预编译 Capability Offer；112A 已能把 2～8 步 deferred Offer 重新验证并组合为 `model_planner` Draft 和 generation-1 Plan preview，全程不进行第二次 Provider 调用，也尚未激活执行。当前没有真实模型/Judge/真人 production admission，既有 Agent 仍保持 LOCAL-only。详细进度和续接入口见[项目进度](项目进度.md)。
 
 产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物：内部扩展计划约完成 81%～85%，但相对 Codex 类编码 Agent 的能力覆盖粗估仅 35%～45%，相对 Marvis 类桌面 Agent 约 25%～35%。最大缺口不是更多 Agent 名称，而是开放目标的模型规划、通用执行/验证/修复循环、安全命令与 Git/test/build 工具面、多活动任务，以及登录态浏览器和 Computer/App Agent。后续采用 **Codex 优先、Marvis 后置** 的路线。
 
@@ -192,6 +192,7 @@ flowchart LR
 125. [候选 Agent 身份绑定与校准工件 v2](doc/110-候选Agent身份绑定与校准工件v2.md)
 126. [阶段 111～116：通用多 Agent 与 Edge/记事本实施路线](doc/111-116-通用多Agent与Edge记事本实施路线.md)
 127. [通用任务提案与 Capability Offer](doc/111-通用任务提案与Capability-Offer.md)
+128. [通用持久任务循环](doc/112-通用持久任务循环.md)
 
 ## 目标 MVP 与当前边界
 
@@ -248,7 +249,7 @@ flowchart LR
 - 后端另已将结构化写请求、受信计划、Policy/审批绑定、Tool 幂等键以及 effect graph/node/mode/fence 游标保存到 current-user DPAPI 受保护 checkpoint；可证明的 created/paused/waiting-approval 可跨 API 重启精确续跑，running Tool 只转 unknown/`waiting_reconciliation`，由显式 continue/terminate 恢复且绝不重放原 call。
 - `frontend/`：Vue 3、TypeScript、Vite 7，支持安全会话引导、任务提交、暂停/恢复/取消、`waiting_approval` 审批卡、审批失败对账、任务历史/集中 Reconciliation 列表、`waiting_reconciliation` 筛选、Runner 证据刷新、不可改写裁决、graph continue/terminate、attempt/compensation 二次确认和血缘导航、断线续传提示、任务快照、计划、实时事件时间线，Provider CRUD/健康/ETag/路由韧性控制面，以及 graph-control/admission/ready/Outbox 四域脱敏运维、告警/hash-chain 审计、retention/DLQ 二次确认与幂等重试；Vitest 组件测试已接入。
 - 当前 TaskProcessor 的磁盘容量任务通过离线 Fake Provider 获得结构化分类和计划，不调用网络模型；显式 `file.move` 请求使用受信任应用计划模板，路径只来自本地用户表单并强制进入 R1 一次性审批，不从自然语言或模型输出提取。
-- 当前真实 Tool 仍主要是 `computer.disk_usage` 与 `file.move`。统一对话入口已接入研究、本地知识、固定 MCP、Workspace 读写/检查/固定测试及 HTML/Markdown/PDF Artifact；阶段 111 已为确定性 Route 未命中接入受服务器 Offer 约束的 Turn Planner，并通过全量门禁。当前仍尚未形成阶段 112 的通用执行/验证/修复循环。
+- 当前真实 Tool 仍主要是 `computer.disk_usage` 与 `file.move`。统一对话入口已接入研究、本地知识、固定 MCP、Workspace 读写/检查/固定测试及 HTML/Markdown/PDF Artifact；阶段 111 已为确定性 Route 未命中接入受服务器 Offer 约束的 Turn Planner，并通过全量门禁。阶段 112A 已建立不重放 Provider 的多步骤 TaskLoop、`model_planner` Draft 和 generation-1 preview，但仍未激活通用执行/验证/修复循环。
 - `web.search`/`web.page.read` 在显式开关与 SearchProvider 配置下可用，默认仍关闭；Task Workspace、ArtifactRevision/PatchReceipt、同源 HTML/Markdown/PDF Builder、PDF 全页 render evidence 和 HTML BrowserRenderRun 已实现。未验证研究结果仍只能停在 `awaiting_verification`。
 
 受保护 checkpoint 只恢复能与任务事件、Tool 账本、Policy、审批记录和 effect graph 当前节点同时对上的阶段；密文损坏或任一绑定错配都会 fail closed。
@@ -259,7 +260,7 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-24 校准）
 
-阶段 77～110 checkpoint 与阶段 111 全量门禁已于 2026-08-24 完成。当前依次推进阶段 112 通用 `Observe → Plan → Execute → Verify → Repair` 持久循环、阶段 113 Codex 类安全编码工具包、阶段 114 三任务并行与托盘后台、阶段 115 三角色 Cloud 候选生命周期/Calibration v3、阶段 116 独立 Edge Profile 与 Windows 记事本安全纵切。完整设计、失败策略和验收边界见[项目进度](项目进度.md)、[阶段 111 实现文档](doc/111-通用任务提案与Capability-Offer.md)与[阶段 111～116 实施路线](doc/111-116-通用多Agent与Edge记事本实施路线.md)。
+阶段 77～110 checkpoint、阶段 111 全量门禁和阶段 112A 里程碑已于 2026-08-24 完成。当前进入 112B 通用 `Execute → Verify`，随后推进 112C Patch/Test/Approval 与 Repair、阶段 113 Codex 类安全编码工具包、阶段 114 三任务并行与托盘后台、阶段 115 三角色 Cloud 候选生命周期/Calibration v3、阶段 116 独立 Edge Profile 与 Windows 记事本安全纵切。完整设计、失败策略和验收边界见[项目进度](项目进度.md)、[阶段 112 实现文档](doc/112-通用持久任务循环.md)与[阶段 111～116 实施路线](doc/111-116-通用多Agent与Edge记事本实施路线.md)。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 
@@ -304,3 +305,5 @@ flowchart LR
 阶段 110 checkpoint 最终门禁：后端 83 个测试文件 / 615 项，`603 passed + 12 skipped`、统一退出 0，耗时 2328.01 秒；Ruff 全仓、严格 mypy 249 个源码、frozen `uv` 同步与 `pip check` 通过。Phase75 v15 为 11/11、false-success=0、unauthorized-effect=0，16 份不可变 baseline 的 SHA-256 比较前后完全一致；Evaluation、wheel 内 22/22 Prompt 资源也通过。前端 22 个测试文件 / 154 项、type-check/build 通过。Alembic current 且唯一 head 为 `0050_agent_graph_test_conditions`，fresh/default SQLite upgrade/check、`integrity_check=ok`、foreign-key 零违规。专用 `deskpilot_test` 的真实 PostgreSQL 11 项（含固定容器重启）和临时 RabbitMQ 1 项均通过，随后恢复 PostgreSQL 原启停状态并移除临时 Broker；Workflow YAML、staged 范围与 diff whitespace 通过。
 
 阶段 111 把开放 Turn 的模型理解限制在服务器 Capability Offer 之内：确定性 Route 命中时模型零调用；未命中时，独立持久 `TurnPlannerRuntime` 只接受 opaque `offer_key` 和来自持久用户消息的原文参数，单步骤由服务器绑定 expected Executable Plan，多步骤保存为 `MULTI_STEP_PLAN_DEFERRED`。迁移 head 为 `0051_turn_planning_offers`，Workbench 增加 `interpreting`、`interpret_turn` 与脱敏 `turn_planning` 摘要。最终门禁为后端 87 文件/653 项（`641 passed + 12 skipped`）、前端 22 文件/155 项、Prompt 24/24、Phase75 v16 11/11、真实 PostgreSQL 11/11 与 RabbitMQ 1/1；详见 [`doc/111-通用任务提案与Capability-Offer.md`](doc/111-通用任务提案与Capability-Offer.md)。
+
+阶段 112A 新增 `0052_model_planner_task_loop`、不可变 Observe→Plan 事件链、逐 Offer step binding 和服务器 `ModelPlannerComposer`。整体 1～8 步中，单步保持阶段 111 路径，多步 TaskLoop 接受 2～8 个 deferred Offer；它只保存 Draft 与 expected generation-1 preview，不创建执行 Run。Workbench 只返回状态/数量/摘要。独立 staged 里程碑门禁为后端组合 87/87、Ruff、严格 mypy 255 个生产源码及前端 22 文件/156 项全部通过，并以中文提交 `完成阶段112A多步骤计划检查点` 收口，未 push。112B 激活前必须落实逐 source-step 权限交集与当前 runtime/Executor 资格复核；阶段 112 的完整全量/外部门禁按计划在 112C 结束后执行，详见 [`doc/112-通用持久任务循环.md`](doc/112-通用持久任务循环.md)。

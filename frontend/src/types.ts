@@ -978,6 +978,7 @@ export type WorkbenchStage =
 
 export type WorkbenchAction =
   | 'interpret_turn'
+  | 'plan_task_loop'
   | 'activate_research_plan'
   | 'start_execution'
   | 'run_research'
@@ -1454,6 +1455,40 @@ export interface TurnPlanningWorkbenchRead {
   planning_digest: string
 }
 
+export type TaskLoopPhase = 'observe' | 'plan'
+export type TaskLoopStatus = 'observed' | 'planned' | 'failed'
+
+export interface TaskLoopFailureSummary {
+  error_code:
+    | 'MULTI_STEP_OFFER_REJECTED'
+    | 'MULTI_STEP_BINDING_REJECTED'
+    | 'MULTI_STEP_CONTRACT_REJECTED'
+    | 'MULTI_STEP_BUDGET_EXCEEDED'
+    | 'MULTI_STEP_PLAN_REJECTED'
+    | 'MULTI_STEP_PERSISTENCE_REJECTED'
+  reason_code: string
+  retry_policy: 'never_automatic'
+  failure_digest: string
+}
+
+export interface TaskLoopWorkbenchRead {
+  schema_version: 'deskpilot.task-loop-workbench.v1'
+  loop_id: string
+  phase: TaskLoopPhase
+  status: TaskLoopStatus
+  revision: number
+  event_count: number
+  step_count: number
+  source_turn_plan_binding_digest: string
+  draft_record_digest: string | null
+  expected_plan_manifest_digest: string | null
+  progress_digest: string
+  failure: TaskLoopFailureSummary | null
+  recoverable: boolean
+  updated_at: string
+  projection_digest: string
+}
+
 export interface ArtifactExport {
   export_id: string
   delivery_id: string
@@ -1680,6 +1715,7 @@ export interface TaskWorkbench {
   }>
   route: TurnRoute | null
   turn_planning: TurnPlanningWorkbenchRead | null
+  task_loop: TaskLoopWorkbenchRead | null
   planning: Record<string, unknown> | null
   contract: Record<string, unknown> | null
   plans: { plans: Array<Record<string, unknown>> }

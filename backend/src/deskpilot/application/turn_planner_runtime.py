@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Literal, cast
 from uuid import uuid4
 
@@ -29,6 +30,7 @@ from deskpilot.application.model_gateway import (
     ModelResponseInvalidError,
     ModelTimeoutError,
 )
+from deskpilot.application.model_planner_composer import RevalidatedOfferStep
 from deskpilot.application.plan_compilation_service import (
     PlanCompilationService,
     PlanningError,
@@ -168,6 +170,14 @@ class _PlanningBundle:
             adjudication=self.adjudication,
             binding=self.binding,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RevalidatedDeferredPlan:
+    """A terminal v1 deferred proposal revalidated without another model call."""
+
+    planning: TurnPlanningRead
+    steps: tuple[RevalidatedOfferStep, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,6 +505,71 @@ class TurnPlannerRuntime:
                         )
             await self._validate_parameter_sources(session, bundle)
             return bundle.read()
+
+    async def revalidate_deferred_plan(self, task_id: str) -> RevalidatedDeferredPlan:
+        """Resolve a terminal multi-step proposal entirely from persisted proof.
+
+        This is the only bridge into the stage-112 offer composer.  It performs
+        no Provider dispatch and returns immutable, server-recompiled recipe
+        inputs in the exact adjudicated order.
+        """
+
+        async with self._database.session() as session:
+            bundle = await self._load_bundle(session, task_id)
+            if bundle is None:
+                raise TurnPlannerNotFoundError("Turn Planner proof is missing")
+            adjudication = bundle.adjudication
+            binding = bundle.binding
+            if (
+                bundle.run.status != "succeeded"
+                or adjudication is None
+                or binding is None
+                or adjudication.outcome != "multi_step_deferred"
+                or binding.status != "multi_step_deferred"
+                or binding.reason_code != "MULTI_STEP_PLAN_DEFERRED"
+                or not 2 <= len(adjudication.selected_offers) <= 8
+            ):
+                raise TurnPlannerNotEligibleError(
+                    "Turn Planner outcome is not a deferred multi-step proposal"
+                )
+            await self._validate_parameter_sources(session, bundle)
+            message = await self._message_content(bundle.run, session=session)
+            offers_by_key = {item.offer_key: item for item in bundle.offers}
+            steps: list[RevalidatedOfferStep] = []
+            for selected in adjudication.selected_offers:
+                offer = offers_by_key.get(selected.offer_key)
+                if offer is None or offer.ref != selected:
+                    raise TurnPlannerProofRejectedError(
+                        "Deferred Planner selected Offer proof changed"
+                    )
+                route = self._draft_for_offer(offer)
+                parameters = self._canonical_parameters(
+                    adjudication=adjudication,
+                    offer=offer,
+                    draft=route,
+                    message=message,
+                )
+                raw_binding_digest = self._proposal_step(
+                    adjudication,
+                    offer.offer_key,
+                ).get("parameter_binding_digest")
+                if not isinstance(raw_binding_digest, str):
+                    raise TurnPlannerProofRejectedError(
+                        "Deferred Planner parameter-binding digest is missing"
+                    )
+                steps.append(
+                    RevalidatedOfferStep(
+                        offer=offer,
+                        route=route,
+                        parameters=MappingProxyType(dict(parameters)),
+                        parameter_binding_digest=raw_binding_digest,
+                        planner_agent=bundle.run.planner_agent,
+                    )
+                )
+            return RevalidatedDeferredPlan(
+                planning=bundle.read(),
+                steps=tuple(steps),
+            )
 
     async def get_bound_route(self, task_id: str) -> BoundTurnRoute | None:
         planning = await self.get(task_id)

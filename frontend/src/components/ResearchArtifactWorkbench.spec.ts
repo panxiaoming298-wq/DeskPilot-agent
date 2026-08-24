@@ -55,6 +55,7 @@ const workbench = {
   ],
   conversation: [{ message_id: 'msg_1', role: 'user', content: '生成可核验研究页', created_at: '2026-08-18T00:00:00Z' }],
   turn_planning: null,
+  task_loop: null,
   planning: {}, contract: {}, plans: { plans: [] },
   executions: { runs: [{ run_id: `run_${'9'.repeat(64)}`, task_id: preview.task_id, status: 'succeeded', revision: 5, created_at: '2026-08-18T00:00:00Z', updated_at: '2026-08-18T00:00:01Z', invocations: [], model_turns: [
     { turn_id: `amt_${'1'.repeat(64)}`, turn_no: 1, status: 'succeeded', decision_kind: 'request_route', decision_digest: '2'.repeat(64), binding_id: `rbn_${'3'.repeat(64)}`, observation_digest: '4'.repeat(64) },
@@ -259,6 +260,40 @@ describe('ResearchArtifactWorkbench', () => {
     expect(wrapper.text()).toContain('不会自动重放')
     expect(JSON.stringify(settled.turn_planning)).not.toContain('response_manifest')
     expect(JSON.stringify(settled.turn_planning)).not.toContain('offers')
+  })
+
+  it('shows a sanitized planned task-loop proof without private inputs', async () => {
+    const planned = {
+      ...workbench,
+      stage: 'planned',
+      actions: [],
+      executions: { runs: [] },
+      delivery: null,
+      task_loop: {
+        schema_version: 'deskpilot.task-loop-workbench.v1',
+        loop_id: `tlp_${'1'.repeat(64)}`,
+        phase: 'plan', status: 'planned', revision: 2, event_count: 2, step_count: 2,
+        source_turn_plan_binding_digest: '2'.repeat(64),
+        draft_record_digest: '3'.repeat(64),
+        expected_plan_manifest_digest: '4'.repeat(64),
+        progress_digest: '5'.repeat(64), failure: null, recoverable: false,
+        updated_at: '2026-08-18T00:00:02Z', projection_digest: '6'.repeat(64),
+      },
+      projection_digest: '7'.repeat(64),
+    } as unknown as TaskWorkbench
+    vi.mocked(createConversationTurn).mockResolvedValue(planned)
+
+    const wrapper = mount(ResearchArtifactWorkbench)
+    await wrapper.get('#agent-prompt').setValue('先查询 alpha 再统计 alpha')
+    await wrapper.get('.agent-composer').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Task Loop Proof')
+    expect(wrapper.text()).toContain('2 步 model_planner Draft')
+    expect(wrapper.text()).toContain('不会再次调用模型')
+    expect(JSON.stringify(planned.task_loop)).not.toContain('parameters')
+    expect(JSON.stringify(planned.task_loop)).not.toContain('offer')
+    expect(advanceTaskWorkbench).not.toHaveBeenCalled()
   })
 
   it('shows clarification without inventing an executable run', async () => {

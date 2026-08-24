@@ -62,15 +62,20 @@
 
 ### 112A：版本化多步骤 Planner
 
-- 允许 1～8 个服务器 Offer 步骤，生成 `model_planner` DraftPlan。
-- 每一步只引用 Offer 与已持久输入；服务器重新编译 exact Contract/Capability/预算绑定。
-- 明确保存 Observe、Plan、等待输入、稳定终止与失败证明。
+> 实施状态（2026-08-24）：112A 实现、独立 staged 里程碑门禁与中文提交 `完成阶段112A多步骤计划检查点` 已完成，未 push；当前进入 112B。实际边界与验证记录见[阶段 112：通用持久任务循环](112-通用持久任务循环.md)。阶段 112 的完整全量/外部门禁在 112C 结束后统一执行。
+
+- 整体规划支持 1～8 个服务器 Offer：单步骤继续走阶段 111 已验收的 trusted recipe 路径，112A 的 TaskLoop 多步骤入口只消费 2～8 步 `MULTI_STEP_PLAN_DEFERRED`，不改旧 digest/行为。
+- 每一步只引用 Offer 与已持久输入；服务器重新验证消息片段、Offer、recipe、exact Contract/Capability/Policy/预算绑定，全程不进行第二次 Provider 调用。
+- `ModelPlannerComposer` 生成 `model_planner` DraftPlan 和 expected generation-1 ExecutablePlan preview；112A 只保存 Draft/preview，不创建 PlanningState、PlanGeneration、ExecutionRun、Invocation 或 Tool call。
+- `0052_model_planner_task_loop` 保存 TaskLoop、两事件 Observe→Plan 链、Draft 和逐 step binding；Workbench 只公开状态、数量和摘要，不泄露输入、Offer、Contract 或 Plan 正文。
+- 进入 112B 前必须把每个 composite node 绑定到精确 source step，并按 `组合 Contract ∩ source-step 权限` 执行，同时重新验证当前 runtime/Executor 资格；不能只凭组合 Contract 或静态 CapabilityCatalog 激活。
 
 ### 112B：Capability Executor Registry 与通用 reducer
 
 - 用 Executor Registry 和通用 reducer 替代 Workbench 中的大量 Route 分支。
 - 研究、知识、MCP、Workspace 读取与固定测试可以组合。
 - 节点只能消费类型匹配、digest 闭合的 verified ResultRef；Memory、Summary、MCP 或 UI 状态不能替代 verified edge。
+- 激活必须在 expected generation-1 Plan、逐 source-step 权限/输入绑定与当前 runtime eligibility 原子闭合之后发生；112A Draft 本身不具有执行权限。
 
 ### 112C：Patch/Test/Approval 与 Repair
 

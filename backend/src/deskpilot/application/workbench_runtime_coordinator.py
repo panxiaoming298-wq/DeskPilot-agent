@@ -427,8 +427,9 @@ class WorkbenchRuntimeCoordinator:
                 ).all()
             )
         planner_task_ids = await self._workbench.turn_planner_recoverable_task_ids(limit=limit)
+        task_loop_ids = await self._workbench.task_loop_recoverable_task_ids(limit=limit)
         planner_task_id_set = set(planner_task_ids)
-        recoverable_task_ids = tuple(dict.fromkeys((*task_ids, *planner_task_ids)))
+        recoverable_task_ids = tuple(dict.fromkeys((*task_ids, *planner_task_ids, *task_loop_ids)))
         recovered = 0
         for task_id in recoverable_task_ids:
             try:
@@ -458,7 +459,7 @@ class WorkbenchRuntimeCoordinator:
                 continue
             await self._store.enqueue(task_id, workbench.projection_digest)
             recovered += 1
-        if len(task_ids) == limit or len(planner_task_ids) == limit:
+        if len(task_ids) == limit or len(planner_task_ids) == limit or len(task_loop_ids) == limit:
             logger.warning(
                 "Workbench startup recovery reached its bounded %s-task scan limit",
                 limit,
@@ -471,9 +472,9 @@ class WorkbenchRuntimeCoordinator:
         scan_limit = self._planner_recovery_scan_limit if limit is None else limit
         if not 1 <= scan_limit <= 1_000:
             raise ValueError("Turn Planner recovery scan limit is invalid")
-        task_ids = await self._workbench.turn_planner_recoverable_task_ids(
-            limit=scan_limit
-        )
+        task_ids = await self._workbench.turn_planner_recoverable_task_ids(limit=scan_limit)
+        task_loop_ids = await self._workbench.task_loop_recoverable_task_ids(limit=scan_limit)
+        task_ids = tuple(dict.fromkeys((*task_ids, *task_loop_ids)))
         recovered = 0
         for task_id in task_ids:
             if self._stopping:
@@ -502,7 +503,7 @@ class WorkbenchRuntimeCoordinator:
             if self._workbench.automatic_action(workbench) is not None:
                 await self._store.enqueue(task_id, workbench.projection_digest)
             recovered += 1
-        if len(task_ids) == scan_limit:
+        if len(task_ids) >= scan_limit or len(task_loop_ids) == scan_limit:
             logger.warning(
                 "Periodic Turn Planner recovery reached its bounded %s-task scan limit",
                 scan_limit,
@@ -619,9 +620,7 @@ class WorkbenchRuntimeCoordinator:
         except Exception:
             logger.exception("Unexpected Workbench startup recovery failure")
         loop = asyncio.get_running_loop()
-        next_planner_recovery_scan_at = (
-            loop.time() + self._planner_recovery_scan_interval_seconds
-        )
+        next_planner_recovery_scan_at = loop.time() + self._planner_recovery_scan_interval_seconds
         while True:
             self._wake.clear()
             if loop.time() >= next_planner_recovery_scan_at:

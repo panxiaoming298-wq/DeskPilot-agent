@@ -68,6 +68,26 @@ PRIVATE_TURN_PLANNING_KEYS = frozenset(
         "plan",
     }
 )
+PRIVATE_TASK_LOOP_KEYS = frozenset(
+    {
+        "source",
+        "steps",
+        "task_contract",
+        "draft_plan",
+        "expected_plan",
+        "parameter_bindings",
+        "node_mappings",
+        "parameters",
+        "offer_key",
+        "offer_id",
+        "offer_digest",
+        "user_message_id",
+        "user_message_digest",
+        "provider",
+        "planner_agent",
+        "execution_agents",
+    }
+)
 
 PlannerMode = Literal[
     "single",
@@ -147,9 +167,7 @@ class PlannerScriptProvider(FakeModelProvider):
                 (
                     {
                         "offer_key": _offer_key_for_parameter(payload, "changes_json"),
-                        "parameters": [
-                            {"name": "changes_json", "value": "not-json"}
-                        ],
+                        "parameters": [{"name": "changes_json", "value": "not-json"}],
                     },
                 )
             )
@@ -253,7 +271,7 @@ def _open_client(
     automatic: bool = False,
 ) -> Iterator[tuple[TestClient, Path]]:
     workspace = tmp_path / f"workspace-{name}"
-    workspace.mkdir()
+    workspace.mkdir(exist_ok=True)
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{(tmp_path / f'{name}.db').as_posix()}",
         artifact_workspace_root=str(tmp_path / f"artifacts-{name}"),
@@ -324,6 +342,27 @@ def _wait_for_terminal_planner(
     pytest.fail(f"Planner did not terminalize; latest={latest}")
 
 
+def _wait_for_planned_task_loop(
+    client: TestClient,
+    task_id: str,
+    *,
+    timeout_seconds: float = 5,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout_seconds
+    latest: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/v1/tasks/{task_id}/workbench")
+        assert response.status_code == 200, response.text
+        latest = cast(dict[str, object], response.json())
+        raw_loop = latest.get("task_loop")
+        if isinstance(raw_loop, dict):
+            _assert_minimized_task_loop(raw_loop)
+            if raw_loop["status"] in {"planned", "failed"}:
+                return latest
+        time.sleep(0.02)
+    pytest.fail(f"Task Loop did not terminalize; latest={latest}")
+
+
 def _task_id(body: dict[str, object]) -> str:
     return cast(str, cast(dict[str, object], body["task"])["task_id"])
 
@@ -344,10 +383,25 @@ def _assert_minimized_turn_planning(planning: dict[str, object]) -> None:
     visit(planning)
     assert planning["schema_version"] == "deskpilot.turn-planning-workbench-read.v1"
     run = cast(dict[str, object], planning["run"])
-    assert run["schema_version"] == (
-        "deskpilot.turn-planner-run-workbench-summary.v1"
-    )
+    assert run["schema_version"] == ("deskpilot.turn-planner-run-workbench-summary.v1")
     assert cast(int, run["offer_count"]) > 0
+
+
+def _assert_minimized_task_loop(task_loop: dict[str, object]) -> None:
+    """Prove the public Task Loop contains no user input or authority body."""
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            leaked = PRIVATE_TASK_LOOP_KEYS.intersection(value)
+            assert not leaked, f"private Task Loop keys leaked: {sorted(leaked)}"
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(task_loop)
+    assert task_loop["schema_version"] == "deskpilot.task-loop-workbench.v1"
 
 
 def test_all_legacy_routes_bypass_model_and_keep_v1_recipe(
@@ -432,6 +486,7 @@ def test_all_legacy_routes_bypass_model_and_keep_v1_recipe(
             assert route["turn_plan_binding_id"] is None
             assert route["turn_planning_provenance_digest"] is None
             assert body["turn_planning"] is None
+            assert body["task_loop"] is None
 
     assert provider.total_calls == 0
     assert provider.planner_calls == 0
@@ -476,16 +531,14 @@ def test_unmatched_single_step_uses_explicit_bodyless_endpoint_and_binds_v2_rout
         selected_offer = next(
             offer for offer in internal.offers if offer.offer_key == selected.offer_key
         )
-        assert (
-            route["route_manifest_digest"]
-            == selected_offer.trusted_recipe.route_manifest_digest
-        )
+        assert route["route_manifest_digest"] == selected_offer.trusted_recipe.route_manifest_digest
         assert route["turn_planning_adjudication_id"]
         assert route["turn_plan_binding_id"]
         assert route["turn_planning_provenance_digest"]
         assert adjudication["outcome"] == "single_step"
         assert adjudication["selected_offer_count"] == 1
         assert binding["status"] == "bound"
+        assert body["task_loop"] is None
         assert body["planning"] is not None
         assert len(cast(dict[str, list[object]], body["plans"])["plans"]) == 1
         assert len(cast(dict[str, list[object]], body["executions"])["runs"]) == 1
@@ -503,7 +556,6 @@ def test_unmatched_single_step_uses_explicit_bodyless_endpoint_and_binds_v2_rout
 @pytest.mark.parametrize(
     ("mode", "outcome", "binding_status", "stage"),
     (
-        ("multi", "multi_step_deferred", "multi_step_deferred", "unsupported"),
         ("needs_input", "needs_user_input", "not_applicable", "needs_clarification"),
         ("unsupported", "unsupported", "not_applicable", "unsupported"),
     ),
@@ -541,6 +593,88 @@ def test_non_executable_planner_outcomes_remain_proof_only(
         assert cast(dict[str, list[object]], body["executions"])["runs"] == []
 
     assert provider.planner_calls == 1
+
+
+def test_multi_step_deferred_becomes_sanitized_planned_task_loop_without_model_replay(
+    tmp_path: Path,
+) -> None:
+    provider = PlannerScriptProvider("multi")
+    with _open_client(tmp_path, provider, name="multi-task-loop") as (client, _workspace):
+        created = _create_unmatched_turn(client)
+        task_id = _task_id(created)
+        interpreted = client.post(f"/api/v1/tasks/{task_id}/workbench:interpret-turn")
+        assert interpreted.status_code == 200, interpreted.text
+        deferred = cast(dict[str, object], interpreted.json())
+        planning = cast(dict[str, object], deferred["turn_planning"])
+        adjudication = cast(dict[str, object], planning["adjudication"])
+        actions = cast(list[dict[str, object]], deferred["actions"])
+        assert adjudication["outcome"] == "multi_step_deferred"
+        assert deferred["task_loop"] is None
+        assert any(
+            item["action"] == "plan_task_loop" and item["enabled"] is True for item in actions
+        )
+
+        advanced = client.post(f"/api/v1/tasks/{task_id}/workbench:advance")
+        assert advanced.status_code == 200, advanced.text
+        body = cast(dict[str, object], advanced.json())
+        task_loop = cast(dict[str, object], body["task_loop"])
+        _assert_minimized_task_loop(task_loop)
+        assert body["stage"] == "planned"
+        assert task_loop["phase"] == "plan"
+        assert task_loop["status"] == "planned"
+        assert task_loop["revision"] == 2
+        assert task_loop["event_count"] == 2
+        assert task_loop["step_count"] == 2
+        assert task_loop["recoverable"] is False
+        assert body["planning"] is None
+        assert cast(dict[str, list[object]], body["plans"])["plans"] == []
+        assert cast(dict[str, list[object]], body["executions"])["runs"] == []
+        route = cast(dict[str, object], body["route"])
+        assert route["route_version"] is None
+        assert route["turn_planning_adjudication_id"] is None
+        assert route["turn_plan_binding_id"] is None
+        assert route["turn_planning_provenance_digest"] is None
+
+        stable = client.post(f"/api/v1/tasks/{task_id}/workbench:advance")
+        assert stable.status_code == 200, stable.text
+        stable_body = cast(dict[str, object], stable.json())
+        assert stable_body["projection_digest"] == body["projection_digest"]
+        assert stable_body["task_loop"] == task_loop
+
+    assert provider.planner_calls == 1
+    assert provider.total_calls == 1
+
+
+def test_restart_recovers_deferred_task_loop_without_replaying_planner(
+    tmp_path: Path,
+) -> None:
+    first_provider = PlannerScriptProvider("multi")
+    name = "multi-task-loop-restart"
+    with _open_client(tmp_path, first_provider, name=name) as (client, _workspace):
+        created = _create_unmatched_turn(client)
+        task_id = _task_id(created)
+        interpreted = client.post(f"/api/v1/tasks/{task_id}/workbench:interpret-turn")
+        assert interpreted.status_code == 200, interpreted.text
+        assert interpreted.json()["task_loop"] is None
+
+    assert first_provider.planner_calls == 1
+    second_provider = PlannerScriptProvider("unsupported")
+    with _open_client(
+        tmp_path,
+        second_provider,
+        name=name,
+        automatic=True,
+    ) as (client, _workspace):
+        recovered = _wait_for_planned_task_loop(client, task_id)
+        task_loop = cast(dict[str, object], recovered["task_loop"])
+        assert task_loop["status"] == "planned"
+        assert task_loop["step_count"] == 2
+        assert cast(dict[str, list[object]], recovered["executions"])["runs"] == []
+
+    assert second_provider.planner_calls == 0
+    # Startup may resume unrelated legacy TaskProcessor model work for the
+    # persisted Task.  The stage-112 guarantee is narrower and explicit: the
+    # terminal Turn Planner reservation is never dispatched again.
 
 
 @pytest.mark.parametrize(
@@ -743,8 +877,7 @@ def test_invalid_model_patch_preview_terminalizes_once_and_disables_start(
         assert route["error_code"] == "TURN_ROUTE_PROOF_REJECTED"
         assert executions["runs"] == []
         assert not any(
-            action["action"] == "start_execution" and action["enabled"]
-            for action in actions
+            action["action"] == "start_execution" and action["enabled"] for action in actions
         )
         stable_route_revision = route["revision"]
         stable_message_count = len(messages)
@@ -757,9 +890,7 @@ def test_invalid_model_patch_preview_terminalizes_once_and_disables_start(
             replay_body = cast(dict[str, object], replay.json())
             replay_route = cast(dict[str, object], replay_body["route"])
             replay_messages = cast(list[object], replay_body["conversation"])
-            replay_executions = cast(
-                dict[str, list[object]], replay_body["executions"]
-            )
+            replay_executions = cast(dict[str, list[object]], replay_body["executions"])
             replay_actions = cast(list[dict[str, object]], replay_body["actions"])
 
             assert replay_route["status"] == "failed"

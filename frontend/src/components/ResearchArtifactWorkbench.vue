@@ -94,7 +94,7 @@ const researchFlow: FlowItem[] = [
 ]
 
 const autoActions = new Set<WorkbenchAction>([
-  'interpret_turn', 'run_research', 'verify_claims', 'build_artifact', 'verify_browser', 'finalize_delivery', 'execute_route', 'replan_failed_execution',
+  'interpret_turn', 'plan_task_loop', 'run_research', 'verify_claims', 'build_artifact', 'verify_browser', 'finalize_delivery', 'execute_route', 'replan_failed_execution',
 ])
 
 const routeLabels: Record<string, string> = {
@@ -215,8 +215,12 @@ const evidenceCount = computed(() => (
   + (workbench.value?.workspace_python_test ? 1 : 0)
   + (workbench.value?.workspace_node_test ? 1 : 0)
   + (workbench.value?.turn_planning ? 1 : 0)
+  + (workbench.value?.task_loop ? 1 : 0)
 ))
 const routeFlow = computed<FlowItem[]>(() => {
+  if (workbench.value?.task_loop) {
+    return [{ key: 'plan_task_loop', action: 'plan_task_loop', label: '组合通用任务计划', detail: '只按已裁决 Offer 顺序重编 Contract、预算与 verified edge；不会再次调用模型' }]
+  }
   if (workbench.value?.stage === 'interpreting') {
     return [{ key: 'interpret_turn', action: 'interpret_turn', label: '解释任务并选择能力', detail: '模型只能引用服务器预编译 Offer；选择本身不授予权限' }]
   }
@@ -279,6 +283,7 @@ const routeFlow = computed<FlowItem[]>(() => {
 })
 const routeName = computed(() => {
   const route = workbench.value?.route
+  if (workbench.value?.task_loop) return '通用多步骤任务计划'
   if (workbench.value?.stage === 'interpreting') return '正在匹配安全能力'
   if (!route) return '未建立路由'
   if (route.decision === 'needs_clarification') return '需要澄清'
@@ -288,6 +293,9 @@ const routeName = computed(() => {
 const routeExplanation = computed(() => {
   const value = workbench.value
   if (!value) return ''
+  if (value.task_loop?.status === 'observed') return '已封存阶段 111 的多步骤裁决；服务器正在重编精确 Contract、预算、节点和依赖，不会重放 Planner。'
+  if (value.task_loop?.status === 'planned') return `已建立 ${value.task_loop.step_count} 步 model_planner Draft；阶段 112A 只保存计划证明，尚未启动执行。`
+  if (value.task_loop?.status === 'failed') return '多步骤组合已稳定终止；失败证明禁止自动重放模型，也没有创建执行 Run。'
   if (value.stage === 'interpreting') return '服务器已冻结可用能力、契约、预算与参数边界；本地 Planner 只能从这些 opaque Offer 中提案。'
   if (value.stage === 'needs_clarification') return '请说明要研究公开来源、查询本地知识、统计文本，还是读取、修改或检查工作区。'
   if (value.stage === 'unsupported') return '这条指令没有被偷偷执行；系统只会运行已声明且当前可用的安全路由。'
@@ -330,6 +338,7 @@ function problemMessage(caught: unknown): string {
 function nodeState(node: WorkbenchNode | undefined, action: WorkbenchAction): 'done' | 'active' | 'queued' {
   if (actionMap.value.get(action)?.enabled) return 'active'
   if (action === 'interpret_turn' && workbench.value?.stage === 'interpreting') return 'active'
+  if (action === 'plan_task_loop' && workbench.value?.task_loop?.status === 'planned') return 'done'
   if (!node) return 'queued'
   if (action === 'run_research') {
     return ['awaiting_verification', 'verified'].includes(node.status) ? 'done' : 'queued'
@@ -1039,6 +1048,24 @@ onBeforeUnmount(() => {
           <div><dt>投影证明</dt><dd>{{ shortDigest(workbench.turn_planning.planning_digest) }}</dd></div>
         </dl>
         <p class="empty-proof">这里只显示服务器证明摘要；模型原始响应、参数原文与用户消息不会作为权限展示，失败也不会自动重放。</p>
+      </details>
+
+      <details v-if="workbench?.task_loop" open>
+        <summary>Task Loop Proof <span>{{ workbench.task_loop.status }}</span></summary>
+        <dl class="route-proof">
+          <div><dt>循环阶段</dt><dd>{{ workbench.task_loop.phase }} · revision {{ workbench.task_loop.revision }}</dd></div>
+          <div><dt>已绑定步骤</dt><dd>{{ workbench.task_loop.step_count }} 个</dd></div>
+          <div><dt>事件链</dt><dd>{{ workbench.task_loop.event_count }} 个 · {{ shortDigest(workbench.task_loop.progress_digest) }}</dd></div>
+          <div><dt>来源绑定</dt><dd>{{ shortDigest(workbench.task_loop.source_turn_plan_binding_digest) }}</dd></div>
+          <div v-if="workbench.task_loop.draft_record_digest"><dt>Draft 证明</dt><dd>{{ shortDigest(workbench.task_loop.draft_record_digest) }}</dd></div>
+          <div v-if="workbench.task_loop.expected_plan_manifest_digest"><dt>预编译 Plan</dt><dd>{{ shortDigest(workbench.task_loop.expected_plan_manifest_digest) }}</dd></div>
+          <div v-if="workbench.task_loop.failure">
+            <dt>稳定失败</dt>
+            <dd>{{ workbench.task_loop.failure.error_code }} · {{ shortDigest(workbench.task_loop.failure.failure_digest) }} · 不自动重放</dd>
+          </div>
+          <div><dt>公开投影</dt><dd>{{ shortDigest(workbench.task_loop.projection_digest) }}</dd></div>
+        </dl>
+        <p class="empty-proof">公开层不包含消息正文、参数、Offer、Provider 或计划正文；这里的摘要也不会授予执行权限。</p>
       </details>
 
       <details v-if="workbench?.route" open>

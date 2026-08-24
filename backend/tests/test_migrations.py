@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0051_turn_planning_offers"
+CURRENT_REVISION = "0052_model_planner_task_loop"
 
 
 def _sync_url(path: Path) -> str:
@@ -742,6 +742,149 @@ def test_stage_42_migration_round_trips_and_matches_model_metadata(
 ) -> None:
     database_path = tmp_path / "stage-42-round-trip.db"
     config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_112_model_planner_task_loop_migration_round_trips(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-112-model-planner-task-loop.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        tables = set(inspector.get_table_names())
+        loop_columns = {item["name"] for item in inspector.get_columns("task_loops")}
+        loop_constraints = {
+            item["name"] for item in inspector.get_check_constraints("task_loops")
+        }
+        loop_indexes = {item["name"] for item in inspector.get_indexes("task_loops")}
+        event_foreign_keys = {
+            item["name"] for item in inspector.get_foreign_keys("task_loop_events")
+        }
+        draft_columns = {
+            item["name"] for item in inspector.get_columns("model_planner_drafts")
+        }
+        step_foreign_keys = {
+            item["name"]
+            for item in inspector.get_foreign_keys("model_planner_step_bindings")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+
+    assert {
+        "task_loops",
+        "task_loop_events",
+        "model_planner_drafts",
+        "model_planner_step_bindings",
+    }.issubset(tables)
+    assert {
+        "source_run_id",
+        "source_run_digest",
+        "source_adjudication_id",
+        "source_adjudication_digest",
+        "source_turn_plan_binding_id",
+        "source_turn_plan_binding_digest",
+        "active_draft_id",
+        "failure_manifest",
+        "progress_digest",
+        "loop_digest",
+    }.issubset(loop_columns)
+    assert {"ck_task_loop_state", "ck_task_loop_lifecycle"}.issubset(
+        loop_constraints
+    )
+    assert {"ix_task_loops_recovery", "ix_task_loops_message"}.issubset(
+        loop_indexes
+    )
+    assert {
+        "fk_task_loop_event_scope",
+        "fk_task_loop_event_previous",
+    }.issubset(event_foreign_keys)
+    assert {
+        "ordered_steps_manifest",
+        "step_set_digest",
+        "task_contract_manifest",
+        "draft_plan_manifest",
+        "expected_plan_manifest",
+        "expected_plan_manifest_digest",
+        "draft_record_digest",
+    }.issubset(draft_columns)
+    assert {
+        "fk_model_planner_step_draft_scope",
+        "fk_model_planner_step_offer_scope",
+    }.issubset(step_foreign_keys)
+    assert revision == CURRENT_REVISION
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0051_turn_planning_offers",
+        insert_statement="""
+            INSERT INTO task_loops (
+                loop_id, task_id, user_message_id, user_message_digest,
+                source_run_id, source_run_digest,
+                source_adjudication_id, source_adjudication_digest,
+                source_turn_plan_binding_id, source_turn_plan_binding_digest,
+                phase, status, revision, event_count,
+                latest_event_id, latest_event_digest, progress_digest,
+                active_draft_id, active_draft_record_digest,
+                failure_manifest, failure_digest, manifest, loop_digest,
+                created_at, updated_at
+            ) VALUES (
+                :row_id, :task_id, :message_id, :digest,
+                :run_id, :digest,
+                :adjudication_id, :digest,
+                :binding_id, :digest,
+                'observe', 'observed', 1, 1,
+                :event_id, :digest, :digest,
+                NULL, NULL,
+                NULL, NULL, :manifest, :loop_digest,
+                :created_at, :created_at
+            )
+        """,
+        parameters={
+            "row_id": "tlp_" + "1" * 64,
+            "task_id": "tsk_" + "2" * 32,
+            "message_id": "msg_" + "3" * 32,
+            "run_id": "tpr_" + "4" * 64,
+            "adjudication_id": "tpa_" + "5" * 64,
+            "binding_id": "tpb_" + "6" * 64,
+            "event_id": "tle_" + "7" * 64,
+            "digest": "8" * 64,
+            "loop_digest": "9" * 64,
+            "manifest": "{}",
+            "created_at": "2026-08-24 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT loop_id, status, revision, latest_event_id, loop_digest
+            FROM task_loops WHERE loop_id = :row_id
+        """,
+        cleanup_statement="DELETE FROM task_loops WHERE loop_id = :row_id",
+    )
+
+    command.downgrade(config, "0051_turn_planning_offers")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert not {
+        "task_loops",
+        "task_loop_events",
+        "model_planner_drafts",
+        "model_planner_step_bindings",
+    } & tables
+    assert revision == "0051_turn_planning_offers"
 
     command.upgrade(config, "head")
     command.check(config)
@@ -2635,7 +2778,7 @@ def test_stage_111_turn_planning_migration_round_trips(tmp_path: Path) -> None:
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0051_turn_planning_offers",
         target_revision="0050_agent_graph_test_conditions",
         insert_statement="""
             INSERT INTO turn_planning_offers (
@@ -2684,7 +2827,7 @@ def test_stage_111_turn_planning_migration_round_trips(tmp_path: Path) -> None:
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0051_turn_planning_offers",
         target_revision="0050_agent_graph_test_conditions",
         insert_statement="""
             INSERT INTO turn_planner_runs (
@@ -2727,7 +2870,7 @@ def test_stage_111_turn_planning_migration_round_trips(tmp_path: Path) -> None:
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0051_turn_planning_offers",
         target_revision="0050_agent_graph_test_conditions",
         insert_statement="""
             INSERT INTO turn_planner_adjudications (
@@ -2765,7 +2908,7 @@ def test_stage_111_turn_planning_migration_round_trips(tmp_path: Path) -> None:
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0051_turn_planning_offers",
         target_revision="0050_agent_graph_test_conditions",
         insert_statement="""
             INSERT INTO turn_plan_bindings (
@@ -2801,7 +2944,7 @@ def test_stage_111_turn_planning_migration_round_trips(tmp_path: Path) -> None:
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0051_turn_planning_offers",
         target_revision="0050_agent_graph_test_conditions",
         insert_statement="""
             INSERT INTO turn_routes (

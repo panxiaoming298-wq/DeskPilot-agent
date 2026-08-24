@@ -71,6 +71,8 @@ from deskpilot.application.model_gateway import (
     ModelGateway,
     ModelProvider,
 )
+from deskpilot.application.model_planner_composer import ModelPlannerComposer
+from deskpilot.application.multi_step_plan_runtime import MultiStepPlanRuntime
 from deskpilot.application.outbox_publisher import DeliveryPublisher, OutboxPublisher
 from deskpilot.application.pdf_artifact_renderer import (
     IsolatedPdfArtifactRenderer,
@@ -416,6 +418,15 @@ def create_app(
             capability_catalog,
             plan_compilation_service,
         )
+        model_planner_composer = ModelPlannerComposer(
+            plan_compiler,
+            capability_catalog,
+        )
+        task_loop_runtime = MultiStepPlanRuntime(
+            database,
+            turn_planner_runtime,
+            model_planner_composer,
+        )
         task_workbench_service = TaskWorkbenchService(
             database,
             task_service,
@@ -430,6 +441,7 @@ def create_app(
             artifact_export_runtime,
             turn_router,
             turn_planner_runtime,
+            task_loop_runtime,
         )
         workbench_runtime = (
             WorkbenchRuntimeCoordinator(
@@ -547,6 +559,7 @@ def create_app(
         app.state.workbench_runtime = workbench_runtime
         app.state.turn_router = turn_router
         app.state.turn_planner_runtime = turn_planner_runtime
+        app.state.task_loop_runtime = task_loop_runtime
         app.state.workspace_file_runtime = workspace_file_runtime
         app.state.workspace_agent_runtime = workspace_agent_runtime
         app.state.workspace_check_runtime = resolved_workspace_check_runtime

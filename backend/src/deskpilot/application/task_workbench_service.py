@@ -25,6 +25,10 @@ from deskpilot.application.long_term_memory_runtime import (
     LongTermMemoryError,
     LongTermMemoryRuntime,
 )
+from deskpilot.application.multi_step_plan_runtime import (
+    MultiStepPlanRuntime,
+    MultiStepPlanRuntimeError,
+)
 from deskpilot.application.plan_compilation_service import (
     PlanCompilationService,
     PlanningError,
@@ -110,6 +114,7 @@ from deskpilot.domain.research import (
     SearchHit,
 )
 from deskpilot.domain.schemas import TaskCreate
+from deskpilot.domain.task_loop import TaskLoop, TaskLoopWorkbenchRead
 from deskpilot.domain.task_plans import (
     ExecutablePlanPage,
     PlanningStateRead,
@@ -183,6 +188,7 @@ class TaskWorkbenchService:
         exports: ArtifactExportRuntime,
         router: TurnRouter,
         turn_planner: TurnPlannerRuntime | None = None,
+        task_loop: MultiStepPlanRuntime | None = None,
     ) -> None:
         self._database = database
         self._tasks = tasks
@@ -197,6 +203,7 @@ class TaskWorkbenchService:
         self._exports = exports
         self._router = router
         self._turn_planner = turn_planner
+        self._task_loop = task_loop
         self._auto_advance: WorkbenchAutoAdvancePort | None = None
 
     def bind_auto_advance(self, auto_advance: WorkbenchAutoAdvancePort) -> None:
@@ -213,12 +220,22 @@ class TaskWorkbenchService:
             return ()
         return await self._turn_planner.recoverable_task_ids(limit=limit)
 
+    async def task_loop_recoverable_task_ids(
+        self,
+        *,
+        limit: int = 1_000,
+    ) -> tuple[str, ...]:
+        if self._task_loop is None:
+            return ()
+        return await self._task_loop.recoverable_task_ids(limit=limit)
+
     @staticmethod
     def automatic_action(workbench: TaskWorkbenchRead) -> WorkbenchAction | None:
         """Return only an action the server may run without fresh user authority."""
 
         allowed = {
             WorkbenchAction.INTERPRET_TURN,
+            WorkbenchAction.PLAN_TASK_LOOP,
             WorkbenchAction.START_EXECUTION,
             WorkbenchAction.RUN_RESEARCH,
             WorkbenchAction.VERIFY_CLAIMS,
@@ -647,9 +664,7 @@ class TaskWorkbenchService:
             for item in before.actions
         )
         if not action_enabled:
-            recoverable = task_id in await self._turn_planner.recoverable_task_ids(
-                limit=1_000
-            )
+            recoverable = task_id in await self._turn_planner.recoverable_task_ids(limit=1_000)
             crash_window = before.turn_planning is None or (
                 before.turn_planning.run.status == "dispatching"
             )
@@ -691,6 +706,31 @@ class TaskWorkbenchService:
                 task_id,
                 self._turn_planning_outcome_message(planning),
             )
+        return await self.get(task_id)
+
+    async def plan_task_loop(self, task_id: str) -> TaskWorkbenchRead:
+        """Compose or recover one deferred multi-step Plan without model replay."""
+
+        if self._task_loop is None:
+            raise TaskWorkbenchConflictError("Task Loop runtime is unavailable")
+        before = await self.get(task_id)
+        enabled = any(
+            item.action is WorkbenchAction.PLAN_TASK_LOOP and item.enabled
+            for item in before.actions
+        )
+        if not enabled:
+            if before.task_loop is None or not before.task_loop.recoverable:
+                return before
+            recoverable = task_id in await self._task_loop.recoverable_task_ids(limit=1_000)
+            if not recoverable:
+                return before
+        try:
+            await self._task_loop.plan(task_id)
+        except MultiStepPlanRuntimeError as error:
+            raise TaskWorkbenchConflictError(str(error)) from error
+        # The append-only Task Loop is the status proof.  A separate
+        # conversation write would not be atomic with it and could therefore
+        # be duplicated or lost across concurrent workers and crash recovery.
         return await self.get(task_id)
 
     async def _prepare_planner_route(
@@ -740,6 +780,11 @@ class TaskWorkbenchService:
             for item in workbench.actions
         ):
             return await self.interpret_turn(task_id)
+        if any(
+            item.action is WorkbenchAction.PLAN_TASK_LOOP and item.enabled
+            for item in workbench.actions
+        ):
+            return await self.plan_task_loop(task_id)
         if any(
             item.action is WorkbenchAction.START_EXECUTION and item.enabled
             for item in workbench.actions
@@ -1623,6 +1668,10 @@ class TaskWorkbenchService:
         except TurnPlannerRuntimeError as error:
             raise TaskWorkbenchConflictError(str(error)) from error
         try:
+            task_loop = await self._task_loop.get(task_id) if self._task_loop is not None else None
+        except MultiStepPlanRuntimeError as error:
+            raise TaskWorkbenchConflictError(str(error)) from error
+        try:
             planning = await self._planning.get_state(task_id)
             contract = await self._planning.get_current_contract(task_id)
             plans = await self._planning.list_plans(task_id)
@@ -1700,6 +1749,7 @@ class TaskWorkbenchService:
             exports,
             route,
             turn_planning,
+            task_loop,
         )
         repair_loop = self._repair_loop_status(executions, contract, route)
         actions = self._actions(
@@ -1710,6 +1760,7 @@ class TaskWorkbenchService:
             mcp_enabled,
             repair_loop,
             turn_planning,
+            task_loop,
         )
         material = {
             "schema_version": "deskpilot.task-workbench.v1",
@@ -1722,6 +1773,9 @@ class TaskWorkbenchService:
                 TurnPlanningWorkbenchRead.from_internal(turn_planning)
                 if turn_planning is not None
                 else None
+            ),
+            "task_loop": (
+                TaskLoopWorkbenchRead.from_internal(task_loop) if task_loop is not None else None
             ),
             "planning": planning,
             "contract": contract,
@@ -1841,7 +1895,14 @@ class TaskWorkbenchService:
         exports: tuple[ArtifactExportRead, ...],
         route: TurnRouteRead | None,
         turn_planning: TurnPlanningRead | None,
+        task_loop: TaskLoop | None,
     ) -> WorkbenchStage:
+        if task_loop is not None:
+            if task_loop.status == "observed":
+                return WorkbenchStage.INTERPRETING
+            if task_loop.status == "planned":
+                return WorkbenchStage.PLANNED
+            return WorkbenchStage.BLOCKED
         if turn_planning is not None:
             if turn_planning.run.status in {"prepared", "dispatching"}:
                 return WorkbenchStage.INTERPRETING
@@ -1988,6 +2049,7 @@ class TaskWorkbenchService:
         mcp_enabled: bool,
         repair_loop: AgentRepairLoopStatus | None,
         turn_planning: TurnPlanningRead | None,
+        task_loop: TaskLoop | None,
     ) -> tuple[WorkbenchActionRead, ...]:
         run = executions.runs[-1] if executions.runs else None
         nodes = {item.local_key: item for item in run.nodes} if run else {}
@@ -2019,6 +2081,18 @@ class TaskWorkbenchService:
             WorkbenchAction.INTERPRET_TURN: (
                 bool(turn_planning is not None and turn_planning.run.status == "prepared"),
                 "TURN_INTERPRETATION_NOT_PREPARED",
+            ),
+            WorkbenchAction.PLAN_TASK_LOOP: (
+                bool(
+                    turn_planning is not None
+                    and turn_planning.run.status == "succeeded"
+                    and turn_planning.adjudication is not None
+                    and turn_planning.adjudication.outcome == "multi_step_deferred"
+                    and turn_planning.binding is not None
+                    and turn_planning.binding.status == "multi_step_deferred"
+                    and (task_loop is None or task_loop.status == "observed")
+                ),
+                "DEFERRED_MULTI_STEP_PLAN_NOT_RECOVERABLE",
             ),
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: (
                 is_research and route is None and not has_plan,
@@ -2247,6 +2321,9 @@ class TaskWorkbenchService:
             WorkbenchAction.INTERPRET_TURN: (
                 "运行一次本地 Turn Planner，只能选择服务器预编译的 opaque Offer。"
             ),
+            WorkbenchAction.PLAN_TASK_LOOP: (
+                "复验已持久化 Offer，并组合一个不授予新权限的多步骤 DraftPlan。"
+            ),
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: "启用受信 research_to_html 计划。",
             WorkbenchAction.START_EXECUTION: "创建绑定当前计划的执行运行。",
             WorkbenchAction.RUN_RESEARCH: "运行受控搜索与页面读取。",
@@ -2268,6 +2345,7 @@ class TaskWorkbenchService:
         }
         effects = {
             WorkbenchAction.INTERPRET_TURN: "read_only",
+            WorkbenchAction.PLAN_TASK_LOOP: "read_only",
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: "read_only",
             WorkbenchAction.START_EXECUTION: "read_only",
             WorkbenchAction.RUN_RESEARCH: "read_only",
