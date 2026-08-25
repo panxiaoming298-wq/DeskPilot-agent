@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import DIGEST_PATTERN, AgentToolGrant, BoundAgentRef
+from deskpilot.domain.command_profiles import CommandProfileId
 from deskpilot.domain.model_contracts import ModelLocation, PrivacyMode
 from deskpilot.domain.task_loop import (
     MODEL_PLANNER_DRAFT_ID_PATTERN,
@@ -41,6 +42,7 @@ from deskpilot.domain.turn_planning import (
     TurnPlanningParameterBinding,
     TurnPlanningRecipeRef,
 )
+from deskpilot.domain.workspace_command_plans import WORKSPACE_COMMAND_PLAN_ID_PATTERN
 from deskpilot.domain.workspace_files import WorkspacePatchPreview, WorkspacePatchReceipt
 
 TASK_LOOP_EXECUTION_ID_PATTERN = r"^tlx_[0-9a-f]{64}$"
@@ -612,6 +614,13 @@ class TaskLoopExecutionNodeRead(BaseModel):
     max_attempts: int = Field(ge=1)
     candidate_present: bool
     verified_result_present: bool
+    verified_failure_result_count: int = Field(default=0, ge=0)
+    command_plan_id: str | None = Field(
+        default=None,
+        pattern=WORKSPACE_COMMAND_PLAN_ID_PATTERN,
+    )
+    command_step_sequence: int | None = Field(default=None, ge=1, le=6)
+    command_profile_id: CommandProfileId | None = None
     created_at: datetime
     updated_at: datetime
     state_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -639,6 +648,19 @@ class TaskLoopExecutionNodeRead(BaseModel):
                 raise ValueError("Runnable node verification proof is incomplete")
         elif self.verified_result_present:
             raise ValueError("Control node cannot expose a verified ResultRef")
+        command_fields = (
+            self.command_plan_id,
+            self.command_step_sequence,
+            self.command_profile_id,
+        )
+        if any(item is None for item in command_fields) != all(
+            item is None for item in command_fields
+        ):
+            raise ValueError("Task-loop command node projection is incomplete")
+        if self.verified_failure_result_count and (
+            self.kind is not DraftNodeKind.CAPABILITY or self.command_plan_id is None
+        ):
+            raise ValueError("Only command capability nodes may expose failure ResultRefs")
         if (
             self.created_at.tzinfo is None
             or self.updated_at.tzinfo is None
@@ -656,6 +678,10 @@ class TaskLoopExecutionNodeRead(BaseModel):
             "schema_version": "deskpilot.task-loop-execution-node-read.v1",
             **values,
         }
+        material.setdefault("verified_failure_result_count", 0)
+        material.setdefault("command_plan_id", None)
+        material.setdefault("command_step_sequence", None)
+        material.setdefault("command_profile_id", None)
         return cls(**material, state_digest=sha256_digest(material))
 
 
@@ -770,11 +796,23 @@ class TaskLoopExecutionWorkbenchNodeRead(BaseModel):
     max_attempts: int = Field(ge=1)
     candidate_present: bool
     verified_result_present: bool
+    verified_failure_result_count: int = Field(default=0, ge=0)
+    command_plan_id: str | None = Field(
+        default=None,
+        pattern=WORKSPACE_COMMAND_PLAN_ID_PATTERN,
+    )
+    command_step_sequence: int | None = Field(default=None, ge=1, le=6)
+    command_profile_id: CommandProfileId | None = None
     updated_at: datetime
     summary_digest: str = Field(pattern=DIGEST_PATTERN)
 
     @model_validator(mode="after")
     def summary_and_digest_match(self) -> Self:
+        command_fields = (
+            self.command_plan_id,
+            self.command_step_sequence,
+            self.command_profile_id,
+        )
         if (
             self.verified_dependency_count > self.dependency_count
             or self.dependencies_verified
@@ -783,6 +821,12 @@ class TaskLoopExecutionWorkbenchNodeRead(BaseModel):
             or self.updated_at.tzinfo is None
         ):
             raise ValueError("Task-loop Workbench node summary is invalid")
+        if any(item is not None for item in command_fields) != all(
+            item is not None for item in command_fields
+        ):
+            raise ValueError("Task-loop Workbench command summary is incomplete")
+        if self.verified_failure_result_count and self.command_plan_id is None:
+            raise ValueError("Only command nodes may expose verified failure receipts")
         material = self.model_dump(mode="json", exclude={"summary_digest"})
         if self.summary_digest != sha256_digest(material):
             raise ValueError("Task-loop Workbench node digest does not match")
@@ -802,6 +846,10 @@ class TaskLoopExecutionWorkbenchNodeRead(BaseModel):
             "max_attempts": node.max_attempts,
             "candidate_present": node.candidate_present,
             "verified_result_present": node.verified_result_present,
+            "verified_failure_result_count": node.verified_failure_result_count,
+            "command_plan_id": node.command_plan_id,
+            "command_step_sequence": node.command_step_sequence,
+            "command_profile_id": node.command_profile_id,
             "updated_at": node.updated_at,
         }
         return cls(**values, summary_digest=sha256_digest(values))
@@ -834,6 +882,7 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
     cancelled_count: int = Field(ge=0, le=18)
     candidate_count: int = Field(ge=0, le=18)
     verified_result_count: int = Field(ge=0, le=18)
+    verified_failure_result_count: int = Field(default=0, ge=0)
     no_progress_count: int = Field(ge=0, le=3)
     no_progress_limit: Literal[3] = 3
     repair_count: int = Field(ge=0, le=2)
@@ -862,6 +911,9 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
             "cancelled_count": sum(item.status == "cancelled" for item in self.nodes),
             "candidate_count": sum(item.candidate_present for item in self.nodes),
             "verified_result_count": sum(item.verified_result_present for item in self.nodes),
+            "verified_failure_result_count": sum(
+                item.verified_failure_result_count for item in self.nodes
+            ),
         }
         if any(getattr(self, name) != value for name, value in expected.items()):
             raise ValueError("Task-loop Workbench counts changed")
@@ -909,6 +961,9 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
             "cancelled_count": sum(item.status == "cancelled" for item in nodes),
             "candidate_count": sum(item.candidate_present for item in nodes),
             "verified_result_count": sum(item.verified_result_present for item in nodes),
+            "verified_failure_result_count": sum(
+                item.verified_failure_result_count for item in nodes
+            ),
             "no_progress_count": (
                 read.cycle.no_progress_count if read.cycle is not None else 0
             ),

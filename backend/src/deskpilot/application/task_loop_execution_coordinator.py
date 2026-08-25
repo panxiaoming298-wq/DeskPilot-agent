@@ -385,17 +385,26 @@ class TaskLoopExecutionCoordinator:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Final ResultRef Schema proof was rejected"
             ) from error
+        accepted_results = tuple(
+            item
+            for item in results
+            if not (
+                item.result_kind == CapabilityResultKind.COMMAND_PROFILE.value
+                and item.output_manifest.get("status") != "passed"
+            )
+        )
         if (
-            {item.node_id for item in results} != runnable
+            len({item.node_id for item in accepted_results}) != len(accepted_results)
+            or {item.node_id for item in accepted_results} != runnable
             or any(item.run_id != execution.run_id for item in results)
             or any(item.status != "verified" for item in nodes if item.node_id in runnable)
         ):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Final acceptance requires one verified ResultRef per runnable node"
             )
-        for result in results:
+        for result in accepted_results:
             self._assert_success_semantics(result)
-        return {item.result_kind for item in results}
+        return {item.result_kind for item in accepted_results}
 
     @staticmethod
     def _verified_result_from_record(

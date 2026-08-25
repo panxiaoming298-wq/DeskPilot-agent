@@ -30,6 +30,10 @@ from deskpilot.application.turn_planner_runtime import (
     TurnPlannerRuntime,
     TurnPlannerRuntimeError,
 )
+from deskpilot.application.workspace_command_plan_binder import (
+    WorkspaceCommandPlanBinder,
+    WorkspaceCommandPlanBindingError,
+)
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.task_loop import (
     ModelPlannerDraft,
@@ -42,6 +46,7 @@ from deskpilot.domain.task_loop import (
     TaskLoopSourceRef,
 )
 from deskpilot.domain.turn_planning import TurnPlanningRead
+from deskpilot.domain.workspace_command_plans import WorkspaceCommandPlanBinding
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
     ModelPlannerDraftRecord,
@@ -50,6 +55,7 @@ from deskpilot.infrastructure.models import (
     TaskLoopRecord,
     TurnPlanBindingRecord,
     TurnRouteRecord,
+    WorkspaceCommandPlanBindingRecord,
 )
 
 
@@ -81,6 +87,7 @@ class ModelPlannerTaskLoopBundle:
     events: tuple[TaskLoopEvent, ...]
     draft: ModelPlannerDraft | None = None
     steps: tuple[ModelPlannerStepBinding, ...] = ()
+    command_plans: tuple[WorkspaceCommandPlanBinding, ...] = ()
 
 
 class MultiStepPlanRuntime:
@@ -92,11 +99,13 @@ class MultiStepPlanRuntime:
         turn_planner: TurnPlannerRuntime,
         composer: ModelPlannerComposer,
         *,
+        command_plans: WorkspaceCommandPlanBinder | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._database = database
         self._turn_planner = turn_planner
         self._composer = composer
+        self._command_plans = command_plans
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def plan(self, task_id: str) -> TaskLoop:
@@ -127,16 +136,18 @@ class MultiStepPlanRuntime:
                 )
             composition = self._composer.compose(task_id, deferred.steps)
             draft, steps = self._build_draft(loop, deferred, composition)
+            command_plans = self._bind_command_plans(loop, draft, steps, deferred)
         except (
             TurnPlannerRuntimeError,
             ModelPlannerCompositionError,
             MultiStepPlanRuntimeError,
+            WorkspaceCommandPlanBindingError,
             ValidationError,
             ValueError,
         ) as error:
             return await self._persist_failure(loop, error)
 
-        return await self._persist_plan(loop, draft, steps)
+        return await self._persist_plan(loop, draft, steps, command_plans)
 
     async def get(self, task_id: str) -> TaskLoop | None:
         bundle = await self.get_bundle(task_id)
@@ -194,11 +205,25 @@ class MultiStepPlanRuntime:
             )
             steps = tuple(self._step_from_record(item) for item in step_records)
             self._validate_draft_bundle(loop, draft, steps)
+            command_plan_records = tuple(
+                (
+                    await session.scalars(
+                        select(WorkspaceCommandPlanBindingRecord)
+                        .where(WorkspaceCommandPlanBindingRecord.draft_id == draft.draft_id)
+                        .order_by(WorkspaceCommandPlanBindingRecord.group_ordinal)
+                    )
+                ).all()
+            )
+            command_plans = tuple(
+                self._command_plan_from_record(item) for item in command_plan_records
+            )
+            self._validate_command_plan_bundle(loop, draft, steps, command_plans)
             return ModelPlannerTaskLoopBundle(
                 loop=loop,
                 events=events,
                 draft=draft,
                 steps=steps,
+                command_plans=command_plans,
             )
 
     async def recoverable_task_ids(self, *, limit: int = 100) -> tuple[str, ...]:
@@ -290,6 +315,7 @@ class MultiStepPlanRuntime:
         loop: TaskLoop,
         draft: ModelPlannerDraft,
         steps: tuple[ModelPlannerStepBinding, ...],
+        command_plans: tuple[WorkspaceCommandPlanBinding, ...],
     ) -> TaskLoop:
         event = TaskLoopEvent.plan(
             observed=self._observed_event(loop),
@@ -315,6 +341,10 @@ class MultiStepPlanRuntime:
                 await session.flush()
                 session.add_all(
                     self._step_record(item, draft.draft_id, loop.loop_id) for item in steps
+                )
+                await session.flush()
+                session.add_all(
+                    self._command_plan_record(item) for item in command_plans
                 )
                 await session.flush()
                 session.add(self._event_record(event))
@@ -452,6 +482,30 @@ class MultiStepPlanRuntime:
             created_at=loop.created_at,
         )
         return draft, tuple(bindings)
+
+    def _bind_command_plans(
+        self,
+        loop: TaskLoop,
+        draft: ModelPlannerDraft,
+        steps: tuple[ModelPlannerStepBinding, ...],
+        deferred: RevalidatedDeferredPlan,
+    ) -> tuple[WorkspaceCommandPlanBinding, ...]:
+        has_command = any(
+            item.route.route_id == "workspace_command_profile"
+            for item in deferred.steps
+        )
+        if not has_command:
+            return ()
+        if self._command_plans is None:
+            raise WorkspaceCommandPlanBindingError(
+                "Workspace command Plan binder is unavailable"
+            )
+        return self._command_plans.bind(
+            loop_id=loop.loop_id,
+            draft=draft,
+            steps=steps,
+            current_steps=deferred.steps,
+        )
 
     @staticmethod
     def _source_from_planning(planning: TurnPlanningRead | None) -> TaskLoopSourceRef:
@@ -685,6 +739,35 @@ class MultiStepPlanRuntime:
             created_at=step.created_at,
         )
 
+    @staticmethod
+    def _command_plan_record(
+        binding: WorkspaceCommandPlanBinding,
+    ) -> WorkspaceCommandPlanBindingRecord:
+        plan = binding.command_plan
+        return WorkspaceCommandPlanBindingRecord(
+            binding_id=binding.binding_id,
+            draft_id=binding.draft_id,
+            loop_id=binding.loop_id,
+            task_id=binding.task_id,
+            group_ordinal=binding.group_ordinal,
+            expected_plan_id=binding.expected_plan_id,
+            expected_plan_manifest_digest=binding.expected_plan_manifest_digest,
+            command_plan_id=plan.plan_id,
+            plan_generation=plan.request.plan_generation,
+            project_path=plan.request.project_path,
+            ecosystem=plan.ecosystem,
+            request_digest=plan.request.request_digest,
+            catalog_digest=plan.catalog_digest,
+            step_count=len(plan.steps),
+            command_plan_manifest=plan.model_dump(mode="json"),
+            command_plan_digest=plan.plan_digest,
+            mappings_manifest=[item.model_dump(mode="json") for item in binding.mappings],
+            mappings_digest=binding.mappings_digest,
+            manifest=binding.model_dump(mode="json"),
+            binding_digest=binding.binding_digest,
+            created_at=binding.created_at,
+        )
+
     @classmethod
     def _loop_from_record(cls, record: TaskLoopRecord) -> TaskLoop:
         try:
@@ -857,6 +940,48 @@ class MultiStepPlanRuntime:
             )
         return step
 
+    @classmethod
+    def _command_plan_from_record(
+        cls,
+        record: WorkspaceCommandPlanBindingRecord,
+    ) -> WorkspaceCommandPlanBinding:
+        try:
+            binding = WorkspaceCommandPlanBinding.model_validate(record.manifest)
+        except ValidationError as error:
+            raise MultiStepPlanProofRejectedError(
+                "Persisted Workspace command Plan binding manifest is invalid"
+            ) from error
+        expected = cls._command_plan_record(binding)
+        fields = (
+            "binding_id",
+            "draft_id",
+            "loop_id",
+            "task_id",
+            "group_ordinal",
+            "expected_plan_id",
+            "expected_plan_manifest_digest",
+            "command_plan_id",
+            "plan_generation",
+            "project_path",
+            "ecosystem",
+            "request_digest",
+            "catalog_digest",
+            "step_count",
+            "command_plan_manifest",
+            "command_plan_digest",
+            "mappings_manifest",
+            "mappings_digest",
+            "manifest",
+            "binding_digest",
+        )
+        if any(getattr(record, field) != getattr(expected, field) for field in fields) or (
+            cls._aware(record.created_at) != binding.created_at
+        ):
+            raise MultiStepPlanProofRejectedError(
+                "Persisted Workspace command Plan binding columns diverge from its manifest"
+            )
+        return binding
+
     @staticmethod
     def _validate_event_chain(
         loop: TaskLoop,
@@ -909,6 +1034,73 @@ class MultiStepPlanRuntime:
             raise MultiStepPlanProofRejectedError(
                 "Model Planner Draft bundle changed its source or ordered steps"
             )
+
+    @staticmethod
+    def _validate_command_plan_bundle(
+        loop: TaskLoop,
+        draft: ModelPlannerDraft,
+        steps: tuple[ModelPlannerStepBinding, ...],
+        command_plans: tuple[WorkspaceCommandPlanBinding, ...],
+    ) -> None:
+        command_steps = tuple(
+            item for item in steps if item.recipe.route_id == "workspace_command_profile"
+        )
+        if not command_steps:
+            if command_plans:
+                raise MultiStepPlanProofRejectedError(
+                    "Non-command Draft contains Workspace command Plan bindings"
+                )
+            return
+        # Pre-0056 completed command histories remain readable.  Activation and
+        # every new command claim independently require the persisted binding,
+        # so an unfinished legacy node still fails closed before execution.
+        if not command_plans:
+            return
+        if tuple(item.group_ordinal for item in command_plans) != tuple(
+            range(1, len(command_plans) + 1)
+        ):
+            raise MultiStepPlanProofRejectedError(
+                "Workspace command Plan group ordinals changed"
+            )
+        mappings = tuple(mapping for plan in command_plans for mapping in plan.mappings)
+        by_step = {item.step_binding_id: item for item in command_steps}
+        if len(mappings) != len(command_steps) or set(by_step) != {
+            item.step_binding_id for item in mappings
+        }:
+            raise MultiStepPlanProofRejectedError(
+                "Workspace command Plan does not cover every exact command step"
+            )
+        for binding in command_plans:
+            if (
+                binding.task_id != loop.source.task_id
+                or binding.loop_id != loop.loop_id
+                or binding.draft_id != draft.draft_id
+                or binding.expected_plan_id != draft.expected_plan.plan_id
+                or binding.expected_plan_manifest_digest
+                != draft.expected_plan_manifest_digest
+            ):
+                raise MultiStepPlanProofRejectedError(
+                    "Workspace command Plan binding crossed its sealed Draft"
+                )
+            for mapping in binding.mappings:
+                step = by_step.get(mapping.step_binding_id)
+                if (
+                    step is None
+                    or mapping.step_binding_digest != step.step_binding_digest
+                    or mapping.step_ordinal != step.ordinal
+                    or mapping.offer_id != step.offer.offer_id
+                    or mapping.offer_key != step.offer.offer_key
+                    or mapping.offer_digest != step.offer.offer_digest
+                    or not any(
+                        item.composite_node_id == mapping.composite_node_id
+                        and item.composite_node_spec_digest
+                        == mapping.composite_node_spec_digest
+                        for item in step.node_mappings
+                    )
+                ):
+                    raise MultiStepPlanProofRejectedError(
+                        "Workspace command Plan mapping changed its exact Offer node"
+                    )
 
     def _now(self) -> datetime:
         value = self._clock()

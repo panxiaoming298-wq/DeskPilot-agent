@@ -32,12 +32,17 @@ from deskpilot.application.capability_input_binding_catalog import (
     CapabilityInputBindingCatalog,
     ResolvedVerifiedCapabilityResult,
 )
+from deskpilot.application.workspace_command_plan_binder import (
+    WorkspaceCommandPlanBinder,
+    WorkspaceCommandPlanBindingError,
+)
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_runtime import ExecutionNodeStatus, ExecutionRunStatus
 from deskpilot.domain.capability_execution import (
     CapabilityApprovalRequirement,
     CapabilityExecutionContext,
     CapabilityRecoveryPolicy,
+    CapabilityResultKind,
     VerifiedCapabilityResultRef,
 )
 from deskpilot.domain.task_loop_approvals import TaskLoopCapabilityApproval
@@ -53,6 +58,10 @@ from deskpilot.domain.task_plans import (
     ExecutablePlan,
     ExecutablePlanNode,
 )
+from deskpilot.domain.workspace_command_plans import (
+    WorkspaceCommandPlanBinding,
+    WorkspaceCommandPlanStepProof,
+)
 from deskpilot.domain.workspace_files import WorkspacePatchPreview
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
@@ -66,6 +75,7 @@ from deskpilot.infrastructure.models import (
     TaskLoopNodeAttemptRecord,
     TaskLoopVerifiedResultRecord,
     TaskPlanGenerationRecord,
+    WorkspaceCommandPlanBindingRecord,
     utc_now,
 )
 
@@ -178,12 +188,14 @@ class CapabilityExecutionRuntime:
         executors: CapabilityExecutorRegistry,
         engine: CapabilityExecutionEnginePort,
         *,
+        command_plans: WorkspaceCommandPlanBinder | None = None,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self._database = database
         self._input_bindings = input_bindings
         self._executors = executors
         self._engine = engine
+        self._command_plans = command_plans
         self._clock = clock
 
     async def run_once(
@@ -426,9 +438,15 @@ class CapabilityExecutionRuntime:
                 "Ready capability node already has a live Task Loop attempt"
             )
 
+        command_step = await self._command_step_proof(
+            session,
+            execution,
+            binding,
+        )
         bound_input = self._input_bindings.bind_node(
             node_binding=binding,
             dependencies=dependencies,
+            workspace_command_plan_step=command_step,
         )
         attempt_number = node.attempt_count + 1
         fencing_token = node.claim_fencing_token + 1
@@ -538,9 +556,15 @@ class CapabilityExecutionRuntime:
             node,
             require_complete=True,
         )
+        command_step = await self._command_step_proof(
+            session,
+            execution,
+            binding,
+        )
         current_input = self._input_bindings.bind_node(
             node_binding=binding,
             dependencies=dependencies,
+            workspace_command_plan_step=command_step,
         )
         persisted_input = BoundCapabilityInput.model_validate(attempt.input_manifest)
         context = CapabilityExecutionContext.model_validate(attempt.context_manifest)
@@ -652,9 +676,15 @@ class CapabilityExecutionRuntime:
             node,
             require_complete=True,
         )
+        command_step = await self._command_step_proof(
+            session,
+            execution,
+            binding,
+        )
         current_input = self._input_bindings.bind_node(
             node_binding=binding,
             dependencies=dependencies,
+            workspace_command_plan_step=command_step,
         )
         persisted_input = BoundCapabilityInput.model_validate(attempt.input_manifest)
         registration = self._executors.resolve(current_input.capability)
@@ -1019,6 +1049,17 @@ class CapabilityExecutionRuntime:
             raise CapabilityExecutionRuntimeProofRejectedError(
                 "Capability verification changed its immutable candidate"
             )
+        command_failure = bool(
+            work.bound_input.workspace_command_plan_step is not None
+            and candidate.result_kind is CapabilityResultKind.COMMAND_PROFILE
+            and candidate.output_manifest.get("status") != "passed"
+        )
+        if (work.bound_input.workspace_command_plan_step is not None) is not (
+            candidate.result_kind is CapabilityResultKind.COMMAND_PROFILE
+        ):
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Command result changed its Workspace command Plan proof kind"
+            )
         result_ref = VerifiedCapabilityResultRef.build(
             task_id=work.execution.task_id,
             run_id=work.execution.run_id,
@@ -1100,25 +1141,46 @@ class CapabilityExecutionRuntime:
                     )
                 ).all()
             )
-            if existing_attempt_result is not None or existing_node_results:
+            prior_failure_results = bool(existing_node_results) and all(
+                item.result_kind == CapabilityResultKind.COMMAND_PROFILE.value
+                and item.output_manifest.get("status") != "passed"
+                for item in existing_node_results
+            )
+            if existing_attempt_result is not None or (
+                existing_node_results and not prior_failure_results
+            ):
                 raise CapabilityExecutionRuntimeConflictError(
-                    "Capability node already has a persistent verified ResultRef"
+                    "Capability node already has an edge-eligible verified ResultRef"
                 )
             session.add(self._verified_result_record(result))
             await session.flush()
 
             updated = self._replace_attempt(
                 attempt,
-                status="verified",
+                status="failed" if command_failure else "verified",
                 revision=attempt.revision + 1,
                 claim_expires_at=None,
                 verification_manifest=verified.model_dump(mode="json"),
                 verification_digest=verified.verification_digest,
                 verified_at=now,
+                error_code=("WORKSPACE_COMMAND_STEP_FAILED" if command_failure else None),
+                error_digest=(
+                    self._error_digest_values(
+                        attempt.attempt_id,
+                        attempt.context_digest,
+                        "WORKSPACE_COMMAND_STEP_FAILED",
+                    )
+                    if command_failure
+                    else None
+                ),
                 updated_at=now,
             )
             self._apply_attempt(attempt_record, updated)
-            node.status = ExecutionNodeStatus.VERIFIED.value
+            node.status = (
+                ExecutionNodeStatus.FAILED.value
+                if command_failure
+                else ExecutionNodeStatus.VERIFIED.value
+            )
             node.claim_owner_id = None
             node.claim_acquired_at = None
             node.claim_heartbeat_at = None
@@ -1126,13 +1188,14 @@ class CapabilityExecutionRuntime:
             node.revision += 1
             node.updated_at = now
             await session.flush()
-            await self._unlock_verified_successors(
-                session,
-                work.execution,
-                work.plan,
-                node.node_id,
-                now=now,
-            )
+            if not command_failure:
+                await self._unlock_verified_successors(
+                    session,
+                    work.execution,
+                    work.plan,
+                    node.node_id,
+                    now=now,
+                )
             await session.flush()
         return CapabilityRuntimeOutcome(
             execution_id=work.execution.execution_id,
@@ -1140,8 +1203,9 @@ class CapabilityExecutionRuntime:
             node_id=work.plan_node.node_id,
             attempt_id=work.attempt_id,
             attempt=work.attempt,
-            status="verified",
+            status="failed" if command_failure else "verified",
             result_ref=result_ref,
+            error_code=("WORKSPACE_COMMAND_STEP_FAILED" if command_failure else None),
         )
 
     async def _settle_execution_error(
@@ -1574,6 +1638,68 @@ class CapabilityExecutionRuntime:
             )
         return binding
 
+    async def _command_step_proof(
+        self,
+        session: AsyncSession,
+        execution: TaskLoopExecution,
+        node_binding: ModelPlannerNodeBinding,
+    ) -> WorkspaceCommandPlanStepProof | None:
+        if node_binding.recipe.route_id != "workspace_command_profile":
+            return None
+        if self._command_plans is None:
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Workspace command Plan binder is unavailable"
+            )
+        records = tuple(
+            (
+                await session.scalars(
+                    select(WorkspaceCommandPlanBindingRecord)
+                    .where(
+                        WorkspaceCommandPlanBindingRecord.draft_id
+                        == execution.draft_id
+                    )
+                    .order_by(WorkspaceCommandPlanBindingRecord.group_ordinal)
+                )
+            ).all()
+        )
+        bindings = tuple(self._command_plan_from_record(item) for item in records)
+        matches = tuple(
+            (binding, mapping)
+            for binding in bindings
+            for mapping in binding.mappings
+            if mapping.composite_node_id == node_binding.composite_node_id
+        )
+        if len(matches) != 1:
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Command capability node has no unique Workspace command Plan step"
+            )
+        command_binding, mapping = matches[0]
+        if (
+            command_binding.task_id != execution.task_id
+            or command_binding.draft_id != execution.draft_id
+            or command_binding.expected_plan_id != execution.plan_id
+            or command_binding.expected_plan_manifest_digest
+            != execution.plan_manifest_digest
+            or mapping.step_binding_id != node_binding.step_binding_id
+            or mapping.step_binding_digest != node_binding.step_binding_digest
+            or mapping.step_ordinal != node_binding.step_ordinal
+            or mapping.offer_id != node_binding.offer_id
+            or mapping.offer_key != node_binding.offer_key
+            or mapping.offer_digest != node_binding.offer_digest
+            or mapping.composite_node_spec_digest
+            != node_binding.composite_node_spec_digest
+        ):
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Workspace command Plan step changed its exact node binding"
+            )
+        try:
+            self._command_plans.revalidate(command_binding)
+            return command_binding.proof_for_node(node_binding.composite_node_id)
+        except (WorkspaceCommandPlanBindingError, ValueError) as error:
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Workspace command Plan current proof was rejected"
+            ) from error
+
     async def _load_dependencies(
         self,
         session: AsyncSession,
@@ -1660,11 +1786,41 @@ class CapabilityExecutionRuntime:
         )
         if not records:
             return None
-        if len(records) != 1:
-            raise CapabilityExecutionRuntimeProofRejectedError(
-                "Dependency node has more than one persistent verified ResultRef"
+        accepted_records: list[TaskLoopVerifiedResultRecord] = []
+        for historical in records:
+            historical_result = self._verified_result_from_record(historical)
+            historical_attempt_record = await session.get(
+                TaskLoopNodeAttemptRecord,
+                historical_result.attempt_id,
             )
-        record = records[0]
+            if historical_attempt_record is None:
+                raise CapabilityExecutionRuntimeProofRejectedError(
+                    "Persistent ResultRef lost its producer attempt"
+                )
+            historical_attempt = self._attempt_from_record(historical_attempt_record)
+            if historical_attempt.status == "failed":
+                if (
+                    historical_result.result_kind
+                    != CapabilityResultKind.COMMAND_PROFILE.value
+                    or historical_result.output_manifest.get("status") == "passed"
+                ):
+                    raise CapabilityExecutionRuntimeProofRejectedError(
+                        "Failed attempt contains an edge-eligible ResultRef"
+                    )
+                self._assert_capability_result_proof(
+                    historical_result,
+                    VerifiedCapabilityResultRef.model_validate(
+                        historical_result.result_ref_manifest
+                    ),
+                    historical_attempt,
+                )
+                continue
+            accepted_records.append(historical)
+        if len(accepted_records) != 1:
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Dependency node has no unique edge-eligible verified ResultRef"
+            )
+        record = accepted_records[0]
         result = self._verified_result_from_record(record)
         try:
             result_ref = VerifiedCapabilityResultRef.model_validate(result.result_ref_manifest)
@@ -1964,6 +2120,50 @@ class CapabilityExecutionRuntime:
         ):
             raise CapabilityExecutionRuntimeProofRejectedError(
                 "Model-planner node-binding columns changed from its manifest"
+            )
+        return binding
+
+    @staticmethod
+    def _command_plan_from_record(
+        record: WorkspaceCommandPlanBindingRecord,
+    ) -> WorkspaceCommandPlanBinding:
+        try:
+            binding = WorkspaceCommandPlanBinding.model_validate(record.manifest)
+        except ValidationError as error:
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Persisted Workspace command Plan binding is invalid"
+            ) from error
+        plan = binding.command_plan
+        direct = {
+            "binding_id": binding.binding_id,
+            "draft_id": binding.draft_id,
+            "loop_id": binding.loop_id,
+            "task_id": binding.task_id,
+            "group_ordinal": binding.group_ordinal,
+            "expected_plan_id": binding.expected_plan_id,
+            "expected_plan_manifest_digest": binding.expected_plan_manifest_digest,
+            "command_plan_id": plan.plan_id,
+            "plan_generation": plan.request.plan_generation,
+            "project_path": plan.request.project_path,
+            "ecosystem": plan.ecosystem,
+            "request_digest": plan.request.request_digest,
+            "catalog_digest": plan.catalog_digest,
+            "step_count": len(plan.steps),
+            "command_plan_digest": plan.plan_digest,
+            "mappings_digest": binding.mappings_digest,
+            "binding_digest": binding.binding_digest,
+        }
+        if (
+            any(getattr(record, field) != value for field, value in direct.items())
+            or record.command_plan_manifest != plan.model_dump(mode="json")
+            or record.mappings_manifest
+            != [item.model_dump(mode="json") for item in binding.mappings]
+            or record.manifest != binding.model_dump(mode="json")
+            or CapabilityExecutionRuntime._aware(record.created_at)
+            != binding.created_at
+        ):
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Workspace command Plan binding columns changed"
             )
         return binding
 

@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0055_planner_only_single_task_loop"
+CURRENT_REVISION = "0056_workspace_command_plan_bindings"
 
 
 def _sync_url(path: Path) -> str:
@@ -159,6 +159,7 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
             "task_loop_verified_results",
             "task_loop_capability_approvals",
             "task_loop_cycle_events",
+            "workspace_command_plan_bindings",
         }.issubset(inspector.get_table_names())
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
@@ -656,6 +657,109 @@ def test_stage_113_single_offer_task_loop_constraint_round_trips(tmp_path: Path)
     assert "BETWEEN 2 AND 8" in constraints["ck_model_planner_draft_steps"]
     assert revision == "0054_task_loop_cycle_events"
 
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_116_workspace_command_plan_binding_migration_is_guarded(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-116-command-plan-binding.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        columns = {
+            item["name"]
+            for item in inspector.get_columns("workspace_command_plan_bindings")
+        }
+        constraints = {
+            item["name"]
+            for item in inspector.get_check_constraints(
+                "workspace_command_plan_bindings"
+            )
+        }
+        indexes = {
+            item["name"]
+            for item in inspector.get_indexes("workspace_command_plan_bindings")
+        }
+    engine.dispose()
+    assert {
+        "binding_id",
+        "draft_id",
+        "loop_id",
+        "task_id",
+        "group_ordinal",
+        "command_plan_manifest",
+        "mappings_manifest",
+        "binding_digest",
+    }.issubset(columns)
+    assert {
+        "ck_workspace_command_plan_binding_bounds",
+        "ck_workspace_command_plan_binding_ecosystem",
+    } == constraints
+    assert {
+        "ix_workspace_command_plan_bindings_draft",
+        "ix_workspace_command_plan_bindings_task",
+    } == indexes
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0055_planner_only_single_task_loop",
+        insert_statement="""
+            INSERT INTO workspace_command_plan_bindings (
+                binding_id, draft_id, loop_id, task_id, group_ordinal,
+                expected_plan_id, expected_plan_manifest_digest,
+                command_plan_id, plan_generation, project_path, ecosystem,
+                request_digest, catalog_digest, step_count,
+                command_plan_manifest, command_plan_digest,
+                mappings_manifest, mappings_digest, manifest, binding_digest,
+                created_at
+            ) VALUES (
+                :binding_id, :draft_id, :loop_id, :task_id, 1,
+                :plan_id, :digest,
+                :command_plan_id, 1, 'backend', 'python',
+                :digest, :digest, 1,
+                :empty_object, :digest,
+                :empty_list, :digest, :empty_object, :binding_digest,
+                :created_at
+            )
+        """,
+        parameters={
+            "binding_id": "wcb_" + "1" * 64,
+            "draft_id": "mpd_" + "2" * 64,
+            "loop_id": "tlp_" + "3" * 64,
+            "task_id": "tsk_" + "4" * 32,
+            "plan_id": "epl_" + "5" * 64,
+            "command_plan_id": "wcp_" + "6" * 64,
+            "digest": "7" * 64,
+            "binding_digest": "8" * 64,
+            "empty_object": "{}",
+            "empty_list": "[]",
+            "created_at": "2026-08-25 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT binding_id, command_plan_id, binding_digest
+            FROM workspace_command_plan_bindings WHERE binding_id = :binding_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM workspace_command_plan_bindings "
+            "WHERE binding_id = :binding_id"
+        ),
+    )
+
+    command.downgrade(config, "0055_planner_only_single_task_loop")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert "workspace_command_plan_bindings" not in inspect(
+            connection
+        ).get_table_names()
+    engine.dispose()
     command.upgrade(config, "head")
     command.check(config)
 

@@ -1094,6 +1094,8 @@ def workspace_command_profile_contract(
             origin="trusted_template",
         ),
         output=OutputContract(media_type="application/json", language="zh-CN"),
+        max_tool_calls=2,
+        max_retries=1,
     )
 
 
@@ -1109,6 +1111,8 @@ def workspace_command_profile_draft(
         objective="运行一个服务器固定、断网、临时快照命令 Profile。",
         acceptance_ref="ac_workspace_command_profile",
         verification_profile=VerificationProfile.DETERMINISTIC,
+        max_tool_calls=2,
+        max_retries=1,
     )
 
 
@@ -1449,6 +1453,8 @@ def _direct_capability_contract(
     input_tokens: int = 0,
     output_tokens: int = 0,
     cost_micros: int = 0,
+    max_tool_calls: int = 1,
+    max_retries: int = 0,
 ) -> TaskContract:
     suffix = task_id.removeprefix("tsk_")
     pack = capabilities.resolve_preferred(capability_id)
@@ -1469,11 +1475,11 @@ def _direct_capability_contract(
         max_risk_level=max_risk_level,
         budget=TaskBudget(
             max_model_calls=model_calls,
-            max_tool_calls=1,
+            max_tool_calls=max_tool_calls,
             max_input_tokens=input_tokens,
             max_output_tokens=output_tokens,
             max_wall_seconds=90,
-            max_retries=0,
+            max_retries=max_retries,
             max_cost_micros=cost_micros,
             max_handoffs=0,
             max_plan_nodes=3,
@@ -1505,6 +1511,8 @@ def _direct_capability_draft(
     input_tokens: int = 0,
     output_tokens: int = 0,
     cost_micros: int = 0,
+    max_tool_calls: int = 1,
+    max_retries: int = 0,
 ) -> DraftPlan:
     zero = PlanNodeBudget(
         model_calls=0,
@@ -1534,11 +1542,11 @@ def _direct_capability_draft(
                 verification_profile=verification_profile,
                 budget=PlanNodeBudget(
                     model_calls=model_calls,
-                    tool_calls=1,
+                    tool_calls=max_tool_calls,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     wall_seconds=60,
-                    retries=0,
+                    retries=max_retries,
                     cost_micros=cost_micros,
                     handoffs=0,
                 ),

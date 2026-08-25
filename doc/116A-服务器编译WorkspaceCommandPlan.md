@@ -2,61 +2,56 @@
 
 ## 1. 检查点结论
 
-阶段 116A 的第一个代码检查点已落地：原有“一个 Offer 绑定一个固定 Command Profile”的安全边界保留，并新增不可变、内容寻址的 `WorkspaceCommandPlanRequest`、`WorkspaceCommandPlanStep` 与 `WorkspaceCommandPlan`，由服务器编译器把多个已注册 Profile 选择编译成严格串行、失败即停的命令链。
+阶段 116A 第二个代码检查点已落地：服务器编译的 `WorkspaceCommandPlan` 已绑定到 exact Task、generation-1 ModelPlanner Draft/Step、Offer 和 TaskLoop capability node，并与 Draft/Step 在同一事务写入新的 `0056_workspace_command_plan_bindings` 表。计划表只保存不可变授权与映射证明，Node、Attempt 和 VerifiedResult 仍是唯一执行状态真值。
 
-这个检查点只证明命令计划的输入面、项目目标解析、Profile 绑定和内容证明成立。它还没有把多步计划接入持久 TaskLoop，也不代表阶段 116A/116B 或真实仓库长循环已经完成。
+这个检查点已闭合固定命令链的持久执行、失败即停、一次有界 Repair 和重启恢复；它仍不代表 116B 的完整多 Agent 编码循环或 116C 真实模型质量验收已完成。
 
-## 2. 模型可提供与不可提供的内容
+## 2. 编译与绑定边界
 
-编译器公开输入只有：
+编译器公开输入仍只有 exact Task、计划代、工作区内 `project_path` 和 1～6 个已注册 `command_profile_id`。模型或调用者不能提供 executable、argv、cwd、环境变量、shell 字符串、网络开关、安装指令、超时或进程数。
 
-- `task_id`；
-- `plan_generation`；
-- 工作区内的结构化 `project_path`；
-- 1～6 个 `command_profile_id`。
+ModelPlanner 将连续、同项目、同生态的 command Offer 编译成一条严格串行计划；非 command Route、项目变化或 Python/Node 生态变化会切分计划组。重复 Profile、超过 6 步、映射不唯一、越界路径或摘要篡改都在命令启动前 fail closed。
 
-模型或调用者不能提供 executable、argv、cwd、环境变量、shell 字符串、网络开关、临时目录、超时或进程数。项目目标先通过既有 `WorkspaceFileRuntime` 解析，绝对路径、`..`、隐藏路径、symlink、junction、reparse point、非目录或工作区外目标继续 fail closed。
+`WorkspaceCommandPlanBinding` 和每节点 `WorkspaceCommandPlanStepProof` 绑定：
 
-## 3. 服务器编译结果
+- Task、TaskLoop、Draft 和 exact generation-1 Plan digest；
+- Offer ID/key/digest、ModelPlanner Step ID/digest/ordinal；
+- composite node ID/spec digest 与 fixed Command Profile ID/digest；
+- 归一化项目路径、Catalog digest、command step/plan/binding digest。
 
-服务器为每个选择解析完整 `CommandProfile`，并把 Profile digest、ecosystem、固定断网、临时快照、dependency mode、timeout 和进程上限绑定进 Step。计划同时绑定：
+Planning、Activation 和每次 command claim 都重建并比对当前路径、Catalog、Profile、Offer 和 node proof。新 command node 必须有且只有一个完全匹配的步骤证明，证明进入 BoundCapabilityInput、Context 和 ResultRef 摘要链；旧非命令输入缺少该字段时保持原 digest。
 
-- exact Task 与 `plan_generation`；
-- 归一化项目路径和请求摘要；
-- 全量服务器 Profile Catalog 摘要；
-- 连续 Step sequence、前一步依赖和每步摘要；
-- 总 timeout budget；
-- `stop_on_failure=true`、`network_access=false`、`temporary_snapshot_per_step=true`；
-- 内容寻址的 plan id 与 plan digest。
+## 3. 执行、失败与恢复
 
-当前版本刻意只生成单链：第一步无依赖，之后每步只依赖紧邻前一步。重复 Profile、Python/Node 混用、空计划、越界项目目标或任何摘要篡改都会在命令启动前被拒绝。
+- 只有 `status=passed` 的 command ResultRef 才能满足依赖并解锁后续步骤。
+- 非 `passed` 输出仍生成独立、经验证、不可变的失败 ResultRef；对应 Attempt/Node 标为 `failed`，后续 Node 保持 `pending`。
+- Command Profile node 预算允许已知失败后一次新 Attempt；首次 Repair 成功后只用成功 ResultRef 满足边，历史失败回执保留。TaskLoop 全局 Repair 上限仍为 2。
+- `running`、lease 过期或 outcome unknown 继续使用 `NO_AUTOMATIC_REPLAY`，不把不确定命令当作已知失败重试。
+- 重启后从原 Draft/Plan/Node 恢复，已通过步骤不重复执行；无 binding 的未执行 legacy command node 在激活/领取前失败关闭。
 
-## 4. 实现位置与自动验证
+Workbench 沿用原 TaskLoop API，节点只新增可选 `command_plan_id`、步骤序号、Profile ID 和已验证失败回执数；没有新建第二套 API 或前端状态机。
 
-- `backend/src/deskpilot/domain/workspace_command_plans.py`：请求、Step 和 Plan 的冻结 Contract、identity 与 digest 自验证；
-- `backend/src/deskpilot/application/workspace_command_plan_compiler.py`：项目根解析、Catalog 绑定、ecosystem 校验和确定性步骤链编译；
-- `backend/tests/test_workspace_command_plan_compiler.py`：确定性、依赖链、路径拒绝、重复/混用拒绝、篡改拒绝及无进程字段输入面。
+## 4. 实现位置
 
-最终门禁结果：
+- `backend/src/deskpilot/domain/workspace_command_plans.py`：Plan/Binding/Mapping/StepProof 冻结 Contract 与摘要自验证；
+- `backend/src/deskpilot/application/workspace_command_plan_binder.py`：command Offer 分组、编译与 exact ModelPlanner node 映射；
+- `backend/src/deskpilot/application/multi_step_plan_runtime.py`：Draft/Step/Binding 原子持久与重启读取；
+- `backend/src/deskpilot/application/task_loop_activation_runtime.py` 与 `capability_execution_runtime.py`：激活/claim 重验、通过解锁、失败回执和恢复；
+- `backend/src/deskpilot/infrastructure/migrations/versions/0056_workspace_command_plan_bindings.py`：不可变绑定表与有数据 downgrade guard。
 
-- 默认后端 `774 passed + 12 skipped`，失败/错误为 0；
-- 新 Plan、Release/Admission 默认关闭与 Agent Registry 联合专项 `26/26`；
-- Command Profile、Command Runtime、Workspace path/coding 与 TaskLoop reducer 联合回归通过；
-- Ruff 全仓通过；严格 mypy 287 个生产源码通过；
-- 唯一警告仍是既有 Starlette `TestClient` / httpx 弃用提示。
+## 5. 验收结果
 
-## 5. 下一纵切
+- 默认后端 `779 passed + 12 skipped`，失败/错误为 0；12 项为未配置的可选 PostgreSQL/RabbitMQ 外部服务 cohort。
+- WorkspaceCommandPlan 专项覆盖单/多步、混合 Route、跨项目/生态分组、事务回滚、重启恢复、失败停链、一次 Repair、路径/Catalog/Profile/proof 漂移拒绝和 downgrade guard。
+- Ruff 全仓通过；严格 mypy 通过 289 个生产源码文件；`uv lock --check` 与 `pip check` 通过。
+- Alembic 唯一/current head 为 `0056_workspace_command_plan_bindings`，`upgrade/current/check` 通过；SQLite `integrity_check=ok`、foreign-key 零违规。
+- PostgreSQL marker 精确选中 11 项，因本机未配置专用测试库而全部安全跳过，未宣称本检查点完成了真 PostgreSQL 实测。
+- 前端 24 个测试文件 / 165 项、type-check 和 production build 通过。唯一警告仍是既有 Starlette `TestClient` / httpx 弃用提示。
 
-下一步不是开放自由 Shell，而是把 `WorkspaceCommandPlan` 绑定到现有 TaskLoop 的 exact generation 和持久节点：
+## 6. 下一纵切
 
-1. 保存计划请求、plan digest 与每个 Step 的执行/验证状态；
-2. 每个 Step 继续调用现有断网临时快照 `WorkspaceCommandRuntime`，不新建任意命令入口；
-3. 失败后停止未启动 Step，并把经过验证的失败结果交给有界 Repair；
-4. API/sidecar 重启只恢复确定未启动的 Step，`running` 或 outcome unknown 不透明重放；
-5. 最终 Delivery 聚合 exact plan、每步 snapshot/toolchain/result digest、失败/修复历史和剩余风险。
+116A 的固定命令链持久执行检查点已闭合。下一步进入 116B：在同一持久 TaskLoop 中连接持续对话、两个并行只读 Child、verified join、精确多文件 Patch、固定 Test/Repair、独立 Verify 和 Delivery 证据，形成 `Inspect → Plan → Delegate → Patch → Test → Repair → Verify → Deliver` 的 LOCAL-only/Fake 纵向闭环。
 
-该持久命令链闭合后，再把两个并行只读 Child 的 verified join、Patch 和 Repair 接成 `Inspect → Plan → Delegate → Patch → Test → Repair → Verify → Deliver` 用户纵切。
+## 7. 生产边界
 
-## 6. 生产边界
-
-本检查点只使用本地代码、既有固定 Profile 和离线自动化，不调用真实 Candidate/Judge，不生成 Production Admission，也不改变 cloud-only 2.0.0 cohort 的 disabled 状态。115B 的五项授权继续阻塞真实 capture、activation 和 116C 真实模型质量结论。
+本检查点只使用本地代码、Fake runtime 和隔离测试仓库，不调用真实 Candidate/Judge，不生成 Production Admission，也不改变 cloud-only 2.0.0 cohort 的 disabled 状态。115B 的五项授权继续阻塞真实 capture、activation 和 116C 真实模型质量结论。

@@ -31,9 +31,15 @@ from deskpilot.application.capability_execution_runtime import (
 from deskpilot.application.capability_input_binding_catalog import (
     CapabilityInputBindingCatalog,
 )
+from deskpilot.application.command_profile_catalog import CommandProfileCatalog
 from deskpilot.application.model_planner_node_binder import ModelPlannerNodeBinder
+from deskpilot.application.multi_step_plan_runtime import (
+    MultiStepPlanConflictError,
+    MultiStepPlanRuntime,
+)
 from deskpilot.application.route_recipe_catalog import RouteRecipeCatalog
 from deskpilot.application.task_loop_activation_runtime import (
+    TaskLoopActivationProofRejectedError,
     TaskLoopActivationRuntime,
 )
 from deskpilot.application.task_loop_agent_adapter_registry import (
@@ -43,11 +49,19 @@ from deskpilot.application.task_loop_execution_coordinator import (
     TaskLoopExecutionCoordinator,
     TaskLoopExecutionCoordinatorProofRejectedError,
 )
+from deskpilot.application.workspace_command_plan_binder import WorkspaceCommandPlanBinder
+from deskpilot.application.workspace_command_plan_compiler import WorkspaceCommandPlanCompiler
 from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.capability_execution import (
     CapabilityExecutionContext,
     VerifiedCapabilityResultRef,
+)
+from deskpilot.domain.command_profiles import (
+    CommandProfile,
+    CommandProfileId,
+    WorkspaceCommandRead,
+    WorkspaceCommandSnapshot,
 )
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
@@ -56,12 +70,14 @@ from deskpilot.infrastructure.models import (
     TaskLoopCycleEventRecord,
     TaskLoopNodeAttemptRecord,
     TaskLoopVerifiedResultRecord,
+    WorkspaceCommandPlanBindingRecord,
     utc_now,
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from test_builtin_capability_executors import (  # noqa: E402
+    FakeCommandSnapshots,
     FakeKnowledge,
     FakeMcp,
     FakePythonRuntime,
@@ -74,6 +90,7 @@ from test_multi_step_plan_runtime import (  # noqa: E402
     _runtimes,
     _seed_turn,
     _select_two_offers,
+    _task_loop_record_counts,
 )
 
 
@@ -105,6 +122,108 @@ def _select_patch_offer(request: Any) -> dict[str, Any]:
             },
         ],
     }
+
+
+def _command_offer_key(request: Any, profile_id: str) -> str:
+    payload = json.loads(request.messages[1].content)
+    matches = [
+        item["offer"]["offer_key"]
+        for item in payload["offers"]
+        if profile_id in item["intent_description"]
+    ]
+    assert len(matches) == 1
+    return str(matches[0])
+
+
+def _select_two_command_offers(request: Any) -> dict[str, Any]:
+    return {
+        "schema_version": "deskpilot.turn-planner-decision.v1",
+        "kind": "propose_steps",
+        "steps": [
+            {
+                "offer_key": _command_offer_key(request, "python.ruff.v1"),
+                "parameters": [{"name": "project_path", "value": "backend"}],
+            },
+            {
+                "offer_key": _command_offer_key(request, "python.mypy.v1"),
+                "parameters": [{"name": "project_path", "value": "backend"}],
+            },
+        ],
+    }
+
+
+def _select_mixed_grouped_offers(request: Any) -> dict[str, Any]:
+    return {
+        "schema_version": "deskpilot.turn-planner-decision.v1",
+        "kind": "propose_steps",
+        "steps": [
+            {
+                "offer_key": _command_offer_key(request, "python.ruff.v1"),
+                "parameters": [{"name": "project_path", "value": "backend"}],
+            },
+            {
+                "offer_key": _command_offer_key(request, "node.pnpm_typecheck.v1"),
+                "parameters": [{"name": "project_path", "value": "backend"}],
+            },
+            {
+                "offer_key": _offer_key_for(request, "query"),
+                "parameters": [{"name": "query", "value": "release evidence"}],
+            },
+            {
+                "offer_key": _command_offer_key(request, "python.mypy.v1"),
+                "parameters": [{"name": "project_path", "value": "frontend"}],
+            },
+        ],
+    }
+
+
+def _command_read(profile: CommandProfile, status: str) -> WorkspaceCommandRead:
+    passed = status == "passed"
+    output = "ok" if passed else "scripted check failure"
+    material: dict[str, Any] = {
+        "schema_version": "deskpilot.workspace-command-read.v1",
+        "command_profile_id": profile.command_profile_id,
+        "profile_digest": profile.profile_digest,
+        "project_path": "backend",
+        "snapshot_digest": "1" * 64,
+        "toolchain_digest": "2" * 64,
+        "status": status,
+        "exit_code": 0 if passed else 1,
+        "duration_ms": 10,
+        "output_summary": output,
+        "output_digest": sha256_digest({"output": output}),
+        "output_truncated": False,
+        "termination_reason": "completed",
+        "cancellation_receipt_digest": None,
+        "isolation_mode": "windows_appcontainer",
+        "network_access": False,
+        "temporary_snapshot": True,
+        "snapshot_mutations_discarded": True,
+    }
+    return WorkspaceCommandRead.model_validate(
+        {**material, "result_digest": sha256_digest(material)}
+    )
+
+
+class _ScriptedCommandRuntime:
+    enabled_profile_ids: frozenset[CommandProfileId] = frozenset(
+        {"python.ruff.v1", "python.mypy.v1"}
+    )
+
+    def __init__(
+        self,
+        profiles: CommandProfileCatalog,
+        outcomes: list[tuple[CommandProfileId, str]],
+    ) -> None:
+        self._profiles = profiles
+        self._outcomes = outcomes
+        self.calls: list[CommandProfileId] = []
+
+    def run(self, snapshot: WorkspaceCommandSnapshot) -> WorkspaceCommandRead:
+        del snapshot
+        profile_id, status = self._outcomes.pop(0)
+        self.calls.append(profile_id)
+        return _command_read(self._profiles.resolve(profile_id), status)
 
 
 class _FlakyVerificationEngine:
@@ -300,6 +419,350 @@ async def _runtime_fixture(
         mcp=actual_mcp,
         engine=engine,
     )
+
+
+@pytest.mark.asyncio
+async def test_workspace_command_plan_groups_on_route_project_and_ecosystem_changes(
+    tmp_path: Path,
+) -> None:
+    database = Database(
+        f"sqlite+aiosqlite:///{(tmp_path / 'command-plan-groups.db').as_posix()}"
+    )
+    await database.migrate()
+    provider = ScriptedTurnPlannerProvider([_select_mixed_grouped_offers])
+    planner, _planning, _legacy_loop, composer = _runtimes(database, provider)
+    workspace_root = tmp_path / "workspace"
+    (workspace_root / "backend").mkdir(parents=True)
+    (workspace_root / "frontend").mkdir()
+    workspace = WorkspaceFileRuntime(str(workspace_root), str(tmp_path / "staging"))
+    command_plans = WorkspaceCommandPlanBinder(
+        WorkspaceCommandPlanCompiler(CommandProfileCatalog(), workspace)
+    )
+    task_loops = MultiStepPlanRuntime(
+        database,
+        planner,
+        composer,
+        command_plans=command_plans,
+        clock=lambda: NOW,
+    )
+    task_id, fallback = await _seed_turn(
+        database,
+        suffix="8",
+        message="run backend and frontend checks and collect release evidence",
+    )
+    try:
+        await planner.prepare(
+            task_id,
+            fallback.user_message_id,
+            fallback,
+            frozenset(
+                {
+                    "workspace_command_profile:python.ruff.v1",
+                    "workspace_command_profile:node.pnpm_typecheck.v1",
+                    "knowledge_lookup",
+                    "workspace_command_profile:python.mypy.v1",
+                }
+            ),
+        )
+        interpreted = await planner.interpret(task_id)
+        assert interpreted.adjudication is not None
+        assert interpreted.adjudication.outcome == "multi_step_deferred", (
+            interpreted.run.failure,
+            interpreted.adjudication.reason_code,
+        )
+
+        planned = await task_loops.plan(task_id)
+        bundle = await task_loops.get_bundle(task_id)
+
+        assert planned.status == "planned"
+        assert bundle is not None
+        assert tuple(
+            (
+                item.command_plan.request.project_path,
+                item.command_plan.ecosystem,
+                item.command_plan.request.command_profile_ids,
+            )
+            for item in bundle.command_plans
+        ) == (
+            ("backend", "python", ("python.ruff.v1",)),
+            ("backend", "node", ("node.pnpm_typecheck.v1",)),
+            ("frontend", "python", ("python.mypy.v1",)),
+        )
+        assert tuple(item.group_ordinal for item in bundle.command_plans) == (1, 2, 3)
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_workspace_command_plan_transaction_rolls_back_partial_draft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database(
+        f"sqlite+aiosqlite:///{(tmp_path / 'command-plan-rollback.db').as_posix()}"
+    )
+    await database.migrate()
+    provider = ScriptedTurnPlannerProvider([_select_two_command_offers])
+    planner, _planning, _legacy_loop, composer = _runtimes(database, provider)
+    workspace_root = tmp_path / "workspace"
+    (workspace_root / "backend").mkdir(parents=True)
+    workspace = WorkspaceFileRuntime(str(workspace_root), str(tmp_path / "staging"))
+    command_plans = WorkspaceCommandPlanBinder(
+        WorkspaceCommandPlanCompiler(CommandProfileCatalog(), workspace)
+    )
+    task_loops = MultiStepPlanRuntime(
+        database,
+        planner,
+        composer,
+        command_plans=command_plans,
+        clock=lambda: NOW,
+    )
+    original_record = task_loops._command_plan_record  # noqa: SLF001
+
+    def broken_record(binding: Any) -> WorkspaceCommandPlanBindingRecord:
+        record = original_record(binding)
+        record.draft_id = f"mpd_{'f' * 64}"
+        return record
+
+    monkeypatch.setattr(task_loops, "_command_plan_record", broken_record)
+    task_id, fallback = await _seed_turn(
+        database,
+        suffix="7",
+        message="run backend checks atomically",
+    )
+    try:
+        await planner.prepare(
+            task_id,
+            fallback.user_message_id,
+            fallback,
+            frozenset(
+                {
+                    "workspace_command_profile:python.ruff.v1",
+                    "workspace_command_profile:python.mypy.v1",
+                }
+            ),
+        )
+        await planner.interpret(task_id)
+
+        with pytest.raises(MultiStepPlanConflictError):
+            await task_loops.plan(task_id)
+
+        assert await _task_loop_record_counts(database, task_id) == (1, 1, 0, 0)
+        async with database.session() as session:
+            assert int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceCommandPlanBindingRecord)
+                    .where(WorkspaceCommandPlanBindingRecord.task_id == task_id)
+                )
+                or 0
+            ) == 0
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_workspace_command_plan_persists_fail_stop_repair_and_restart(
+    tmp_path: Path,
+) -> None:
+    database = Database(
+        f"sqlite+aiosqlite:///{(tmp_path / 'command-plan.db').as_posix()}"
+    )
+    await database.migrate()
+    provider = ScriptedTurnPlannerProvider([_select_two_command_offers])
+    planner, planning, _legacy_loop, composer = _runtimes(database, provider)
+    workspace_root = tmp_path / "workspace"
+    staging_root = tmp_path / "staging"
+    (workspace_root / "backend").mkdir(parents=True)
+    staging_root.mkdir()
+    workspace = WorkspaceFileRuntime(str(workspace_root), str(staging_root))
+    profiles = CommandProfileCatalog()
+    command_plans = WorkspaceCommandPlanBinder(
+        WorkspaceCommandPlanCompiler(profiles, workspace)
+    )
+    task_loops = MultiStepPlanRuntime(
+        database,
+        planner,
+        composer,
+        command_plans=command_plans,
+        clock=lambda: NOW,
+    )
+    snapshots = FakeCommandSnapshots()
+    commands = _ScriptedCommandRuntime(
+        profiles,
+        [
+            ("python.ruff.v1", "failed"),
+            ("python.ruff.v1", "passed"),
+            ("python.mypy.v1", "passed"),
+        ],
+    )
+    registry = create_builtin_capability_executor_registry(
+        planner._capabilities,  # noqa: SLF001
+        command_profiles=profiles,
+        command_snapshots=snapshots,
+        command_runtime=commands,
+    )
+    execution = AgentExecutionRuntime(
+        database,
+        planning._compiler,  # noqa: SLF001
+        planner._agents,  # noqa: SLF001
+        clock=lambda: NOW,
+    )
+    activation = TaskLoopActivationRuntime(
+        database,
+        task_loops,
+        planner,
+        planning,
+        execution,
+        ModelPlannerNodeBinder(
+            planner._agents,  # noqa: SLF001
+            registry,
+            create_task_loop_agent_adapter_registry(
+                research_available=True,
+                workspace_file_available=True,
+            ),
+        ),
+        command_plans=command_plans,
+        clock=lambda: NOW,
+    )
+    runtime = CapabilityExecutionRuntime(
+        database,
+        CapabilityInputBindingCatalog(planner._capabilities),  # noqa: SLF001
+        registry,
+        CapabilityExecutionEngine(registry),
+        command_plans=command_plans,
+        clock=lambda: NOW,
+    )
+    task_id, fallback = await _seed_turn(
+        database,
+        suffix="9",
+        message="run backend checks",
+    )
+    try:
+        await planner.prepare(
+            task_id,
+            fallback.user_message_id,
+            fallback,
+            frozenset(
+                {
+                    "workspace_command_profile:python.ruff.v1",
+                    "workspace_command_profile:python.mypy.v1",
+                }
+            ),
+        )
+        interpreted = await planner.interpret(task_id)
+        assert interpreted.adjudication is not None
+        assert interpreted.adjudication.outcome == "multi_step_deferred"
+        await task_loops.plan(task_id)
+        bundle = await task_loops.get_bundle(task_id)
+        assert bundle is not None
+        assert len(bundle.command_plans) == 1
+        assert tuple(
+            item.command_profile.command_profile_id
+            for item in bundle.command_plans[0].command_plan.steps
+        ) == ("python.ruff.v1", "python.mypy.v1")
+        async with database.session() as session:
+            assert int(
+                await session.scalar(
+                    select(func.count()).select_from(
+                        WorkspaceCommandPlanBindingRecord
+                    )
+                )
+                or 0
+            ) == 1
+
+        original_profile = profiles.resolve("python.ruff.v1")
+        changed_profile_values = original_profile.model_dump(
+            exclude={"profile_digest", "timeout_seconds"}
+        )
+        profiles._profiles["python.ruff.v1"] = CommandProfile.build(  # noqa: SLF001
+            **changed_profile_values,
+            timeout_seconds=121,
+        )
+        with pytest.raises(TaskLoopActivationProofRejectedError):
+            await activation.activate(task_id)
+        profiles._profiles["python.ruff.v1"] = original_profile  # noqa: SLF001
+
+        project_root = workspace_root / "backend"
+        drifted_root = workspace_root / "backend-drifted"
+        project_root.rename(drifted_root)
+        with pytest.raises(TaskLoopActivationProofRejectedError):
+            await activation.activate(task_id)
+        drifted_root.rename(project_root)
+
+        await activation.activate(task_id)
+        coordinator = TaskLoopExecutionCoordinator(
+            database,
+            activation,
+            capabilities=runtime,
+        )
+        failed = await coordinator.advance(task_id, "command-worker-1")
+        command_nodes = tuple(
+            item for item in failed.read.nodes if item.command_plan_id is not None
+        )
+        first_node, second_node = sorted(
+            command_nodes,
+            key=lambda item: item.command_step_sequence or 0,
+        )
+        assert first_node.status == "failed"
+        assert first_node.verified_failure_result_count == 1
+        assert first_node.verified_result_present is False
+        assert second_node.status == "pending"
+        assert commands.calls == ["python.ruff.v1"]
+
+        repaired = await coordinator.advance(task_id, "command-repair")
+        assert repaired.command.kind == "start_repair"
+        restarted_runtime = CapabilityExecutionRuntime(
+            database,
+            CapabilityInputBindingCatalog(planner._capabilities),  # noqa: SLF001
+            registry,
+            CapabilityExecutionEngine(registry),
+            command_plans=command_plans,
+            clock=lambda: NOW,
+        )
+        restarted = TaskLoopExecutionCoordinator(
+            database,
+            activation,
+            capabilities=restarted_runtime,
+        )
+        passed_first = await restarted.advance(task_id, "command-worker-2")
+        first_after = next(
+            item
+            for item in passed_first.read.nodes
+            if item.command_step_sequence == 1
+        )
+        second_after = next(
+            item
+            for item in passed_first.read.nodes
+            if item.command_step_sequence == 2
+        )
+        assert first_after.status == "verified"
+        assert first_after.verified_result_present
+        assert first_after.verified_failure_result_count == 1
+        assert second_after.status == "ready"
+
+        passed_second = await restarted.advance(task_id, "command-worker-3")
+        assert passed_second.command.kind == "execute_capability"
+        assert next(
+            item
+            for item in passed_second.read.nodes
+            if item.command_step_sequence == 2
+        ).status == "verified"
+        assert commands.calls == [
+            "python.ruff.v1",
+            "python.ruff.v1",
+            "python.mypy.v1",
+        ]
+        async with database.session() as session:
+            results = int(
+                await session.scalar(
+                    select(func.count()).select_from(TaskLoopVerifiedResultRecord)
+                )
+                or 0
+            )
+        assert results == 3
+    finally:
+        await database.dispose()
 
 
 @pytest.mark.asyncio

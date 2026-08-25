@@ -986,6 +986,70 @@ class ModelPlannerStepBindingRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class WorkspaceCommandPlanBindingRecord(Base):
+    """Immutable command Plan and exact ModelPlanner-node mapping proof."""
+
+    __tablename__ = "workspace_command_plan_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "group_ordinal BETWEEN 1 AND 8 AND step_count BETWEEN 1 AND 6 "
+            "AND plan_generation = 1",
+            name="ck_workspace_command_plan_binding_bounds",
+        ),
+        CheckConstraint(
+            "ecosystem IN ('python', 'node')",
+            name="ck_workspace_command_plan_binding_ecosystem",
+        ),
+        UniqueConstraint(
+            "draft_id",
+            "group_ordinal",
+            name="uq_workspace_command_plan_binding_group",
+        ),
+        UniqueConstraint(
+            "binding_digest",
+            name="uq_workspace_command_plan_binding_digest",
+        ),
+        Index(
+            "ix_workspace_command_plan_bindings_draft",
+            "draft_id",
+            "group_ordinal",
+        ),
+        Index(
+            "ix_workspace_command_plan_bindings_task",
+            "task_id",
+            "created_at",
+        ),
+    )
+
+    binding_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    draft_id: Mapped[str] = mapped_column(
+        ForeignKey("model_planner_drafts.draft_id", ondelete="CASCADE")
+    )
+    loop_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loops.loop_id", ondelete="CASCADE")
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE")
+    )
+    group_ordinal: Mapped[int] = mapped_column(Integer)
+    expected_plan_id: Mapped[str] = mapped_column(String(68))
+    expected_plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    command_plan_id: Mapped[str] = mapped_column(String(68))
+    plan_generation: Mapped[int] = mapped_column(Integer)
+    project_path: Mapped[str] = mapped_column(String(32_767))
+    ecosystem: Mapped[str] = mapped_column(String(16))
+    request_digest: Mapped[str] = mapped_column(String(64))
+    catalog_digest: Mapped[str] = mapped_column(String(64))
+    step_count: Mapped[int] = mapped_column(Integer)
+    command_plan_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    command_plan_digest: Mapped[str] = mapped_column(String(64))
+    mappings_manifest: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    mappings_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    binding_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class TaskLoopExecutionRecord(Base):
     """Mutable pointer for one atomically activated model-planner Task Loop."""
 

@@ -14,11 +14,13 @@ from deskpilot.application.agent_execution_runtime import (
     AgentExecutionRuntime,
     AgentRuntimeError,
 )
+from deskpilot.application.model_planner_composer import RevalidatedOfferStep
 from deskpilot.application.model_planner_node_binder import (
     ModelPlannerNodeBinder,
     ModelPlannerNodeBindingError,
 )
 from deskpilot.application.multi_step_plan_runtime import (
+    ModelPlannerTaskLoopBundle,
     MultiStepPlanRuntime,
     MultiStepPlanRuntimeError,
 )
@@ -29,6 +31,10 @@ from deskpilot.application.plan_compilation_service import (
 from deskpilot.application.turn_planner_runtime import (
     TurnPlannerRuntime,
     TurnPlannerRuntimeError,
+)
+from deskpilot.application.workspace_command_plan_binder import (
+    WorkspaceCommandPlanBinder,
+    WorkspaceCommandPlanBindingError,
 )
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.capability_execution import VerifiedCapabilityResultRef
@@ -45,6 +51,7 @@ from deskpilot.domain.task_loop_execution import (
     TaskLoopVerifiedResult,
 )
 from deskpilot.domain.task_plans import DraftNodeKind, ExecutablePlan
+from deskpilot.domain.workspace_command_plans import WorkspaceCommandPlanBinding
 from deskpilot.domain.workspace_files import WorkspacePatchPreview, WorkspacePatchReceipt
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
@@ -97,6 +104,7 @@ class TaskLoopActivationRuntime:
         execution: AgentExecutionRuntime,
         node_binder: ModelPlannerNodeBinder,
         *,
+        command_plans: WorkspaceCommandPlanBinder | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._database = database
@@ -105,6 +113,7 @@ class TaskLoopActivationRuntime:
         self._planning = planning
         self._execution = execution
         self._node_binder = node_binder
+        self._command_plans = command_plans
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def activate(self, task_id: str) -> TaskLoopExecution:
@@ -132,12 +141,14 @@ class TaskLoopActivationRuntime:
                 bundle.steps,
                 revalidated,
             )
+            self._assert_current_command_plans(bundle, revalidated.steps)
         except TaskLoopActivationError:
             raise
         except (
             MultiStepPlanRuntimeError,
             TurnPlannerRuntimeError,
             ModelPlannerNodeBindingError,
+            WorkspaceCommandPlanBindingError,
             ValidationError,
             ValueError,
         ) as error:
@@ -182,6 +193,7 @@ class TaskLoopActivationRuntime:
                     bundle.steps,
                     revalidated,
                 )
+                self._assert_current_command_plans(bundle, revalidated.steps)
                 activated_plan = await self._planning.activate_initial_once_in_session(
                     session,
                     bundle.draft.task_contract,
@@ -240,6 +252,36 @@ class TaskLoopActivationRuntime:
                 "Atomic Plan or Run activation was rejected"
             ) from error
 
+    def _assert_current_command_plans(
+        self,
+        bundle: ModelPlannerTaskLoopBundle,
+        current_steps: tuple[RevalidatedOfferStep, ...],
+    ) -> None:
+        has_command = any(
+            item.route.route_id == "workspace_command_profile"
+            for item in current_steps
+        )
+        if not has_command:
+            if bundle.command_plans:
+                raise WorkspaceCommandPlanBindingError(
+                    "Persisted Workspace command Plan lost its current Offer"
+                )
+            return
+        if bundle.draft is None or self._command_plans is None:
+            raise WorkspaceCommandPlanBindingError(
+                "Workspace command Plan binder is unavailable at activation"
+            )
+        current = self._command_plans.bind(
+            loop_id=bundle.loop.loop_id,
+            draft=bundle.draft,
+            steps=bundle.steps,
+            current_steps=current_steps,
+        )
+        if current != bundle.command_plans:
+            raise WorkspaceCommandPlanBindingError(
+                "Workspace command Plan changed before activation"
+            )
+
     async def get(self, task_id: str) -> TaskLoopExecutionRead | None:
         """Reconstruct one proof-checked internal read without external I/O."""
 
@@ -266,9 +308,13 @@ class TaskLoopActivationRuntime:
                     raise TaskLoopActivationProofRejectedError(
                         "Unplanned Task Loop unexpectedly has an execution"
                     )
-                return self._pre_execution_read(bundle.loop, draft=None)
+                return self._pre_execution_read(bundle.loop, draft=None, command_plans=())
             if not records:
-                return self._pre_execution_read(bundle.loop, draft=bundle.draft)
+                return self._pre_execution_read(
+                    bundle.loop,
+                    draft=bundle.draft,
+                    command_plans=bundle.command_plans,
+                )
             if len(records) != 1:
                 raise TaskLoopActivationProofRejectedError(
                     "Task has more than one model-planner execution"
@@ -278,6 +324,7 @@ class TaskLoopActivationRuntime:
                 records[0],
                 loop=bundle.loop,
                 draft=bundle.draft,
+                command_plans=bundle.command_plans,
             )
 
     async def recoverable_task_ids(self, *, limit: int = 100) -> tuple[str, ...]:
@@ -334,9 +381,11 @@ class TaskLoopActivationRuntime:
         loop: TaskLoop,
         *,
         draft: ModelPlannerDraft | None,
+        command_plans: tuple[WorkspaceCommandPlanBinding, ...],
     ) -> TaskLoopExecutionRead:
         nodes: tuple[TaskLoopExecutionNodeRead, ...] = ()
         if draft is not None:
+            command_nodes = self._command_node_projection(command_plans)
             nodes = tuple(
                 TaskLoopExecutionNodeRead.build(
                     node_id=node.node_id,
@@ -352,6 +401,7 @@ class TaskLoopActivationRuntime:
                     max_attempts=node.budget.retries + 1,
                     candidate_present=False,
                     verified_result_present=False,
+                    **command_nodes.get(node.node_id, {}),
                     created_at=loop.updated_at,
                     updated_at=loop.updated_at,
                 )
@@ -375,6 +425,32 @@ class TaskLoopActivationRuntime:
             updated_at=loop.updated_at,
         )
 
+    @staticmethod
+    def _command_node_projection(
+        command_plans: tuple[WorkspaceCommandPlanBinding, ...],
+    ) -> dict[str, dict[str, object]]:
+        result: dict[str, dict[str, object]] = {}
+        for binding in command_plans:
+            for mapping in binding.mappings:
+                if mapping.composite_node_id in result:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Task Loop command projection repeats one node"
+                    )
+                step = binding.command_plan.steps[mapping.command_step_sequence - 1]
+                if (
+                    step.step_id != mapping.command_step_id
+                    or step.step_digest != mapping.command_step_digest
+                ):
+                    raise TaskLoopActivationProofRejectedError(
+                        "Task Loop command projection changed its exact step"
+                    )
+                result[mapping.composite_node_id] = {
+                    "command_plan_id": binding.command_plan.plan_id,
+                    "command_step_sequence": step.sequence,
+                    "command_profile_id": step.command_profile.command_profile_id,
+                }
+        return result
+
     async def _read_internal(
         self,
         session: AsyncSession,
@@ -382,6 +458,7 @@ class TaskLoopActivationRuntime:
         *,
         loop: TaskLoop,
         draft: ModelPlannerDraft,
+        command_plans: tuple[WorkspaceCommandPlanBinding, ...],
     ) -> TaskLoopExecutionRead:
         execution = await self._read_exact(
             session,
@@ -401,6 +478,7 @@ class TaskLoopActivationRuntime:
         bindings = tuple(self._binding_from_record(item) for item in binding_records)
         bindings_by_id = {item.node_binding_id: item for item in bindings}
         bindings_by_node = {item.composite_node_id: item for item in bindings}
+        command_nodes = self._command_node_projection(command_plans)
         if len(bindings_by_id) != len(bindings) or len(bindings_by_node) != len(bindings):
             raise TaskLoopActivationProofRejectedError("Task Loop execution repeats a node binding")
 
@@ -495,6 +573,7 @@ class TaskLoopActivationRuntime:
             ).all()
         )
         results_by_node: dict[str, TaskLoopVerifiedResult] = {}
+        failure_results_by_node: dict[str, list[TaskLoopVerifiedResult]] = {}
         for result_record in result_records:
             result = self._verified_result_from_record(result_record)
             result_attempt = attempts_by_id.get(result.attempt_id)
@@ -509,6 +588,9 @@ class TaskLoopActivationRuntime:
                 attempt=result_attempt,
                 binding=binding,
             )
+            if result_attempt.status == "failed":
+                failure_results_by_node.setdefault(result.node_id, []).append(result)
+                continue
             if result.node_id in results_by_node:
                 raise TaskLoopActivationProofRejectedError(
                     "Task Loop node has more than one verified ResultRef"
@@ -560,13 +642,19 @@ class TaskLoopActivationRuntime:
                     raise TaskLoopActivationProofRejectedError(
                         "Runnable Task Loop node lost its exact binding"
                     )
-            elif binding is not None or node_attempts or node.node_id in results_by_node:
+            elif (
+                binding is not None
+                or node_attempts
+                or node.node_id in results_by_node
+                or node.node_id in failure_results_by_node
+            ):
                 raise TaskLoopActivationProofRejectedError(
                     "Control node contains dispatch or ResultRef evidence"
                 )
 
             latest_attempt = node_attempts[-1] if node_attempts else None
             verified_result = results_by_node.get(node.node_id)
+            failure_results = tuple(failure_results_by_node.get(node.node_id, ()))
             node_approval = approvals_by_node.get(node.node_id)
             if node_approval is not None and latest_attempt is not None:
                 valid_approval_state = (
@@ -674,6 +762,8 @@ class TaskLoopActivationRuntime:
                     max_attempts=max_attempts,
                     candidate_present=candidate_present,
                     verified_result_present=verified_result is not None,
+                    verified_failure_result_count=len(failure_results),
+                    **command_nodes.get(node.node_id, {}),
                     created_at=self._aware(node.created_at),
                     updated_at=self._aware(node.updated_at),
                 )
@@ -1478,6 +1568,10 @@ class TaskLoopActivationRuntime:
         }
         expected_result_id = f"tlr_{sha256_digest(result_id_material)}"
         capability_manifest = result_ref.capability.model_dump(mode="json")
+        verified_failure = bool(
+            result.result_kind == "command_profile"
+            and result.output_manifest.get("status") != "passed"
+        )
         if (
             result.result_ref_id != expected_result_id
             or result.execution_id != execution.execution_id
@@ -1486,7 +1580,8 @@ class TaskLoopActivationRuntime:
             or result.node_binding_id != binding.node_binding_id
             or result.node_binding_digest != binding.binding_digest
             or result.attempt_id != attempt.attempt_id
-            or attempt.status != "verified"
+            or attempt.status not in {"verified", "failed"}
+            or (attempt.status == "failed" and not verified_failure)
             or attempt.execution_id != execution.execution_id
             or attempt.run_id != execution.run_id
             or attempt.node_id != binding.composite_node_id

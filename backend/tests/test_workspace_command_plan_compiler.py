@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,12 @@ from deskpilot.application.workspace_command_plan_compiler import (
     WorkspaceCommandPlanRejectedError,
 )
 from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
-from deskpilot.domain.workspace_command_plans import WorkspaceCommandPlan
+from deskpilot.domain.workspace_command_plans import (
+    WorkspaceCommandPlan,
+    WorkspaceCommandPlanBinding,
+    WorkspaceCommandPlanNodeMapping,
+    WorkspaceCommandPlanStepProof,
+)
 
 TASK_ID = "tsk_" + "a" * 32
 
@@ -126,3 +132,53 @@ def test_plan_request_and_compiler_surface_never_accept_process_fields(tmp_path:
         assert forbidden not in input_surface
         assert forbidden not in request_schema
         assert forbidden not in serialized_request
+
+
+def test_binding_mapping_and_step_proof_are_content_addressed(tmp_path: Path) -> None:
+    plan = _compiler(tmp_path).compile(
+        task_id=TASK_ID,
+        plan_generation=1,
+        project_path="project",
+        command_profile_ids=("python.ruff.v1",),
+    )
+    step = plan.steps[0]
+    mapping = WorkspaceCommandPlanNodeMapping.build(
+        command_step_id=step.step_id,
+        command_step_digest=step.step_digest,
+        command_step_sequence=1,
+        step_binding_id=f"mps_{'1' * 64}",
+        step_binding_digest="2" * 64,
+        step_ordinal=1,
+        offer_id=f"tpo_{'3' * 64}",
+        offer_key=f"ofk_{'4' * 64}",
+        offer_digest="5" * 64,
+        composite_node_id=f"pnd_{'6' * 64}",
+        composite_node_spec_digest="7" * 64,
+    )
+    binding = WorkspaceCommandPlanBinding.build(
+        task_id=TASK_ID,
+        loop_id=f"tlp_{'8' * 64}",
+        draft_id=f"mpd_{'9' * 64}",
+        group_ordinal=1,
+        expected_plan_id=f"epl_{'a' * 64}",
+        expected_plan_manifest_digest="b" * 64,
+        command_plan=plan,
+        mappings=(mapping,),
+        created_at=datetime(2026, 8, 25, tzinfo=UTC),
+    )
+    proof = binding.proof_for_node(mapping.composite_node_id)
+
+    assert proof.command_profile_id == "python.ruff.v1"
+    assert proof.binding_digest == binding.binding_digest
+    with pytest.raises(ValidationError, match="mapping id"):
+        WorkspaceCommandPlanNodeMapping.model_validate(
+            mapping.model_copy(update={"offer_digest": "c" * 64}).model_dump()
+        )
+    with pytest.raises(ValidationError, match="mapping-set digest"):
+        WorkspaceCommandPlanBinding.model_validate(
+            binding.model_copy(update={"mappings_digest": "d" * 64}).model_dump()
+        )
+    with pytest.raises(ValidationError, match="proof digest"):
+        WorkspaceCommandPlanStepProof.model_validate(
+            proof.model_copy(update={"catalog_digest": "e" * 64}).model_dump()
+        )

@@ -33,6 +33,7 @@ from deskpilot.domain.task_plans import (
     TASK_ID_PATTERN,
     CapabilityRef,
 )
+from deskpilot.domain.workspace_command_plans import WorkspaceCommandPlanStepProof
 
 
 class CapabilityInputBindingError(RuntimeError):
@@ -280,6 +281,7 @@ class BoundCapabilityInput(BaseModel):
         default=(), max_length=20
     )
     consumed_result_refs: tuple[VerifiedCapabilityResultRef, ...] = Field(default=(), max_length=16)
+    workspace_command_plan_step: WorkspaceCommandPlanStepProof | None = None
     binding_digest: str = Field(pattern=DIGEST_PATTERN)
 
     @model_validator(mode="after")
@@ -299,7 +301,25 @@ class BoundCapabilityInput(BaseModel):
             raise ValueError("Consumed ResultRefs must be verified dependencies")
         if any(item.task_id != self.task_id for item in self.dependency_result_refs):
             raise ValueError("Bound capability dependencies cross Task scope")
+        proof = self.workspace_command_plan_step
+        if self.route_id == "workspace_command_profile":
+            if not isinstance(self.arguments, WorkspaceCommandExecutorInput):
+                raise ValueError("Command capability input changed its argument Schema")
+            if proof is not None and (
+                proof.composite_node_id != self.node_id
+                or proof.composite_node_spec_digest != self.node_spec_digest
+                or proof.step_binding_id != self.source_step_binding_id
+                or proof.step_binding_digest != self.source_step_binding_digest
+                or proof.offer_key != self.source_offer_key
+                or proof.project_path != self.arguments.project_path
+                or proof.command_profile_id != self.arguments.command_profile_id
+            ):
+                raise ValueError("Command Plan proof changed from its bound capability input")
+        elif proof is not None:
+            raise ValueError("Non-command capability input contains a command Plan proof")
         material = self.model_dump(mode="json", exclude={"binding_digest"})
+        if proof is None:
+            material.pop("workspace_command_plan_step", None)
         if self.binding_digest != sha256_digest(material):
             raise ValueError("Bound capability input digest does not match")
         return self
@@ -313,6 +333,7 @@ class BoundCapabilityInput(BaseModel):
         arguments: CapabilityExecutorInput,
         dependency_result_refs: tuple[VerifiedCapabilityResultRef, ...],
         consumed_result_refs: tuple[VerifiedCapabilityResultRef, ...] = (),
+        workspace_command_plan_step: WorkspaceCommandPlanStepProof | None = None,
     ) -> BoundCapabilityInput:
         values = {
             "schema_version": "deskpilot.bound-capability-input.v1",
@@ -336,6 +357,8 @@ class BoundCapabilityInput(BaseModel):
             "dependency_result_refs": dependency_result_refs,
             "consumed_result_refs": consumed_result_refs,
         }
+        if workspace_command_plan_step is not None:
+            values["workspace_command_plan_step"] = workspace_command_plan_step
         return cls.model_validate({**values, "binding_digest": sha256_digest(values)})
 
 
@@ -533,6 +556,7 @@ class CapabilityInputBindingCatalog:
         *,
         node_binding: ModelPlannerNodeBinding,
         dependencies: tuple[ResolvedVerifiedCapabilityResult, ...] = (),
+        workspace_command_plan_step: WorkspaceCommandPlanStepProof | None = None,
     ) -> BoundCapabilityInput:
         authority = node_binding.effective_authority
         eligibility = node_binding.runtime_eligibility
@@ -553,6 +577,15 @@ class CapabilityInputBindingCatalog:
         if profile is None:
             raise CapabilityInputProfileNotFoundError(
                 "Capability input profile has no exact registration"
+            )
+        if profile.route_id == "workspace_command_profile":
+            if workspace_command_plan_step is None:
+                raise CapabilityInputLineageRejectedError(
+                    "Command Profile input has no persisted command Plan proof"
+                )
+        elif workspace_command_plan_step is not None:
+            raise CapabilityInputLineageRejectedError(
+                "Non-command capability input contains a command Plan proof"
             )
         expected_recipe_digest = profile.route_manifest_digest
         if profile.route_id == "workspace_command_profile":
@@ -604,6 +637,7 @@ class CapabilityInputBindingCatalog:
             arguments=cast(CapabilityExecutorInput, arguments),
             dependency_result_refs=dependency_refs,
             consumed_result_refs=tuple(item.result_ref for item in consumed),
+            workspace_command_plan_step=workspace_command_plan_step,
         )
 
     @staticmethod

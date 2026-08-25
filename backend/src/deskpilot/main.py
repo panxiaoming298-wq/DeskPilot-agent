@@ -132,6 +132,8 @@ from deskpilot.application.workbench_runtime_coordinator import (
 from deskpilot.application.workspace_agent_runtime import WorkspaceAgentRuntime
 from deskpilot.application.workspace_check_runtime import WorkspaceCheckRuntime
 from deskpilot.application.workspace_coding_runtime import WorkspaceCodingRuntime
+from deskpilot.application.workspace_command_plan_binder import WorkspaceCommandPlanBinder
+from deskpilot.application.workspace_command_plan_compiler import WorkspaceCommandPlanCompiler
 from deskpilot.application.workspace_command_runtime import WorkspaceCommandRuntime
 from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
 from deskpilot.application.workspace_node_test_runtime import WorkspaceNodeTestRuntime
@@ -393,6 +395,12 @@ def create_app(
         )
         workspace_coding_runtime = WorkspaceCodingRuntime(workspace_file_runtime)
         command_profile_catalog = CommandProfileCatalog()
+        workspace_command_plan_binder = WorkspaceCommandPlanBinder(
+            WorkspaceCommandPlanCompiler(
+                command_profile_catalog,
+                workspace_file_runtime,
+            )
+        )
         workspace_command_runtime = WorkspaceCommandRuntime(
             resolved_settings.runner_worker_runtime_root,
             resolved_settings.runner_appcontainer_profile_journal_path,
@@ -462,6 +470,7 @@ def create_app(
             database,
             turn_planner_runtime,
             model_planner_composer,
+            command_plans=workspace_command_plan_binder,
         )
         task_loop_capability_executors = create_builtin_capability_executor_registry(
             capability_catalog,
@@ -493,12 +502,14 @@ def create_app(
                 task_loop_capability_executors,
                 task_loop_agent_adapters,
             ),
+            command_plans=workspace_command_plan_binder,
         )
         task_loop_capability_runtime = CapabilityExecutionRuntime(
             database,
             CapabilityInputBindingCatalog(capability_catalog),
             task_loop_capability_executors,
             CapabilityExecutionEngine(task_loop_capability_executors),
+            command_plans=workspace_command_plan_binder,
         )
         task_loop_agent_runtime = TaskLoopAgentRuntime(
             database,

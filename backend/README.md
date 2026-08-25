@@ -337,7 +337,7 @@ GET /api/v1/agents/{agent_id}/versions/{version}
 
 阶段 112 最终验证：后端 745 项，`733 passed + 12 skipped`；Ruff 全仓、严格 mypy 275 个生产源码、frozen `uv` 与 `pip check` 通过。Phase75 v16 仍为 11/11、false-success=0、unauthorized-effect=0，17 份 baseline SHA-256 前后不变；wheel Prompt 24/24。前端 22 文件 / 157 项、type-check/build 通过；Alembic 唯一 head `0054_task_loop_cycle_events`，SQLite current/upgrade/check、integrity/foreign-key 通过。专用测试库 PostgreSQL 11/11（含容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复。
 
-下一实现方向为阶段 113 Codex 类安全编码工具，之后依次推进三任务/托盘后台、三角色 Calibration v3，以及独立 Edge Profile + Windows 记事本纵切。详见根目录 [`项目进度.md`](../项目进度.md)与 [`doc/111-116-通用多Agent与Edge记事本实施路线.md`](../doc/111-116-通用多Agent与Edge记事本实施路线.md)。
+当前实现方向为阶段 116B Codex 类持久多 Agent 编码纵切。116A 已将服务器固定 `WorkspaceCommandPlan` 绑定 exact ModelPlanner/TaskLoop node，通过 `0056_workspace_command_plan_bindings` 保存不可变映射证明，并闭合失败停链、一次已知失败 Repair 和重启不重放。下一步是 Delegate/Patch/Test/Repair/Verify/Deliver 完整闭环；真实 cloud 115B/116C 仍受外部授权阻塞。详见根目录 [`项目进度.md`](../项目进度.md)与 [`doc/111-117-通用多Agent与Codex纵切实施路线.md`](../doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 ## 测试
 

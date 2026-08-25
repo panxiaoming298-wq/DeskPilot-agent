@@ -22,6 +22,7 @@ from deskpilot.application.capability_input_binding_catalog import (
     WorkspacePythonTestExecutorInput,
     WorkspaceSnapshotCheckExecutorInput,
 )
+from deskpilot.application.command_profile_catalog import CommandProfileCatalog
 from deskpilot.application.plan_compiler import PlanCompiler
 from deskpilot.application.route_recipe_catalog import RouteId, RouteRecipeCatalog
 from deskpilot.core.canonical_json import sha256_digest
@@ -52,6 +53,13 @@ from deskpilot.domain.turn_planning import (
     TurnPlanningOfferRef,
     TurnPlanningParameterBinding,
     TurnPlanningRecipeRef,
+)
+from deskpilot.domain.workspace_command_plans import (
+    WorkspaceCommandPlan,
+    WorkspaceCommandPlanBinding,
+    WorkspaceCommandPlanNodeMapping,
+    WorkspaceCommandPlanRequest,
+    WorkspaceCommandPlanStep,
 )
 from deskpilot.tools import create_builtin_registry
 
@@ -398,8 +406,57 @@ def test_command_profile_is_bound_only_from_the_fixed_server_offer() -> None:
         fixed_parameters={"command_profile_id": profile_id},
     )
     catalog = CapabilityInputBindingCatalog(create_builtin_capability_catalog())
+    profile = CommandProfileCatalog().resolve(profile_id)
+    request = WorkspaceCommandPlanRequest.build(
+        task_id=node_binding.task_id,
+        plan_generation=1,
+        project_path="backend",
+        command_profile_ids=(profile_id,),
+    )
+    step = WorkspaceCommandPlanStep.build(
+        sequence=1,
+        depends_on=(),
+        command_profile=profile,
+    )
+    plan = WorkspaceCommandPlan.build(
+        request=request,
+        ecosystem="python",
+        catalog_digest="a" * 64,
+        steps=(step,),
+    )
+    mapping = WorkspaceCommandPlanNodeMapping.build(
+        command_step_id=step.step_id,
+        command_step_digest=step.step_digest,
+        command_step_sequence=1,
+        step_binding_id=node_binding.step_binding_id,
+        step_binding_digest=node_binding.step_binding_digest,
+        step_ordinal=node_binding.step_ordinal,
+        offer_id=node_binding.offer_id,
+        offer_key=node_binding.offer_key,
+        offer_digest=node_binding.offer_digest,
+        composite_node_id=node_binding.composite_node_id,
+        composite_node_spec_digest=node_binding.composite_node_spec_digest,
+    )
+    plan_binding = WorkspaceCommandPlanBinding.build(
+        task_id=node_binding.task_id,
+        loop_id=f"tlp_{'a' * 64}",
+        draft_id=node_binding.draft_id,
+        group_ordinal=1,
+        expected_plan_id=node_binding.composite_plan_id,
+        expected_plan_manifest_digest=node_binding.composite_plan_manifest_digest,
+        command_plan=plan,
+        mappings=(mapping,),
+        created_at=datetime(2026, 8, 24, tzinfo=UTC),
+    )
+    proof = plan_binding.proof_for_node(node_binding.composite_node_id)
 
-    bound = catalog.bind_node(node_binding=node_binding)
+    with pytest.raises(CapabilityInputLineageRejectedError, match="Plan proof"):
+        catalog.bind_node(node_binding=node_binding)
+
+    bound = catalog.bind_node(
+        node_binding=node_binding,
+        workspace_command_plan_step=proof,
+    )
 
     assert isinstance(bound.arguments, WorkspaceCommandExecutorInput)
     assert bound.arguments.project_path == "backend"
@@ -421,7 +478,10 @@ def test_command_profile_is_bound_only_from_the_fixed_server_offer() -> None:
         }
     )
     with pytest.raises(CapabilityInputLineageRejectedError, match="recipe changed"):
-        catalog.bind_node(node_binding=changed_manifest)
+        catalog.bind_node(
+            node_binding=changed_manifest,
+            workspace_command_plan_step=proof,
+        )
 
 
 def _knowledge_result() -> KnowledgeSearchRead:
