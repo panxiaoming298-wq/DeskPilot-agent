@@ -169,6 +169,8 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 > 实施授权：不依赖 115B 外部授权，立即在 `codex/stage-116-dev` 推进；cloud-only 2.0.0 cohort 继续 disabled。
 
+> 首个检查点（2026-08-25）：`WorkspaceCommandPlan` 的冻结 Contract 与服务器 Compiler 已实现，只接受 Task/计划代、结构化项目目标和注册 Profile ID，并生成绑定 Catalog/Profile 摘要的失败即停步骤链；持久 TaskLoop 多步执行仍是下一纵切，详见[阶段 116A 检查点](116A-服务器编译WorkspaceCommandPlan.md)。
+
 - 保留项目根、symlink/reparse、预算、Policy 与 Approval 边界，把搜索/批读、精确 Patch、固定测试扩展为同一隔离 Workspace 内的多文件编辑闭环。
 - 新增服务器编译的 `WorkspaceCommandPlan`。模型只能选择注册操作和结构化目标，不能提供 executable、任意 argv、cwd、环境变量或 shell 字符串。
 - 支持受控本地 Git branch、status、diff 与 commit；branch/commit 必须绑定 exact workspace revision、diff digest、测试证据和用户确认，继续禁止自动 push、force、reset-hard 与修改 hooks/config。

@@ -196,6 +196,8 @@ flowchart LR
 129. [Codex 类安全编码工具](doc/113-Codex类安全编码工具.md)
 130. [并行任务与窗口后台运行](doc/114-并行任务与窗口后台运行.md)
 131. [真实 Cloud Agent 与 Calibration v3](doc/115-真实Cloud-Agent与Calibration-v3.md)
+132. [ADR-016：115B 生产门与 116 开发纵切解耦](doc/ADR-016-115B生产门与116开发纵切解耦.md)
+133. [阶段 116A：服务器编译 WorkspaceCommandPlan](doc/116A-服务器编译WorkspaceCommandPlan.md)
 
 ## 目标 MVP 与当前边界
 
@@ -253,6 +255,7 @@ flowchart LR
 - `frontend/`：Vue 3、TypeScript、Vite 7，最多三个活动 Task 各自保留事件 cursor、连接、预算、待审批/待输入和未读状态；控制请求绑定 exact Task/revision，启动时恢复最新的三个未完成任务。原有安全会话、Approval/Reconciliation、历史、运维和 Provider 控制面保持；Tauri 托盘、受监督冻结 sidecar 与 NSIS 打包已接入。
 - 当前 TaskProcessor 的磁盘容量任务通过离线 Fake Provider 获得结构化分类和计划，不调用网络模型；显式 `file.move` 请求使用受信任应用计划模板，路径只来自本地用户表单并强制进入 R1 一次性审批，不从自然语言或模型输出提取。
 - 统一对话入口已接入研究、本地知识、固定 MCP、Workspace 读写/检查/固定测试及 HTML/Markdown/PDF Artifact；阶段 111 已为确定性 Route 未命中接入受服务器 Offer 约束的 Turn Planner，阶段 112 已建立不重放 Provider 的通用 TaskLoop。阶段 113 新增项目根限定的递归搜索/批读、Git `status/diff/log` 和六个服务器 Command Profile，Python pytest/Ruff/mypy 与 Node/pnpm test/type-check/build 只在断网临时快照中执行，模型不能提供 executable、argv、cwd 或环境变量。
+- 阶段 116A 首个检查点新增服务器编译的 `WorkspaceCommandPlan`：结构化请求只包含 Task/计划代、项目目标和已注册 Profile ID，服务器绑定 exact Catalog/Profile digest 并生成失败即停的内容寻址步骤链；当前尚未接入持久 TaskLoop 多步执行，不能据此宣称真实仓库长循环完成。
 - `web.search`/`web.page.read` 在显式开关与 SearchProvider 配置下可用，默认仍关闭；Task Workspace、ArtifactRevision/PatchReceipt、同源 HTML/Markdown/PDF Builder、PDF 全页 render evidence 和 HTML BrowserRenderRun 已实现。未验证研究结果仍只能停在 `awaiting_verification`。
 
 受保护 checkpoint 只恢复能与任务事件、Tool 账本、Policy、审批记录和 effect graph 当前节点同时对上的阶段；密文损坏或任一绑定错配都会 fail closed。
@@ -270,6 +273,8 @@ flowchart LR
 阶段 114 最终门禁：默认后端 775 项，`763 passed + 12 skipped`；Ruff、严格 mypy 283 个生产源码、Alembic/SQLite、Evaluation/Phase75 v16、17 份 immutable baseline 和 wheel Prompt 24/24 通过。前端 24 个文件 / 165 项、type-check/build、Rust `fmt/clippy/test`、冻结 sidecar 健康烟测、Tauri/NSIS 实构建、PostgreSQL 11/11 与 RabbitMQ 1/1 全部通过；环境已恢复且未改 baseline。
 
 阶段 115A 内部 checkpoint：默认后端 783 项，`771 passed + 12 skipped`；Ruff、严格 mypy 287 个生产源码、Release/Calibration v3/Admission 专项、前端 24 个文件 / 165 项、type-check/build、frozen lock、`pip check`、wheel Prompt 29/29 通过。Phase75 追加链式 v17 后仍为 11/11、false-success=0、unauthorized-effect=0；Windows Evaluation 追加 v2 延迟基线并保留旧 v1。该 checkpoint 没有真实 cloud capture、费用、生产 Admission 或 activation；116A/116B 只沿 LOCAL-only 开发门继续，不改变这一事实。
+
+阶段 116A 首个代码 checkpoint：服务器编译 `WorkspaceCommandPlan` 已通过默认后端 `774 passed + 12 skipped`、Ruff 全仓和严格 mypy 287 个生产源码；Plan 与 Release/Admission 默认关闭联合专项 26/26。这个 checkpoint 尚未把多步命令链接入持久 TaskLoop，也没有改变 115B/116C 的生产门。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 
