@@ -11,6 +11,10 @@ from deskpilot.domain.agent_runtime import AgentTaskGraphCapabilityInput
 from deskpilot.domain.model_contracts import ModelProviderDescriptor, ModelUsage
 from deskpilot.domain.task_plans import CAPABILITY_ID_PATTERN, TOKEN_PATTERN, PlanNodeBudget
 from deskpilot.domain.tool_contracts import SEMVER_PATTERN
+from deskpilot.domain.turn_planning import (
+    TurnPlannerInputOffer,
+    TurnPlannerStepProposal,
+)
 
 DIGEST_PATTERN = r"^[0-9a-f]{64}$"
 CASE_ID_PATTERN = r"^[a-z0-9][a-z0-9._-]{2,127}$"
@@ -106,8 +110,57 @@ class Phase107PatchCaseInput(BaseModel):
         return self
 
 
+class Phase107TurnPlanningCaseInput(BaseModel):
+    """Least-authority Turn Planner sample used by Calibration v3."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["turn_planning"] = "turn_planning"
+    request_budget: PlanNodeBudget
+    user_message: str = Field(min_length=1, max_length=20_000)
+    offers: tuple[TurnPlannerInputOffer, ...] = Field(min_length=1, max_length=8)
+    expected_kind: Literal["propose_steps", "needs_input", "unsupported"]
+    expected_steps: tuple[TurnPlannerStepProposal, ...] = Field(default=(), max_length=8)
+    expected_offer_key: str | None = None
+    expected_missing_parameters: tuple[
+        Annotated[str, Field(pattern=TOKEN_PATTERN)], ...
+    ] = Field(default=(), max_length=32)
+
+    @model_validator(mode="after")
+    def expected_decision_is_bounded(self) -> Self:
+        offered_keys = tuple(item.offer.offer_key for item in self.offers)
+        offered_ids = tuple(item.offer.offer_id for item in self.offers)
+        if len(offered_keys) != len(set(offered_keys)) or len(offered_ids) != len(
+            set(offered_ids)
+        ):
+            raise ValueError("Turn calibration offers must be unique")
+        if self.expected_kind == "propose_steps":
+            if not self.expected_steps or self.expected_offer_key is not None:
+                raise ValueError("Turn propose_steps expectation is incomplete")
+            if self.expected_missing_parameters:
+                raise ValueError("Turn propose_steps cannot expect missing parameters")
+            selected = tuple(item.offer_key for item in self.expected_steps)
+            if not set(selected).issubset(offered_keys):
+                raise ValueError("Turn expected steps must select offered keys")
+        elif self.expected_kind == "needs_input":
+            if self.expected_steps or not self.expected_missing_parameters:
+                raise ValueError("Turn needs_input expectation is incomplete")
+            if (
+                self.expected_offer_key is not None
+                and self.expected_offer_key not in offered_keys
+            ):
+                raise ValueError("Turn needs_input key must reference an offer")
+        elif (
+            self.expected_steps
+            or self.expected_offer_key is not None
+            or self.expected_missing_parameters
+        ):
+            raise ValueError("Turn unsupported expectation cannot include selection data")
+        return self
+
+
 Phase107CaseInput = Annotated[
-    Phase107GraphCaseInput | Phase107PatchCaseInput,
+    Phase107GraphCaseInput | Phase107PatchCaseInput | Phase107TurnPlanningCaseInput,
     Field(discriminator="kind"),
 ]
 
@@ -123,10 +176,16 @@ class Phase107CalibrationCase(BaseModel):
 class Phase107CalibrationSuite(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["deskpilot.phase107-calibration-suite.v1"]
+    schema_version: Literal[
+        "deskpilot.phase107-calibration-suite.v1",
+        "deskpilot.phase107-calibration-suite.v2",
+    ]
     suite_id: Literal["deskpilot.live-agent-proposal-calibration"]
-    suite_version: Literal[1]
-    harness_version: Literal["deskpilot.phase107-harness.v1"]
+    suite_version: Literal[1, 2]
+    harness_version: Literal[
+        "deskpilot.phase107-harness.v1",
+        "deskpilot.phase115-harness.v3",
+    ]
     rubric_version: Literal["deskpilot.phase107-human-rubric.v1"]
     repeat_count: int = Field(ge=2, le=5)
     maximum_live_model_calls: int = Field(ge=1, le=1_000)
@@ -141,8 +200,19 @@ class Phase107CalibrationSuite(BaseModel):
         if self.maximum_live_model_calls != len(self.cases) * self.repeat_count:
             raise ValueError("Phase-107 model-call budget must cover every repeat exactly")
         kinds = {item.case_input.kind for item in self.cases}
-        if kinds != {"task_graph", "patch_proposal"}:
-            raise ValueError("Phase-107 suite must cover graph and Patch proposals")
+        if self.schema_version == "deskpilot.phase107-calibration-suite.v1":
+            if (
+                self.suite_version != 1
+                or self.harness_version != "deskpilot.phase107-harness.v1"
+                or kinds != {"task_graph", "patch_proposal"}
+            ):
+                raise ValueError("Phase-107 v1 suite identity or coverage changed")
+        elif (
+            self.suite_version != 2
+            or self.harness_version != "deskpilot.phase115-harness.v3"
+            or kinds != {"turn_planning", "task_graph", "patch_proposal"}
+        ):
+            raise ValueError("Calibration v3 suite must cover all three Agent roles")
         if not any(item.criticality == "safety" for item in self.cases):
             raise ValueError("Phase-107 suite requires a safety-critical case")
         if self.suite_digest != sha256_digest(
@@ -209,7 +279,11 @@ class Phase107TrialArtifact(BaseModel):
 class Phase107CalibratedAgentIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    calibration_role: Literal["dynamic_coordinator", "patch_planner"]
+    calibration_role: Literal[
+        "turn_planner",
+        "dynamic_coordinator",
+        "patch_planner",
+    ]
     agent_id: str = Field(pattern=AGENT_ID_PATTERN)
     agent_version: str = Field(pattern=SEMVER_PATTERN)
     agent_contract_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -223,21 +297,30 @@ class Phase107CalibrationRun(BaseModel):
     schema_version: Literal[
         "deskpilot.phase107-calibration-run.v1",
         "deskpilot.phase107-calibration-run.v2",
+        "deskpilot.phase115-calibration-run.v3",
     ]
     run_id: str = Field(pattern=r"^calrun_[0-9a-f]{64}$")
     suite_id: Literal["deskpilot.live-agent-proposal-calibration"]
-    suite_version: Literal[1]
+    suite_version: Literal[1, 2]
     suite_digest: str = Field(pattern=DIGEST_PATTERN)
-    harness_version: Literal["deskpilot.phase107-harness.v1"]
+    harness_version: Literal[
+        "deskpilot.phase107-harness.v1",
+        "deskpilot.phase115-harness.v3",
+    ]
     build_id: str = Field(min_length=1, max_length=200)
     provider: ModelProviderDescriptor
     provider_snapshot_digest: str = Field(pattern=DIGEST_PATTERN)
+    turn_planner_prompt_digest: str | None = Field(
+        default=None,
+        pattern=DIGEST_PATTERN,
+        exclude_if=lambda value: value is None,
+    )
     coordinator_prompt_digest: str = Field(pattern=DIGEST_PATTERN)
     patch_prompt_digest: str = Field(pattern=DIGEST_PATTERN)
     request_schema_digest: str = Field(pattern=DIGEST_PATTERN)
     calibrated_agents: tuple[Phase107CalibratedAgentIdentity, ...] = Field(
         default=(),
-        max_length=2,
+        max_length=3,
     )
     cohort_digest: str = Field(pattern=DIGEST_PATTERN)
     status: Literal["captured", "invalid"]
@@ -256,11 +339,31 @@ class Phase107CalibrationRun(BaseModel):
         if self.provider_snapshot_digest != sha256_digest(self.provider):
             raise ValueError("Phase-107 Provider snapshot digest changed")
         roles = tuple(item.calibration_role for item in self.calibrated_agents)
-        if self.schema_version == "deskpilot.phase107-calibration-run.v2":
-            if roles != ("dynamic_coordinator", "patch_planner"):
+        if self.schema_version == "deskpilot.phase115-calibration-run.v3":
+            if (
+                self.suite_version != 2
+                or self.harness_version != "deskpilot.phase115-harness.v3"
+                or roles != ("turn_planner", "dynamic_coordinator", "patch_planner")
+            ):
+                raise ValueError("Calibration v3 run requires three ordered Agent identities")
+            if self.turn_planner_prompt_digest is None:
+                raise ValueError("Calibration v3 run requires the Turn Planner prompt")
+        elif self.schema_version == "deskpilot.phase107-calibration-run.v2":
+            if (
+                self.suite_version != 1
+                or self.harness_version != "deskpilot.phase107-harness.v1"
+                or roles != ("dynamic_coordinator", "patch_planner")
+            ):
                 raise ValueError("Phase-107 v2 run requires two ordered Agent identities")
-        elif self.calibrated_agents:
-            raise ValueError("Phase-107 v1 run cannot contain Agent identities")
+            if self.turn_planner_prompt_digest is not None:
+                raise ValueError("Phase-107 v2 run cannot contain a Turn Planner prompt")
+        elif (
+            self.suite_version != 1
+            or self.harness_version != "deskpilot.phase107-harness.v1"
+            or self.calibrated_agents
+            or self.turn_planner_prompt_digest is not None
+        ):
+            raise ValueError("Phase-107 v1 run cannot contain release Agent identity")
         cohort_material: dict[str, Any] = {
             "suite_digest": self.suite_digest,
             "harness_version": self.harness_version,
@@ -270,7 +373,14 @@ class Phase107CalibrationRun(BaseModel):
             "patch_prompt_digest": self.patch_prompt_digest,
             "request_schema_digest": self.request_schema_digest,
         }
-        if self.schema_version == "deskpilot.phase107-calibration-run.v2":
+        if self.schema_version == "deskpilot.phase115-calibration-run.v3":
+            cohort_material["turn_planner_prompt_digest"] = (
+                self.turn_planner_prompt_digest
+            )
+            cohort_material["calibrated_agents"] = [
+                item.model_dump(mode="json") for item in self.calibrated_agents
+            ]
+        elif self.schema_version == "deskpilot.phase107-calibration-run.v2":
             cohort_material["calibrated_agents"] = [
                 item.model_dump(mode="json") for item in self.calibrated_agents
             ]
@@ -296,6 +406,8 @@ class Phase107CalibrationRun(BaseModel):
         digest_exclude = {"run_digest"}
         if self.schema_version == "deskpilot.phase107-calibration-run.v1":
             digest_exclude.add("calibrated_agents")
+        if self.schema_version != "deskpilot.phase115-calibration-run.v3":
+            digest_exclude.add("turn_planner_prompt_digest")
         if self.run_digest != sha256_digest(
             self.model_dump(mode="json", exclude=digest_exclude)
         ):
@@ -307,7 +419,7 @@ class Phase107BlindSample(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     sample_id: str = Field(pattern=SAMPLE_ID_PATTERN)
-    task_kind: Literal["task_graph", "patch_proposal"]
+    task_kind: Literal["turn_planning", "task_graph", "patch_proposal"]
     input_projection: dict[str, JsonValue]
     structured_output: dict[str, JsonValue]
     sample_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -567,6 +679,7 @@ class Phase107CalibrationReport(BaseModel):
     schema_version: Literal[
         "deskpilot.phase107-calibration-report.v1",
         "deskpilot.phase107-calibration-report.v2",
+        "deskpilot.phase115-calibration-report.v3",
     ]
     run_digest: str = Field(pattern=DIGEST_PATTERN)
     packet_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -575,11 +688,16 @@ class Phase107CalibrationReport(BaseModel):
     suite_digest: str = Field(pattern=DIGEST_PATTERN)
     cohort_digest: str = Field(pattern=DIGEST_PATTERN)
     provider_snapshot_digest: str = Field(pattern=DIGEST_PATTERN)
+    turn_planner_prompt_digest: str | None = Field(
+        default=None,
+        pattern=DIGEST_PATTERN,
+        exclude_if=lambda value: value is None,
+    )
     coordinator_prompt_digest: str = Field(pattern=DIGEST_PATTERN)
     patch_prompt_digest: str = Field(pattern=DIGEST_PATTERN)
     calibrated_agents: tuple[Phase107CalibratedAgentIdentity, ...] = Field(
         default=(),
-        max_length=2,
+        max_length=3,
     )
     judge_provider_snapshot_digest: str = Field(pattern=DIGEST_PATTERN)
     judge_prompt_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -661,14 +779,25 @@ class Phase107CalibrationReport(BaseModel):
         if self.status == "passed" and self.error_codes:
             raise ValueError("Passed Phase-107 report cannot contain errors")
         roles = tuple(item.calibration_role for item in self.calibrated_agents)
-        if self.schema_version == "deskpilot.phase107-calibration-report.v2":
+        if self.schema_version == "deskpilot.phase115-calibration-report.v3":
+            if roles != ("turn_planner", "dynamic_coordinator", "patch_planner"):
+                raise ValueError(
+                    "Calibration v3 report requires three ordered Agent identities"
+                )
+            if self.turn_planner_prompt_digest is None:
+                raise ValueError("Calibration v3 report requires the Turn Planner prompt")
+        elif self.schema_version == "deskpilot.phase107-calibration-report.v2":
             if roles != ("dynamic_coordinator", "patch_planner"):
                 raise ValueError("Phase-107 v2 report requires two ordered Agent identities")
-        elif self.calibrated_agents:
-            raise ValueError("Phase-107 v1 report cannot contain Agent identities")
+            if self.turn_planner_prompt_digest is not None:
+                raise ValueError("Phase-107 v2 report cannot contain a Turn Planner prompt")
+        elif self.calibrated_agents or self.turn_planner_prompt_digest is not None:
+            raise ValueError("Phase-107 v1 report cannot contain release Agent identity")
         digest_exclude = {"report_digest"}
         if self.schema_version == "deskpilot.phase107-calibration-report.v1":
             digest_exclude.add("calibrated_agents")
+        if self.schema_version != "deskpilot.phase115-calibration-report.v3":
+            digest_exclude.add("turn_planner_prompt_digest")
         if self.report_digest != sha256_digest(
             self.model_dump(mode="json", exclude=digest_exclude)
         ):
@@ -682,16 +811,22 @@ class Phase107CalibrationBaseline(BaseModel):
     schema_version: Literal[
         "deskpilot.phase107-calibration-baseline.v1",
         "deskpilot.phase107-calibration-baseline.v2",
+        "deskpilot.phase115-calibration-baseline.v3",
     ]
     baseline_id: str = Field(pattern=CASE_ID_PATTERN)
     suite_digest: str = Field(pattern=DIGEST_PATTERN)
     cohort_digest: str = Field(pattern=DIGEST_PATTERN)
     provider_snapshot_digest: str = Field(pattern=DIGEST_PATTERN)
+    turn_planner_prompt_digest: str | None = Field(
+        default=None,
+        pattern=DIGEST_PATTERN,
+        exclude_if=lambda value: value is None,
+    )
     coordinator_prompt_digest: str = Field(pattern=DIGEST_PATTERN)
     patch_prompt_digest: str = Field(pattern=DIGEST_PATTERN)
     calibrated_agents: tuple[Phase107CalibratedAgentIdentity, ...] = Field(
         default=(),
-        max_length=2,
+        max_length=3,
     )
     judge_provider_snapshot_digest: str = Field(pattern=DIGEST_PATTERN)
     judge_prompt_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -709,14 +844,25 @@ class Phase107CalibrationBaseline(BaseModel):
     @model_validator(mode="after")
     def approval_digest_matches(self) -> Self:
         roles = tuple(item.calibration_role for item in self.calibrated_agents)
-        if self.schema_version == "deskpilot.phase107-calibration-baseline.v2":
+        if self.schema_version == "deskpilot.phase115-calibration-baseline.v3":
+            if roles != ("turn_planner", "dynamic_coordinator", "patch_planner"):
+                raise ValueError(
+                    "Calibration v3 baseline requires three ordered Agent identities"
+                )
+            if self.turn_planner_prompt_digest is None:
+                raise ValueError("Calibration v3 baseline requires the Turn Planner prompt")
+        elif self.schema_version == "deskpilot.phase107-calibration-baseline.v2":
             if roles != ("dynamic_coordinator", "patch_planner"):
                 raise ValueError("Phase-107 v2 baseline requires two ordered Agent identities")
-        elif self.calibrated_agents:
-            raise ValueError("Phase-107 v1 baseline cannot contain Agent identities")
+            if self.turn_planner_prompt_digest is not None:
+                raise ValueError("Phase-107 v2 baseline cannot contain a Turn Planner prompt")
+        elif self.calibrated_agents or self.turn_planner_prompt_digest is not None:
+            raise ValueError("Phase-107 v1 baseline cannot contain release Agent identity")
         digest_exclude = {"approval_digest"}
         if self.schema_version == "deskpilot.phase107-calibration-baseline.v1":
             digest_exclude.add("calibrated_agents")
+        if self.schema_version != "deskpilot.phase115-calibration-baseline.v3":
+            digest_exclude.add("turn_planner_prompt_digest")
         if self.approval_digest != sha256_digest(
             self.model_dump(mode="json", exclude=digest_exclude)
         ):

@@ -1,0 +1,1 @@
+{"schema_version":"deskpilot.prompt-package.v1","package_id":"builtin.workspace_patch_planner","version":"2.0.0","renderer_version":1,"instruction_file":"workspace_patch_planner_loop.txt","variables":["objective_ref","context_refs"]}

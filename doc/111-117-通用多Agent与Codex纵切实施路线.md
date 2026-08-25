@@ -130,6 +130,8 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 ## 6. 阶段 115：真实 Cloud Agent 与 Calibration v3
 
+> 实施状态（2026-08-25）：115A 与 115B 的授权/工件准备已在 `codex/stage-115` 形成内部 checkpoint；Release hash chain、cloud-only 三角色 2.0.0、闭合 companion、Calibration v3、exact 三角色 Admission builder 与 Task privacy-compatible binding 已通过 783 项默认后端总门禁及专项自动化。真实 Provider/Judge-human capture、Production Admission 和 activation 尚未获得授权，因此阶段 115 未完成，阶段 116 仍受门禁阻塞。详见[阶段 115：真实 Cloud Agent 与 Calibration v3](115-真实Cloud-Agent与Calibration-v3.md)。
+
 阶段 115 不再以“生命周期和合成证据已经实现”作为完成条件。它必须把至少一个真实三角色 cohort 安全激活到生产运行时，证明后续 Codex 纵切使用的不是 Fake、recorded 或未校准候选。
 
 ### 115A：Release lifecycle 与三角色身份

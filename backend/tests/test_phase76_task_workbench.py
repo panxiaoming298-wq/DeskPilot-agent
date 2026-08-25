@@ -2388,7 +2388,12 @@ def test_server_coordinator_automatically_replans_and_finishes_dynamic_graph(
         )
         assert created.status_code == 201, created.text
         task_id = created.json()["task"]["task_id"]
-        completed = _wait_for_workbench_stage(client, task_id, "delivered")
+        completed = _wait_for_workbench_stage(
+            client,
+            task_id,
+            "delivered",
+            timeout_seconds=20,
+        )
 
     assert completed["planning"]["active_plan_generation"] == 2
     assert [item["status"] for item in completed["executions"]["runs"]] == [

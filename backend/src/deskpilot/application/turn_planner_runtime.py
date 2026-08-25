@@ -45,6 +45,7 @@ from deskpilot.core.canonical_json import canonical_json_bytes, sha256_digest
 from deskpilot.domain.agent_contracts import BoundAgentRef
 from deskpilot.domain.model_contracts import (
     ModelExecutionBudget,
+    ModelLocation,
     ModelMessage,
     ModelProviderDescriptor,
     ModelRequest,
@@ -265,8 +266,7 @@ class TurnPlannerRuntime:
         except AgentRegistryError:
             return False
         return any(
-            descriptor.location.value == "local"
-            and descriptor.location in registration.contract.model_policy.allowed_locations
+            descriptor.location in registration.contract.model_policy.allowed_locations
             for descriptor in self._gateway.descriptors()
         )
 
@@ -298,7 +298,7 @@ class TurnPlannerRuntime:
                 for_update=False,
             )
             self._validate_fallback_route(scope.route, fallback_route)
-        registration = self._registration()
+        registration = self._registration(scope.privacy_mode)
         provider = self._select_provider_for_prepare(
             task_id=task_id,
             privacy_mode=scope.privacy_mode,
@@ -333,7 +333,7 @@ class TurnPlannerRuntime:
             )
         self._agents.validate_model_route(
             TURN_PLANNER_AGENT_ID,
-            TURN_PLANNER_AGENT_VERSION,
+            registration.contract.version,
             contract_digest=registration.contract.digest,
             prompt_package_digest=registration.prompt_package.digest,
             request=request,
@@ -808,10 +808,21 @@ class TurnPlannerRuntime:
             )
             return tuple((await session.scalars(statement)).all())
 
-    def _registration(self) -> AgentRegistration:
-        return self._agents.resolve_exact(
+    def _registration(
+        self,
+        privacy_mode: PrivacyMode | None = None,
+    ) -> AgentRegistration:
+        if privacy_mode is None:
+            return self._agents.resolve_preferred(TURN_PLANNER_AGENT_ID)
+        allowed_locations = (
+            (ModelLocation.LOCAL,)
+            if privacy_mode in {"local_only", "local_preferred"}
+            else (ModelLocation.LOCAL, ModelLocation.CLOUD)
+        )
+        return self._agents.resolve_preferred_compatible(
             TURN_PLANNER_AGENT_ID,
-            TURN_PLANNER_AGENT_VERSION,
+            allowed_locations=allowed_locations,
+            allowed_privacy_modes=(privacy_mode,),
         )
 
     def _select_provider_for_prepare(
@@ -829,7 +840,7 @@ class TurnPlannerRuntime:
             registration=registration,
             provider_hint=self._provider_hint,
             user_content=(
-                "Select the exact local Provider for the persisted Turn digest "
+                "Select the exact approved Provider for the persisted Turn digest "
                 f"{message_digest}. No model call is authorized by this probe."
             ),
             metadata={"turn_planner_probe": True, "user_message_digest": message_digest},
@@ -837,7 +848,7 @@ class TurnPlannerRuntime:
         provider = self._gateway.select_provider_snapshot(probe).descriptor
         self._agents.validate_model_route(
             TURN_PLANNER_AGENT_ID,
-            TURN_PLANNER_AGENT_VERSION,
+            registration.contract.version,
             contract_digest=registration.contract.digest,
             prompt_package_digest=registration.prompt_package.digest,
             request=probe,

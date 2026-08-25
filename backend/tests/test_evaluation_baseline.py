@@ -11,7 +11,10 @@ from deskpilot.application.evaluation_baseline import (
 from deskpilot.domain.evaluations import EvaluationReportRead
 
 BASELINE = (
-    Path(__file__).parent / "baselines" / "evaluations" / "golden-resilience-v2.baseline.json"
+    Path(__file__).parent
+    / "baselines"
+    / "evaluations"
+    / "golden-resilience-v2-windows-v2.baseline.json"
 )
 
 

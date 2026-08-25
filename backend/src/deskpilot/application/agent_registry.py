@@ -21,6 +21,7 @@ from deskpilot.domain.model_contracts import (
     ModelLocation,
     ModelProviderDescriptor,
     ModelRequest,
+    PrivacyMode,
     ToolCallingMode,
 )
 from deskpilot.domain.tool_contracts import SEMVER_PATTERN
@@ -101,6 +102,7 @@ class AgentRegistration:
     prompt_package: PromptPackage
     source: str = "builtin"
     status: AgentRegistryStatus = AgentRegistryStatus.ENABLED
+    requires_release_activation: bool = False
 
 
 class AgentModelAdmissionPolicy(Protocol):
@@ -109,6 +111,14 @@ class AgentModelAdmissionPolicy(Protocol):
         contract: AgentContract,
         prompt_package_digest: str,
         provider: ModelProviderDescriptor,
+    ) -> bool: ...
+
+
+class AgentReleaseActivationPolicyPort(Protocol):
+    def allows(
+        self,
+        contract: AgentContract,
+        prompt_package_digest: str,
     ) -> bool: ...
 
 
@@ -189,10 +199,12 @@ class AgentRegistry:
     def __init__(
         self,
         model_admissions: AgentModelAdmissionPolicy | None = None,
+        release_activations: AgentReleaseActivationPolicyPort | None = None,
     ) -> None:
         self._registrations: dict[tuple[str, str], AgentRegistration] = {}
         self._statuses: dict[tuple[str, str], tuple[AgentRegistryStatus, str | None]] = {}
         self._model_admissions = model_admissions
+        self._release_activations = release_activations
         self._frozen = False
         self._snapshot: AgentRegistrySnapshot | None = None
 
@@ -216,7 +228,16 @@ class AgentRegistry:
         for registration in self._registrations.values():
             self._validate_registration(registration, tool_registry)
             current_status, _ = candidate_statuses[registration.contract.key]
-            if current_status is not AgentRegistryStatus.REVOKED and not any(
+            if (
+                current_status is not AgentRegistryStatus.REVOKED
+                and registration.requires_release_activation
+                and not self._release_allows(registration)
+            ):
+                candidate_statuses[registration.contract.key] = (
+                    AgentRegistryStatus.DISABLED,
+                    "release_not_activated",
+                )
+            elif current_status is not AgentRegistryStatus.REVOKED and not any(
                 self._model_satisfies(registration.contract, descriptor)
                 and self._admission_allows(registration, descriptor)
                 for descriptor in model_descriptors
@@ -225,6 +246,25 @@ class AgentRegistry:
                     AgentRegistryStatus.DISABLED,
                     "model_requirements_unsatisfied",
                 )
+        activated_release = tuple(
+            registration
+            for registration in self._registrations.values()
+            if registration.requires_release_activation
+            and self._release_allows(registration)
+        )
+        if activated_release and any(
+            candidate_statuses[item.contract.key][0] is not AgentRegistryStatus.ENABLED
+            for item in activated_release
+        ):
+            for registration in activated_release:
+                if (
+                    candidate_statuses[registration.contract.key][0]
+                    is not AgentRegistryStatus.REVOKED
+                ):
+                    candidate_statuses[registration.contract.key] = (
+                        AgentRegistryStatus.DISABLED,
+                        "release_cohort_unsatisfied",
+                    )
         self._validate_handoffs()
         descriptors = tuple(
             self._descriptor(self._registrations[key], candidate_statuses)
@@ -279,6 +319,38 @@ class AgentRegistry:
         if not candidates:
             raise AgentNotRegisteredError("No enabled Agent version is registered")
         return max(candidates, key=lambda item: tuple(map(int, item.contract.version.split("."))))
+
+    def resolve_preferred_compatible(
+        self,
+        agent_id: str,
+        *,
+        allowed_locations: tuple[ModelLocation, ...],
+        allowed_privacy_modes: tuple[PrivacyMode, ...],
+    ) -> AgentRegistration:
+        """Resolve a preferred version only inside the Task's privacy authority."""
+
+        candidates = [
+            registration
+            for key, registration in self._registrations.items()
+            if key[0] == agent_id
+            and self._statuses[key][0] is AgentRegistryStatus.ENABLED
+            and any(
+                mode in registration.contract.model_policy.allowed_privacy_modes
+                for mode in allowed_privacy_modes
+            )
+            and any(
+                location in registration.contract.model_policy.allowed_locations
+                for location in allowed_locations
+            )
+        ]
+        if not candidates:
+            raise AgentNotRegisteredError(
+                "No enabled Agent version matches the Task privacy authority"
+            )
+        return max(
+            candidates,
+            key=lambda item: tuple(map(int, item.contract.version.split("."))),
+        )
 
     def validate_model_route(
         self,
@@ -476,6 +548,12 @@ class AgentRegistry:
                     descriptor,
                 )
             )
+        )
+
+    def _release_allows(self, registration: AgentRegistration) -> bool:
+        return self._release_activations is not None and self._release_activations.allows(
+            registration.contract,
+            registration.prompt_package.digest,
         )
 
     def _descriptor(

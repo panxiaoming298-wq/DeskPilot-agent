@@ -17,6 +17,7 @@ from deskpilot.infrastructure.credential_resolvers import create_default_credent
 from deskpilot.model_providers.factory import create_configured_model_providers
 
 DEFAULT_SUITE = Path("tests/fixtures/phase107-live-agent-calibration-suite.v1.json")
+DEFAULT_SUITE_V3 = Path("tests/fixtures/phase115-live-agent-calibration-suite.v2.json")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -24,11 +25,13 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     capture = subparsers.add_parser("capture")
-    capture.add_argument("--suite", type=Path, default=DEFAULT_SUITE)
+    capture.add_argument("--suite", type=Path)
     capture.add_argument("--provider-id", required=True)
     capture.add_argument("--build-id", required=True)
-    capture.add_argument("--coordinator-version", default="1.1.0")
-    capture.add_argument("--patch-version", default="1.0.0")
+    capture.add_argument("--artifact-schema-version", choices=("v1", "v2", "v3"), default="v2")
+    capture.add_argument("--turn-planner-version", default="2.0.0")
+    capture.add_argument("--coordinator-version")
+    capture.add_argument("--patch-version")
     capture.add_argument("--output", type=Path, required=True)
 
     packet = subparsers.add_parser("packet")
@@ -59,15 +62,29 @@ def _parser() -> argparse.ArgumentParser:
 
 
 async def _capture(arguments: argparse.Namespace) -> dict[str, object]:
-    provider = _live_provider(arguments.provider_id)
+    is_v3 = arguments.artifact_schema_version == "v3"
+    provider = _live_provider(
+        arguments.provider_id,
+        live_allow_variable=(
+            "DESKPILOT_PHASE115_LIVE_ALLOW"
+            if is_v3
+            else "DESKPILOT_PHASE107_LIVE_ALLOW"
+        ),
+        require_cloud=is_v3,
+    )
     service = Phase107CalibrationService()
-    suite = service.load_suite(arguments.suite)
+    suite = service.load_suite(
+        arguments.suite or (DEFAULT_SUITE_V3 if is_v3 else DEFAULT_SUITE)
+    )
     run = await service.capture(
         suite,
         provider,
         build_id=arguments.build_id,
-        coordinator_version=arguments.coordinator_version,
-        patch_version=arguments.patch_version,
+        turn_planner_version=arguments.turn_planner_version,
+        coordinator_version=arguments.coordinator_version
+        or ("2.0.0" if is_v3 else "1.1.0"),
+        patch_version=arguments.patch_version or ("2.0.0" if is_v3 else "1.0.0"),
+        artifact_schema_version=arguments.artifact_schema_version,
     )
     service.dump(arguments.output, run)
     return {
@@ -89,10 +106,19 @@ async def _capture(arguments: argparse.Namespace) -> dict[str, object]:
 
 
 async def _judge(arguments: argparse.Namespace) -> dict[str, object]:
-    provider = _live_provider(arguments.provider_id)
     service = Phase107CalibrationService()
     suite = service.load_suite(arguments.suite)
     run = service.load_run(arguments.run)
+    is_v3 = run.schema_version == "deskpilot.phase115-calibration-run.v3"
+    provider = _live_provider(
+        arguments.provider_id,
+        live_allow_variable=(
+            "DESKPILOT_PHASE115_LIVE_ALLOW"
+            if is_v3
+            else "DESKPILOT_PHASE107_LIVE_ALLOW"
+        ),
+        require_cloud=is_v3,
+    )
     packet = service.load_packet(arguments.packet)
     judge_run = await service.judge(
         suite,
@@ -111,12 +137,17 @@ async def _judge(arguments: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def _live_provider(provider_id: str) -> ModelProvider:
+def _live_provider(
+    provider_id: str,
+    *,
+    live_allow_variable: str = "DESKPILOT_PHASE107_LIVE_ALLOW",
+    require_cloud: bool = False,
+) -> ModelProvider:
     if os.getenv("CI", "").lower() in {"1", "true", "yes"}:
         raise Phase107CalibrationError("CI is not allowed to capture live model evidence")
-    if os.getenv("DESKPILOT_PHASE107_LIVE_ALLOW", "") != "1":
+    if os.getenv(live_allow_variable, "") != "1":
         raise Phase107CalibrationError(
-            "Live capture requires DESKPILOT_PHASE107_LIVE_ALLOW=1"
+            f"Live capture requires {live_allow_variable}=1"
         )
     try:
         settings = Settings()
@@ -136,6 +167,10 @@ def _live_provider(provider_id: str) -> ModelProvider:
         raise Phase107CalibrationError("Requested live Provider is not configured")
     if provider.descriptor.protocol is ModelProtocol.FAKE:
         raise Phase107CalibrationError("Fake Provider cannot produce live calibration evidence")
+    if require_cloud and provider.descriptor.location.value != "cloud":
+        raise Phase107CalibrationError(
+            "Calibration v3 requires an explicitly selected cloud Provider"
+        )
     capabilities = provider.descriptor.capabilities
     if (
         not capabilities.structured_output

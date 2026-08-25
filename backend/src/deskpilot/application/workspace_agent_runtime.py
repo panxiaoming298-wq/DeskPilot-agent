@@ -244,6 +244,14 @@ _VERSION_ROUTES = {
             "workspace_dynamic_patch_test",
         }
     ),
+    "2.0.0": frozenset(
+        {
+            "workspace_file_read",
+            "workspace_directory_list",
+            "workspace_directory_analyze",
+            "workspace_dynamic_patch_test",
+        }
+    ),
 }
 
 
@@ -272,16 +280,25 @@ class WorkspaceAgentRuntime:
 
     async def run(self, claimed: ClaimedInvocation) -> WorkspaceAgentOutcome:
         agent = claimed.handoff.target_agent
-        if agent.agent_id == "builtin.workspace_patch_planner" and agent.version == "1.0.0":
+        if agent.agent_id == "builtin.workspace_patch_planner" and agent.version in {
+            "1.0.0",
+            "2.0.0",
+        }:
             return await self._run_patch_planner(claimed)
         if agent.agent_id == "builtin.workspace_coordinator" and agent.version == "1.0.0":
             return await self._run_coordinator(claimed)
-        if agent.agent_id == "builtin.workspace_coordinator" and agent.version == "1.1.0":
+        if agent.agent_id == "builtin.workspace_coordinator" and agent.version in {
+            "1.1.0",
+            "2.0.0",
+        }:
             return await self._run_dynamic_coordinator(claimed)
         is_reader = (
             agent.agent_id == "builtin.workspace_reader" and agent.version in _VERSION_ROUTES
         )
-        is_tester = agent.agent_id == "builtin.workspace_tester" and agent.version == "1.0.0"
+        is_tester = agent.agent_id == "builtin.workspace_tester" and agent.version in {
+            "1.0.0",
+            "2.0.0",
+        }
         if not is_reader and not is_tester:
             raise AgentRuntimeConflictError("Invocation is not a Workspace Reader Agent")
         task, route, route_profile = await self._task_and_route(claimed.handoff.task_id)

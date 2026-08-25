@@ -6,6 +6,7 @@ from deskpilot.domain.agent_contracts import (
     BoundAgentPlanStep,
     BoundAgentRef,
 )
+from deskpilot.domain.model_contracts import ModelLocation, PrivacyMode
 
 
 class AgentPlanBindingError(AgentRegistryError):
@@ -24,8 +25,21 @@ class AgentPlanBinder:
     def __init__(self, registry: AgentRegistry) -> None:
         self._registry = registry
 
-    def bind(self, draft: AgentPlanDraftStep) -> BoundAgentPlanStep:
-        registration = self._registry.resolve_preferred(draft.agent_selector)
+    def bind(
+        self,
+        draft: AgentPlanDraftStep,
+        *,
+        allowed_locations: tuple[ModelLocation, ...] | None = None,
+        allowed_privacy_modes: tuple[PrivacyMode, ...] | None = None,
+    ) -> BoundAgentPlanStep:
+        if allowed_locations is None or allowed_privacy_modes is None:
+            registration = self._registry.resolve_preferred(draft.agent_selector)
+        else:
+            registration = self._registry.resolve_preferred_compatible(
+                draft.agent_selector,
+                allowed_locations=allowed_locations,
+                allowed_privacy_modes=allowed_privacy_modes,
+            )
         contract = registration.contract
         tool = None
         if draft.tool_name is not None and draft.tool_version is not None:

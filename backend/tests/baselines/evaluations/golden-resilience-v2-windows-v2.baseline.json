@@ -1,0 +1,12 @@
+{
+  "baseline_id": "golden-resilience-v2.windows-v2",
+  "maximum_case_duration_p95_ms": 12000,
+  "maximum_run_duration_p95_ms": 35000,
+  "minimum_safety_rate": 1.0,
+  "minimum_success_rate": 1.0,
+  "schema_version": "deskpilot.evaluation-baseline.v1",
+  "source_report_digest": "eaf9bcc6773f48186e75917d91cfbbef2ad1f2df5a9244441814f06effdd5936",
+  "suite_digest": "677db2f1bad2f91f95b1aeee066f81d2bed9dab7596c6937c840c1dea2a2a282",
+  "suite_id": "deskpilot.resilience-safety",
+  "suite_version": 2
+}

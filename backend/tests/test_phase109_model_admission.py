@@ -8,6 +8,7 @@ from deskpilot.agents import create_builtin_agent_registry
 from deskpilot.application.agent_model_admission import (
     AgentModelAdmissionError,
     AgentModelAdmissionRegistry,
+    build_phase115_admission_bundle,
     load_agent_model_admissions,
 )
 from deskpilot.application.phase107_calibration import Phase107CalibrationService
@@ -24,6 +25,7 @@ from deskpilot.tools import create_builtin_registry
 from tests.test_phase107_calibration_gate import (
     FIXED_NOW,
     SUITE,
+    SUITE_V3,
     CalibratedJudgeProvider,
     CalibratedProposalProvider,
     _review_bundle,
@@ -217,6 +219,72 @@ async def test_full_evidence_replay_admits_only_the_exact_unexpired_route() -> N
         bundle.run.provider,
         now=FIXED_NOW + timedelta(days=31),
     )
+
+
+@pytest.mark.asyncio
+async def test_phase115_builder_requires_and_admits_exact_three_role_cohort() -> None:
+    service = Phase107CalibrationService()
+    suite = service.load_suite(SUITE_V3)
+    run = await service.capture(
+        suite,
+        CloudCandidateProvider(),
+        build_id="phase115-admission-build",
+        turn_planner_version="2.0.0",
+        coordinator_version="2.0.0",
+        patch_version="2.0.0",
+        artifact_schema_version="v3",
+        now=FIXED_NOW,
+    )
+    packet = service.make_blind_packet(suite, run)
+    judge_run = await service.judge(
+        suite,
+        run,
+        packet,
+        CloudJudgeProvider(),
+        build_id="phase115-independent-judge",
+        now=FIXED_NOW,
+    )
+    reviews = _review_bundle(
+        run.run_digest,
+        packet.packet_digest,
+        tuple(item.sample_id for item in packet.samples),
+    )
+    report = service.grade(
+        suite,
+        run,
+        packet,
+        judge_run,
+        reviews,
+        now=FIXED_NOW,
+    )
+    bundle = build_phase115_admission_bundle(
+        suite=suite,
+        run=run,
+        packet=packet,
+        judge_run=judge_run,
+        reviews=reviews,
+        report=report,
+        baseline_id="phase115.release-cohort.v3",
+        approved_by="phase115-human-review-board",
+        approved_at=FIXED_NOW,
+        valid_until=FIXED_NOW + timedelta(days=30),
+    )
+    assert len(bundle.admissions) == 3
+    assert {
+        (item.agent_id, item.agent_version) for item in bundle.admissions
+    } == {(item.agent_id, item.agent_version) for item in run.calibrated_agents}
+    registry = AgentModelAdmissionRegistry.from_bundle(bundle, now=FIXED_NOW)
+    assert registry.admission_count == 3
+
+    partial_material = bundle.model_dump(mode="python", exclude={"bundle_digest"})
+    partial_material["admissions"] = bundle.admissions[:2]
+    with pytest.raises(ValueError, match="exact three-role cohort"):
+        AgentModelAdmissionBundle.model_validate(
+            {
+                **partial_material,
+                "bundle_digest": sha256_digest(partial_material),
+            }
+        )
 
 
 @pytest.mark.asyncio

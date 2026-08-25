@@ -277,7 +277,27 @@ def test_builtin_registry_is_frozen_redacted_and_supervisor_is_not_an_agent() ->
         "builtin.workspace_reader",
         "builtin.workspace_tester",
     }
-    assert all(item.status is AgentRegistryStatus.ENABLED for item in snapshot.agents)
+    release_candidates = {
+        ("builtin.turn_planner", "2.0.0"),
+        ("builtin.workspace_coordinator", "2.0.0"),
+        ("builtin.workspace_patch_planner", "2.0.0"),
+        ("builtin.workspace_reader", "2.0.0"),
+        ("builtin.workspace_tester", "2.0.0"),
+    }
+    assert all(
+        item.status
+        is (
+            AgentRegistryStatus.DISABLED
+            if (item.agent_id, item.version) in release_candidates
+            else AgentRegistryStatus.ENABLED
+        )
+        for item in snapshot.agents
+    )
+    assert all(
+        item.status_reason == "release_not_activated"
+        for item in snapshot.agents
+        if (item.agent_id, item.version) in release_candidates
+    )
     assert "supervisor" not in snapshot.model_dump_json().lower()
     assert "instruction" not in snapshot.model_dump_json().lower()
     assert all(item.input_schema_digest and item.output_schema_digest for item in snapshot.agents)

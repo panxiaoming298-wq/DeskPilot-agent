@@ -304,7 +304,9 @@ class PlanCompiler:
                         cost_micros=node.budget.cost_micros,
                         handoffs=node.budget.handoffs,
                     ),
-                )
+                ),
+                allowed_locations=contract.privacy_policy.allowed_provider_locations,
+                allowed_privacy_modes=contract.privacy_policy.allowed_privacy_modes,
             )
         except (AgentPlanBindingError, AgentRegistryError) as error:
             raise PlanBindingUnknownError("Agent binding was rejected") from error

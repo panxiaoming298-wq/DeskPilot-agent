@@ -8,6 +8,7 @@ from deskpilot.application.agent_registry import (
     AgentModelAdmissionPolicy,
     AgentRegistration,
     AgentRegistry,
+    AgentReleaseActivationPolicyPort,
     PromptPackage,
     load_agent_contract,
     load_prompt_package,
@@ -37,6 +38,7 @@ from deskpilot.domain.model_contracts import (
     ModelLocation,
     ModelProviderDescriptor,
     ModelRole,
+    PrivacyMode,
 )
 from deskpilot.domain.research import ResearchAgentDecision, ResearchLoopDecision
 from deskpilot.domain.tool_contracts import ToolRiskLevel
@@ -61,6 +63,7 @@ def create_builtin_agent_registry(
     tool_registry: ToolRegistry,
     model_descriptors: tuple[ModelProviderDescriptor, ...],
     model_admissions: AgentModelAdmissionPolicy | None = None,
+    release_activations: AgentReleaseActivationPolicyPort | None = None,
 ) -> AgentRegistry:
     prompt_root = Path(__file__).parent / "prompts"
     computer_prompt = load_prompt_package(prompt_root, "computer_observer.json")
@@ -78,6 +81,21 @@ def create_builtin_agent_registry(
         prompt_root, "workspace_patch_planner_loop.json"
     )
     turn_planner_prompt = load_prompt_package(prompt_root, "turn_planner.json")
+    cloud_turn_planner_prompt = load_prompt_package(
+        prompt_root, "turn_planner_cloud_v2.json"
+    )
+    cloud_coordinator_prompt = load_prompt_package(
+        prompt_root, "workspace_dynamic_coordinator_cloud_v2.json"
+    )
+    cloud_patch_planner_prompt = load_prompt_package(
+        prompt_root, "workspace_patch_planner_cloud_v2.json"
+    )
+    release_reader_prompt = load_prompt_package(
+        prompt_root, "workspace_reader_release_v2.json"
+    )
+    release_tester_prompt = load_prompt_package(
+        prompt_root, "workspace_tester_release_v2.json"
+    )
     synthesizer_prompt = load_prompt_package(prompt_root, "task_synthesizer.json")
     disk = tool_registry.resolve("computer.disk_usage", "1.0.0").contract
     synth_ref = AgentHandoffRef(agent_id="builtin.task_synthesizer", version="1.0.0")
@@ -95,8 +113,20 @@ def create_builtin_agent_registry(
     workspace_patch_planner_ref = AgentHandoffRef(
         agent_id="builtin.workspace_patch_planner", version="1.0.0"
     )
+    cloud_coordinator_ref = AgentHandoffRef(
+        agent_id="builtin.workspace_coordinator", version="2.0.0"
+    )
+    cloud_patch_planner_ref = AgentHandoffRef(
+        agent_id="builtin.workspace_patch_planner", version="2.0.0"
+    )
+    release_workspace_reader_ref = AgentHandoffRef(
+        agent_id="builtin.workspace_reader", version="2.0.0"
+    )
+    release_workspace_tester_ref = AgentHandoffRef(
+        agent_id="builtin.workspace_tester", version="2.0.0"
+    )
 
-    registry = AgentRegistry(model_admissions)
+    registry = AgentRegistry(model_admissions, release_activations)
     registry.register(
         AgentRegistration(
             contract=_contract(
@@ -136,6 +166,45 @@ def create_builtin_agent_registry(
     registry.register(
         AgentRegistration(
             contract=_contract(
+                agent_id="builtin.turn_planner",
+                version="2.0.0",
+                kind=AgentKind.WORKER,
+                display_name="Cloud Turn Planner Candidate",
+                description=(
+                    "只从服务器预编译的 opaque Capability Offer 提出任务步骤；"
+                    "Release 和 Admission 均闭合前不可派发。"
+                ),
+                provides=("turn.plan.propose.v1",),
+                prompt=cloud_turn_planner_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(),
+                role=ModelRole.PLANNER,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=1,
+                    max_tool_calls=0,
+                    max_input_tokens=32_000,
+                    max_output_tokens=2_000,
+                    max_wall_seconds=60,
+                    max_retries=0,
+                    max_cost_micros=200_000,
+                ),
+                required_evidence=("server_capability_offer", "turn_planning_adjudication"),
+                input_model=TurnPlannerInput,
+                output_model=TurnPlannerDecision,
+                allowed_sources=("conversation_message", "server_capability_offer"),
+                allowed_locations=(ModelLocation.CLOUD,),
+                allowed_privacy_modes=("balanced", "quality_first"),
+            ),
+            input_model=TurnPlannerInput,
+            output_model=TurnPlannerDecision,
+            prompt_package=cloud_turn_planner_prompt,
+            source="builtin_cloud_candidate",
+            requires_release_activation=True,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
                 agent_id="builtin.workspace_patch_planner",
                 version="1.0.0",
                 kind=AgentKind.WORKER,
@@ -169,6 +238,163 @@ def create_builtin_agent_registry(
             input_model=AgentReferenceInput,
             output_model=WorkspacePatchLoopDecision,
             prompt_package=workspace_patch_planner_prompt,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_patch_planner",
+                version="2.0.0",
+                kind=AgentKind.WORKER,
+                display_name="Cloud Workspace Patch Planner Candidate",
+                description=(
+                    "读取服务器绑定证据并提出精确 Patch；Release、Admission 和用户确认"
+                    "均不能被模型输出替代。"
+                ),
+                provides=("workspace.patch.propose.v1",),
+                prompt=cloud_patch_planner_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(may_receive_from=(cloud_coordinator_ref,)),
+                role=ModelRole.TOOL_AGENT,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=1,
+                    max_input_tokens=24_000,
+                    max_output_tokens=3_000,
+                    max_wall_seconds=90,
+                    max_retries=0,
+                    max_cost_micros=300_000,
+                ),
+                required_evidence=("workspace_read_observation", "user_patch_confirmation"),
+                output_model=WorkspacePatchLoopDecision,
+                allowed_sources=("task_contract", "conversation_message", "tool_evidence"),
+                allowed_locations=(ModelLocation.CLOUD,),
+                allowed_privacy_modes=("balanced", "quality_first"),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=WorkspacePatchLoopDecision,
+            prompt_package=cloud_patch_planner_prompt,
+            source="builtin_cloud_candidate",
+            requires_release_activation=True,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_tester",
+                version="2.0.0",
+                kind=AgentKind.WORKER,
+                display_name="Release Workspace Tester Companion",
+                description="执行 cloud Coordinator 服务器绑定的本地固定测试。",
+                provides=("workspace.python.test.v1", "workspace.node.test.v1"),
+                prompt=release_tester_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(may_receive_from=(cloud_coordinator_ref,)),
+                role=ModelRole.TOOL_AGENT,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=1,
+                    max_input_tokens=20_000,
+                    max_output_tokens=2_000,
+                    max_wall_seconds=90,
+                    max_retries=0,
+                    max_cost_micros=100_000,
+                ),
+                required_evidence=("workspace_test_observation",),
+                output_model=WorkspaceLoopDecision,
+                allowed_sources=("task_contract", "conversation_message", "tool_evidence"),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=WorkspaceLoopDecision,
+            prompt_package=release_tester_prompt,
+            source="builtin_release_companion",
+            requires_release_activation=True,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_reader",
+                version="2.0.0",
+                kind=AgentKind.WORKER,
+                display_name="Release Workspace Reader Companion",
+                description="执行 cloud Coordinator 服务器绑定的本地只读节点。",
+                provides=("workspace.file.read.v1", "workspace.directory.read.v1"),
+                prompt=release_reader_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(may_receive_from=(cloud_coordinator_ref,)),
+                role=ModelRole.TOOL_AGENT,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=1,
+                    max_input_tokens=20_000,
+                    max_output_tokens=2_000,
+                    max_wall_seconds=90,
+                    max_retries=0,
+                    max_cost_micros=100_000,
+                ),
+                required_evidence=("workspace_read_observation",),
+                output_model=WorkspaceLoopDecision,
+                allowed_sources=("task_contract", "conversation_message", "tool_evidence"),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=WorkspaceLoopDecision,
+            prompt_package=release_reader_prompt,
+            source="builtin_release_companion",
+            requires_release_activation=True,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_coordinator",
+                version="2.0.0",
+                kind=AgentKind.SYNTHESIZER,
+                display_name="Cloud Dynamic Workspace Coordinator Candidate",
+                description=(
+                    "提出服务器可验证的候选任务 DAG，只消费 verified Child join；"
+                    "Release 和 Admission 闭合前不可派发。"
+                ),
+                provides=("workspace.dynamic.coordinate.v1",),
+                prompt=cloud_coordinator_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(
+                    may_delegate_to=(
+                        release_workspace_reader_ref,
+                        release_workspace_tester_ref,
+                        cloud_patch_planner_ref,
+                    ),
+                    max_outgoing_handoffs=4,
+                    max_depth=1,
+                ),
+                role=ModelRole.SUMMARIZER,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=0,
+                    max_input_tokens=12_000,
+                    max_output_tokens=2_000,
+                    max_wall_seconds=60,
+                    max_retries=0,
+                    max_cost_micros=300_000,
+                    max_handoffs=4,
+                ),
+                required_evidence=("verified_task_graph",),
+                output_model=DynamicCoordinatorLoopDecision,
+                allowed_sources=(
+                    "task_contract",
+                    "conversation_message",
+                    "verified_child_result",
+                ),
+                allowed_locations=(ModelLocation.CLOUD,),
+                allowed_privacy_modes=("balanced", "quality_first"),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=DynamicCoordinatorLoopDecision,
+            prompt_package=cloud_coordinator_prompt,
+            source="builtin_cloud_candidate",
+            requires_release_activation=True,
         )
     )
     registry.register(
@@ -615,6 +841,11 @@ def _contract(
         ModelLocation.LOCAL,
         ModelLocation.CLOUD,
     ),
+    allowed_privacy_modes: tuple[PrivacyMode, ...] = (
+        "local_only",
+        "local_preferred",
+        "balanced",
+    ),
 ) -> AgentContract:
     manifest = prompt.manifest
     contract = AgentContract(
@@ -638,11 +869,7 @@ def _contract(
         model_policy=AgentModelPolicy(
             role=role,
             allowed_locations=allowed_locations,
-            allowed_privacy_modes=(
-                "local_only",
-                "local_preferred",
-                "balanced",
-            ),
+            allowed_privacy_modes=allowed_privacy_modes,
             requirements=ModelCapabilityRequirements(
                 structured_output=True,
                 strict_json_schema=True,

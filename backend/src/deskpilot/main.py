@@ -42,6 +42,7 @@ from deskpilot.api.security_middleware import LocalApiSecurityMiddleware
 from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
 from deskpilot.application.agent_model_admission import load_agent_model_admissions
 from deskpilot.application.agent_model_loop import AgentModelLoopRuntime
+from deskpilot.application.agent_release_lifecycle import load_agent_release_activations
 from deskpilot.application.agent_supervisor_runtime import AgentSupervisorRuntime
 from deskpilot.application.artifact_delivery_runtime import ArtifactDeliveryRuntime
 from deskpilot.application.artifact_export_runtime import ArtifactExportRuntime
@@ -329,10 +330,19 @@ def create_app(
             ),
             explicitly_allowed=resolved_settings.model_admission_allow,
         )
+        agent_release_activations = load_agent_release_activations(
+            (
+                Path(resolved_settings.agent_release_bundle_path)
+                if resolved_settings.agent_release_bundle_path is not None
+                else None
+            ),
+            explicitly_allowed=resolved_settings.agent_release_allow,
+        )
         agent_registry = create_builtin_agent_registry(
             registry,
             model_gateway.descriptors(),
             agent_model_admissions,
+            agent_release_activations,
         )
         capability_catalog = create_builtin_capability_catalog(
             research_runtime_enabled=(
@@ -627,6 +637,7 @@ def create_app(
         app.state.task_service = task_service
         app.state.agent_registry = agent_registry
         app.state.agent_model_admissions = agent_model_admissions
+        app.state.agent_release_activations = agent_release_activations
         app.state.capability_catalog = capability_catalog
         app.state.plan_compilation_service = plan_compilation_service
         app.state.agent_execution_runtime = agent_execution_runtime

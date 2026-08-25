@@ -762,7 +762,11 @@ def test_restart_recovers_deferred_task_loop_without_replaying_planner(
         name=name,
         automatic=True,
     ) as (client, _workspace):
-        recovered = _wait_for_planned_task_loop(client, task_id)
+        recovered = _wait_for_planned_task_loop(
+            client,
+            task_id,
+            timeout_seconds=10,
+        )
         task_loop = cast(dict[str, object], recovered["task_loop"])
         assert task_loop["status"] == "planned"
         assert task_loop["step_count"] == 2

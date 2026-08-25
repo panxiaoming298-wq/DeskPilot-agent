@@ -17,7 +17,7 @@ from deskpilot.application.agent_model_requests import (
 )
 from deskpilot.application.agent_registry import AgentRegistryError, PromptPackage
 from deskpilot.application.model_gateway import ModelGatewayError, ModelProvider
-from deskpilot.core.canonical_json import sha256_digest
+from deskpilot.core.canonical_json import canonical_json_bytes, sha256_digest
 from deskpilot.domain.agent_contracts import AgentContract
 from deskpilot.domain.agent_loop import (
     AgentProposeTaskGraphDecision,
@@ -53,6 +53,14 @@ from deskpilot.domain.phase107_calibrations import (
     Phase107JudgeTrial,
     Phase107ResolvedJudgment,
     Phase107TrialArtifact,
+    Phase107TurnPlanningCaseInput,
+)
+from deskpilot.domain.turn_planning import (
+    TurnPlannerDecision,
+    TurnPlannerInput,
+    TurnPlannerNeedsInputDecision,
+    TurnPlannerProposeStepsDecision,
+    TurnPlannerUnsupportedDecision,
 )
 from deskpilot.tools import create_builtin_registry
 
@@ -87,6 +95,15 @@ class _CalibrationCandidateAdmissionPolicy:
         return True
 
 
+class _CalibrationCandidateReleasePolicy:
+    def allows(
+        self,
+        _contract: AgentContract,
+        _prompt_package_digest: str,
+    ) -> bool:
+        return True
+
+
 class Phase107CalibrationService:
     def load_suite(self, path: Path) -> Phase107CalibrationSuite:
         return self._load_model(path, Phase107CalibrationSuite)
@@ -115,18 +132,43 @@ class Phase107CalibrationService:
         provider: ModelProvider,
         *,
         build_id: str,
+        turn_planner_version: str = "2.0.0",
         coordinator_version: str = "1.1.0",
         patch_version: str = "1.0.0",
-        artifact_schema_version: Literal["v1", "v2"] = "v2",
+        artifact_schema_version: Literal["v1", "v2", "v3"] = "v2",
         now: datetime | None = None,
     ) -> Phase107CalibrationRun:
         self._validate_live_run_inputs(build_id, now)
         started_at = now or datetime.now(UTC)
         descriptor = provider.descriptor
-        coordinator_binding, patch_binding = self.calibrated_agent_bindings(
-            descriptor,
-            coordinator_version=coordinator_version,
-            patch_version=patch_version,
+        turn_planner_binding: Phase107CalibratedAgentBinding | None = None
+        if artifact_schema_version == "v3":
+            if suite.schema_version != "deskpilot.phase107-calibration-suite.v2":
+                raise Phase107CalibrationError(
+                    "Calibration v3 requires the three-role v2 suite"
+                )
+            (
+                turn_planner_binding,
+                coordinator_binding,
+                patch_binding,
+            ) = self.calibrated_release_agent_bindings(
+                descriptor,
+                turn_planner_version=turn_planner_version,
+                coordinator_version=coordinator_version,
+                patch_version=patch_version,
+            )
+        else:
+            if suite.schema_version != "deskpilot.phase107-calibration-suite.v1":
+                raise Phase107CalibrationError(
+                    "Phase-107 v1/v2 artifacts require the legacy two-role suite"
+                )
+            coordinator_binding, patch_binding = self.calibrated_agent_bindings(
+                descriptor,
+                coordinator_version=coordinator_version,
+                patch_version=patch_version,
+            )
+        turn_planner_prompt = (
+            turn_planner_binding.prompt if turn_planner_binding is not None else None
         )
         coordinator_prompt = coordinator_binding.prompt
         patch_prompt = patch_binding.prompt
@@ -135,17 +177,29 @@ class Phase107CalibrationService:
         )
         patch_contract_digest = patch_binding.identity.agent_contract_digest
         calibrated_agents = (
-            coordinator_binding.identity,
-            patch_binding.identity,
+            (
+                turn_planner_binding.identity,
+                coordinator_binding.identity,
+                patch_binding.identity,
+            )
+            if turn_planner_binding is not None
+            else (coordinator_binding.identity, patch_binding.identity)
+        )
+        turn_planner_prompt_digest = (
+            turn_planner_prompt.digest if turn_planner_prompt is not None else None
         )
         coordinator_prompt_digest = coordinator_prompt.digest
         patch_prompt_digest = patch_prompt.digest
-        request_schema_digest = sha256_digest(
-            {
-                "dynamic_coordinator": DynamicCoordinatorLoopDecision.model_json_schema(),
-                "patch_planner": WorkspacePatchLoopDecision.model_json_schema(),
+        request_schemas = {
+            "dynamic_coordinator": DynamicCoordinatorLoopDecision.model_json_schema(),
+            "patch_planner": WorkspacePatchLoopDecision.model_json_schema(),
+        }
+        if artifact_schema_version == "v3":
+            request_schemas = {
+                "turn_planner": TurnPlannerDecision.model_json_schema(),
+                **request_schemas,
             }
-        )
+        request_schema_digest = sha256_digest(request_schemas)
         provider_snapshot_digest = sha256_digest(descriptor)
         cohort_material: dict[str, Any] = {
             "suite_digest": suite.suite_digest,
@@ -156,7 +210,14 @@ class Phase107CalibrationService:
             "patch_prompt_digest": patch_prompt_digest,
             "request_schema_digest": request_schema_digest,
         }
-        if artifact_schema_version == "v2":
+        if artifact_schema_version == "v3":
+            cohort_material["turn_planner_prompt_digest"] = (
+                turn_planner_prompt_digest
+            )
+            cohort_material["calibrated_agents"] = [
+                item.model_dump(mode="json") for item in calibrated_agents
+            ]
+        elif artifact_schema_version == "v2":
             cohort_material["calibrated_agents"] = [
                 item.model_dump(mode="json") for item in calibrated_agents
             ]
@@ -175,8 +236,14 @@ class Phase107CalibrationService:
                     case,
                     sample_id,
                     descriptor.provider_id,
+                    turn_planner_prompt=turn_planner_prompt,
                     coordinator_prompt=coordinator_prompt,
                     patch_prompt=patch_prompt,
+                    turn_planner_identity=(
+                        turn_planner_binding.identity
+                        if turn_planner_binding is not None
+                        else None
+                    ),
                     coordinator_identity=coordinator_binding.identity,
                     patch_identity=patch_binding.identity,
                     coordinator_contract_digest=coordinator_contract_digest,
@@ -195,7 +262,11 @@ class Phase107CalibrationService:
                 )
         completed_at = datetime.now(UTC) if now is None else started_at
         material: dict[str, Any] = {
-            "schema_version": f"deskpilot.phase107-calibration-run.{artifact_schema_version}",
+            "schema_version": (
+                "deskpilot.phase115-calibration-run.v3"
+                if artifact_schema_version == "v3"
+                else f"deskpilot.phase107-calibration-run.{artifact_schema_version}"
+            ),
             "run_id": run_id,
             "suite_id": suite.suite_id,
             "suite_version": suite.suite_version,
@@ -217,7 +288,10 @@ class Phase107CalibrationService:
             "started_at": started_at,
             "completed_at": completed_at,
         }
-        if artifact_schema_version == "v2":
+        if artifact_schema_version == "v3":
+            material["turn_planner_prompt_digest"] = turn_planner_prompt_digest
+            material["calibrated_agents"] = calibrated_agents
+        elif artifact_schema_version == "v2":
             material["calibrated_agents"] = calibrated_agents
         return Phase107CalibrationRun.model_validate(
             {**material, "run_digest": sha256_digest(material)}
@@ -524,7 +598,9 @@ class Phase107CalibrationService:
         )
         report_material: dict[str, Any] = {
             "schema_version": (
-                "deskpilot.phase107-calibration-report.v2"
+                "deskpilot.phase115-calibration-report.v3"
+                if run.schema_version == "deskpilot.phase115-calibration-run.v3"
+                else "deskpilot.phase107-calibration-report.v2"
                 if run.calibrated_agents
                 else "deskpilot.phase107-calibration-report.v1"
             ),
@@ -558,6 +634,10 @@ class Phase107CalibrationService:
             "error_codes": tuple(error_codes),
             "evaluated_at": evaluated_at,
         }
+        if run.turn_planner_prompt_digest is not None:
+            report_material["turn_planner_prompt_digest"] = (
+                run.turn_planner_prompt_digest
+            )
         if run.calibrated_agents:
             report_material["calibrated_agents"] = run.calibrated_agents
         return Phase107CalibrationReport.model_validate(
@@ -576,6 +656,10 @@ class Phase107CalibrationService:
             "PROVIDER_DIGEST_DRIFT": (
                 baseline.provider_snapshot_digest,
                 report.provider_snapshot_digest,
+            ),
+            "TURN_PLANNER_PROMPT_DRIFT": (
+                baseline.turn_planner_prompt_digest,
+                report.turn_planner_prompt_digest,
             ),
             "COORDINATOR_PROMPT_DRIFT": (
                 baseline.coordinator_prompt_digest,
@@ -853,19 +937,182 @@ class Phase107CalibrationService:
         )
 
     @staticmethod
+    def calibrated_release_agent_bindings(
+        descriptor: ModelProviderDescriptor,
+        *,
+        turn_planner_version: str = "2.0.0",
+        coordinator_version: str = "2.0.0",
+        patch_version: str = "2.0.0",
+    ) -> tuple[
+        Phase107CalibratedAgentBinding,
+        Phase107CalibratedAgentBinding,
+        Phase107CalibratedAgentBinding,
+    ]:
+        """Resolve the exact three-role release cohort without activating production."""
+        try:
+            registry = create_builtin_agent_registry(
+                create_builtin_registry(),
+                (
+                    descriptor.model_copy(update={"location": ModelLocation.CLOUD}),
+                    descriptor.model_copy(update={"location": ModelLocation.LOCAL}),
+                ),
+                _CalibrationCandidateAdmissionPolicy(),
+                _CalibrationCandidateReleasePolicy(),
+            )
+            turn_planner = registry.resolve_exact(
+                "builtin.turn_planner", turn_planner_version
+            )
+            coordinator = registry.resolve_exact(
+                "builtin.workspace_coordinator", coordinator_version
+            )
+            patch = registry.resolve_exact(
+                "builtin.workspace_patch_planner", patch_version
+            )
+        except AgentRegistryError as error:
+            raise Phase107CalibrationError(
+                "Calibration release Agent version is unavailable"
+            ) from error
+        expected_schemas = (
+            TurnPlannerDecision.model_json_schema(),
+            DynamicCoordinatorLoopDecision.model_json_schema(),
+            WorkspacePatchLoopDecision.model_json_schema(),
+        )
+        registrations = (turn_planner, coordinator, patch)
+        if any(
+            registration.contract.output_schema != expected_schema
+            for registration, expected_schema in zip(
+                registrations, expected_schemas, strict=True
+            )
+        ):
+            raise Phase107CalibrationError(
+                "Calibration release Agent output schema is incompatible"
+            )
+        def binding(
+            registration: Any,
+            role: Literal["turn_planner", "dynamic_coordinator", "patch_planner"],
+        ) -> Phase107CalibratedAgentBinding:
+            return Phase107CalibratedAgentBinding(
+                identity=Phase107CalibratedAgentIdentity(
+                    calibration_role=role,
+                    agent_id=registration.contract.agent_id,
+                    agent_version=registration.contract.version,
+                    agent_contract_digest=registration.contract.digest,
+                    prompt_package_digest=registration.prompt_package.digest,
+                    output_schema_digest=sha256_digest(
+                        registration.contract.output_schema
+                    ),
+                ),
+                prompt=registration.prompt_package,
+            )
+
+        return (
+            binding(turn_planner, "turn_planner"),
+            binding(coordinator, "dynamic_coordinator"),
+            binding(patch, "patch_planner"),
+        )
+
+    @staticmethod
     def _request(
         case: Phase107CalibrationCase,
         sample_id: str,
         provider_id: str,
         *,
+        turn_planner_prompt: PromptPackage | None,
         coordinator_prompt: PromptPackage,
         patch_prompt: PromptPackage,
+        turn_planner_identity: Phase107CalibratedAgentIdentity | None,
         coordinator_identity: Phase107CalibratedAgentIdentity,
         patch_identity: Phase107CalibratedAgentIdentity,
         coordinator_contract_digest: str,
         patch_contract_digest: str,
     ) -> ModelRequest:
         case_input = case.case_input
+        if isinstance(case_input, Phase107TurnPlanningCaseInput):
+            if turn_planner_prompt is None or turn_planner_identity is None:
+                raise Phase107CalibrationError(
+                    "Turn Planner calibration case requires a v3 release identity"
+                )
+            task_id = f"tsk_{sha256_digest({'sample_id': sample_id, 'kind': 'task'})[:32]}"
+            message_id = (
+                f"msg_{sha256_digest({'sample_id': sample_id, 'kind': 'message'})[:32]}"
+            )
+            user_message_digest = sha256_digest(
+                {"user_message": case_input.user_message}
+            )
+            input_material: dict[str, Any] = {
+                "schema_version": "deskpilot.turn-planner-input.v1",
+                "task_id": task_id,
+                "user_message_id": message_id,
+                "user_message_digest": user_message_digest,
+                "user_message": case_input.user_message,
+                "offers": case_input.offers,
+                "offer_set_digest": sha256_digest(
+                    {
+                        "offers": [
+                            item.offer.model_dump(mode="json")
+                            for item in case_input.offers
+                        ]
+                    }
+                ),
+            }
+            planner_input = TurnPlannerInput.model_validate(
+                {**input_material, "input_digest": sha256_digest(input_material)}
+            )
+            request = ModelRequest(
+                request_id=f"phase115-turn-{sample_id[-20:]}",
+                task_id=task_id,
+                role=ModelRole.PLANNER,
+                messages=(
+                    ModelMessage(
+                        role="system", content=turn_planner_prompt.instruction
+                    ),
+                    ModelMessage(
+                        role="user",
+                        content=canonical_json_bytes(planner_input).decode("utf-8"),
+                    ),
+                ),
+                privacy_mode="quality_first",
+                requirements=ModelCapabilityRequirements(
+                    structured_output=True,
+                    strict_json_schema=True,
+                    min_context_tokens=8_192,
+                ),
+                output_schema=StructuredOutputDefinition.from_model(
+                    name="turn_planner_decision",
+                    description=(
+                        "Select only opaque server offers, request bounded input, "
+                        "or reject the task as unsupported"
+                    ),
+                    model=TurnPlannerDecision,
+                    strict=True,
+                ),
+                provider_hint=provider_id,
+                cloud_fallback_approved=False,
+                temperature=0,
+                max_output_tokens=case_input.request_budget.output_tokens,
+                timeout_seconds=float(case_input.request_budget.wall_seconds),
+                execution_budget=ModelExecutionBudget(
+                    max_attempts=1,
+                    max_retry_delay_seconds=0,
+                    max_task_cost_micros=case_input.request_budget.cost_micros,
+                ),
+                metadata={
+                    "turn_planner_input_digest": planner_input.input_digest,
+                    "turn_planner_offer_set_digest": planner_input.offer_set_digest,
+                    "turn_planner_user_message_id": planner_input.user_message_id,
+                    "turn_planner_user_message_digest": (
+                        planner_input.user_message_digest
+                    ),
+                },
+            )
+            return bind_agent_model_request(
+                request,
+                agent_id=turn_planner_identity.agent_id,
+                agent_version=turn_planner_identity.agent_version,
+                contract_digest=turn_planner_identity.agent_contract_digest,
+                prompt_package_digest=turn_planner_prompt.digest,
+                prompt_instruction=turn_planner_prompt.instruction,
+            )
         if isinstance(case_input, Phase107GraphCaseInput):
             offered_capabilities = [
                 cast(dict[str, object], item.model_dump(mode="json"))
@@ -932,6 +1179,30 @@ class Phase107CalibrationService:
         request: ModelRequest,
     ) -> tuple[str, ...]:
         case_input = case.case_input
+        if isinstance(case_input, Phase107TurnPlanningCaseInput):
+            decision = TurnPlannerDecision.model_validate(output).root
+            if case_input.expected_kind == "propose_steps":
+                if not isinstance(decision, TurnPlannerProposeStepsDecision):
+                    return ("TURN_DECISION_KIND_INVALID",)
+                return (
+                    ()
+                    if decision.steps == case_input.expected_steps
+                    else ("TURN_STEP_SELECTION_INVALID",)
+                )
+            if case_input.expected_kind == "needs_input":
+                if not isinstance(decision, TurnPlannerNeedsInputDecision):
+                    return ("TURN_DECISION_KIND_INVALID",)
+                turn_errors: list[str] = []
+                if decision.offer_key != case_input.expected_offer_key:
+                    turn_errors.append("TURN_NEEDS_INPUT_OFFER_INVALID")
+                if decision.missing_parameters != (
+                    case_input.expected_missing_parameters
+                ):
+                    turn_errors.append("TURN_MISSING_PARAMETERS_INVALID")
+                return tuple(turn_errors)
+            if not isinstance(decision, TurnPlannerUnsupportedDecision):
+                return ("TURN_DECISION_KIND_INVALID",)
+            return ()
         if isinstance(case_input, Phase107GraphCaseInput):
             graph_decision = DynamicCoordinatorLoopDecision.model_validate(output).root
             if not isinstance(graph_decision, AgentProposeTaskGraphDecision):
@@ -1008,6 +1279,16 @@ class Phase107CalibrationService:
     @staticmethod
     def _blind_input_projection(case: Phase107CalibrationCase) -> dict[str, JsonValue]:
         case_input = case.case_input
+        if isinstance(case_input, Phase107TurnPlanningCaseInput):
+            return cast(
+                dict[str, JsonValue],
+                {
+                    "external_untrusted_user_message": case_input.user_message,
+                    "opaque_server_offers": [
+                        item.model_dump(mode="json") for item in case_input.offers
+                    ],
+                },
+            )
         if isinstance(case_input, Phase107GraphCaseInput):
             return cast(
                 dict[str, JsonValue],
@@ -1041,6 +1322,11 @@ class Phase107CalibrationService:
             or len(run.trials) != len(suite.cases) * suite.repeat_count
         ):
             raise Phase107CalibrationError("Calibration run does not match the suite")
+        is_v3 = run.schema_version == "deskpilot.phase115-calibration-run.v3"
+        if is_v3 != (
+            suite.schema_version == "deskpilot.phase107-calibration-suite.v2"
+        ):
+            raise Phase107CalibrationError("Calibration artifact generation changed")
         expected_pairs = {
             (case.case_id, ordinal)
             for case in suite.cases
@@ -1050,25 +1336,44 @@ class Phase107CalibrationService:
         if actual_pairs != expected_pairs:
             raise Phase107CalibrationError("Calibration run trial set changed")
         cases = {item.case_id: item for item in suite.cases}
-        coordinator_version = (
-            run.calibrated_agents[0].agent_version
-            if run.calibrated_agents
-            else "1.1.0"
-        )
-        patch_version = (
-            run.calibrated_agents[1].agent_version
-            if run.calibrated_agents
-            else "1.0.0"
-        )
-        coordinator_binding, patch_binding = self.calibrated_agent_bindings(
-            run.provider,
-            coordinator_version=coordinator_version,
-            patch_version=patch_version,
-        )
-        expected_agents = (
-            coordinator_binding.identity,
-            patch_binding.identity,
-        )
+        turn_planner_binding: Phase107CalibratedAgentBinding | None = None
+        expected_agents: tuple[Phase107CalibratedAgentIdentity, ...]
+        if is_v3:
+            (
+                turn_planner_binding,
+                coordinator_binding,
+                patch_binding,
+            ) = self.calibrated_release_agent_bindings(
+                run.provider,
+                turn_planner_version=run.calibrated_agents[0].agent_version,
+                coordinator_version=run.calibrated_agents[1].agent_version,
+                patch_version=run.calibrated_agents[2].agent_version,
+            )
+            expected_agents = (
+                turn_planner_binding.identity,
+                coordinator_binding.identity,
+                patch_binding.identity,
+            )
+        else:
+            coordinator_version = (
+                run.calibrated_agents[0].agent_version
+                if run.calibrated_agents
+                else "1.1.0"
+            )
+            patch_version = (
+                run.calibrated_agents[1].agent_version
+                if run.calibrated_agents
+                else "1.0.0"
+            )
+            coordinator_binding, patch_binding = self.calibrated_agent_bindings(
+                run.provider,
+                coordinator_version=coordinator_version,
+                patch_version=patch_version,
+            )
+            expected_agents = (
+                coordinator_binding.identity,
+                patch_binding.identity,
+            )
         if run.calibrated_agents and run.calibrated_agents != expected_agents:
             raise Phase107CalibrationError("Calibration Agent identity changed")
         for trial in run.trials:
@@ -1077,8 +1382,18 @@ class Phase107CalibrationService:
                 case,
                 trial.sample_id,
                 run.provider.provider_id,
+                turn_planner_prompt=(
+                    turn_planner_binding.prompt
+                    if turn_planner_binding is not None
+                    else None
+                ),
                 coordinator_prompt=coordinator_binding.prompt,
                 patch_prompt=patch_binding.prompt,
+                turn_planner_identity=(
+                    turn_planner_binding.identity
+                    if turn_planner_binding is not None
+                    else None
+                ),
                 coordinator_identity=coordinator_binding.identity,
                 patch_identity=patch_binding.identity,
                 coordinator_contract_digest=(

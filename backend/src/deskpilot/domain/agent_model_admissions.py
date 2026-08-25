@@ -109,6 +109,19 @@ class AgentModelAdmissionBundle(BaseModel):
         keys = tuple(item.key for item in self.admissions)
         if len(keys) != len(set(keys)):
             raise ValueError("Agent model admission bundle contains a duplicate route")
+        if self.run.schema_version == "deskpilot.phase115-calibration-run.v3":
+            expected = {
+                (
+                    item.agent_id,
+                    item.agent_version,
+                    self.run.provider_snapshot_digest,
+                )
+                for item in self.run.calibrated_agents
+            }
+            if set(keys) != expected:
+                raise ValueError(
+                    "Calibration v3 admission bundle must cover the exact three-role cohort"
+                )
         if self.bundle_digest != sha256_digest(
             self.model_dump(mode="json", exclude={"bundle_digest"})
         ):

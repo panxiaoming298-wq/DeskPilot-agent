@@ -195,6 +195,7 @@ flowchart LR
 128. [通用持久任务循环](doc/112-通用持久任务循环.md)
 129. [Codex 类安全编码工具](doc/113-Codex类安全编码工具.md)
 130. [并行任务与窗口后台运行](doc/114-并行任务与窗口后台运行.md)
+131. [真实 Cloud Agent 与 Calibration v3](doc/115-真实Cloud-Agent与Calibration-v3.md)
 
 ## 目标 MVP 与当前边界
 
@@ -262,11 +263,13 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-25 校准）
 
-阶段 77～110 checkpoint 与阶段 111～114 已完成。阶段 115 真实 Cloud cohort/Production Admission、阶段 116 Codex 类真实仓库长循环与阶段 117 Edge/记事本仍保留在路线中，但按用户当前指令不执行。完整设计、失败策略和验收边界见[项目进度](项目进度.md)、[阶段 114 实现文档](doc/114-并行任务与窗口后台运行.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+阶段 77～114 已完成。阶段 115A 与 115B 授权准备已实现 Release Manifest/activation channel、cloud-only 三角色 cohort、Calibration v3 和 exact 三角色 Admission builder；没有用户明确给出的真实 Provider/Judge、数据出站、费用和真人评审授权时，候选仍默认 disabled，阶段 115 不能标记完成，也不进入阶段 116。完整边界见[项目进度](项目进度.md)、[阶段 115 实现文档](doc/115-真实Cloud-Agent与Calibration-v3.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
 
 阶段 114 最终门禁：默认后端 775 项，`763 passed + 12 skipped`；Ruff、严格 mypy 283 个生产源码、Alembic/SQLite、Evaluation/Phase75 v16、17 份 immutable baseline 和 wheel Prompt 24/24 通过。前端 24 个文件 / 165 项、type-check/build、Rust `fmt/clippy/test`、冻结 sidecar 健康烟测、Tauri/NSIS 实构建、PostgreSQL 11/11 与 RabbitMQ 1/1 全部通过；环境已恢复且未改 baseline。
+
+阶段 115A 内部 checkpoint：默认后端 783 项，`771 passed + 12 skipped`；Ruff、严格 mypy 287 个生产源码、Release/Calibration v3/Admission 专项、前端 24 个文件 / 165 项、type-check/build、frozen lock、`pip check`、wheel Prompt 29/29 通过。Phase75 追加链式 v17 后仍为 11/11、false-success=0、unauthorized-effect=0；Windows Evaluation 追加 v2 延迟基线并保留旧 v1。该 checkpoint 没有真实 cloud capture、费用、生产 Admission 或 activation，阶段 115 尚未完成，阶段 116 仍未开始。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 

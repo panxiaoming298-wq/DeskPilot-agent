@@ -157,6 +157,8 @@ class Settings(BaseSettings):
     model_request_timeout_seconds: float = Field(default=10, gt=0, le=600)
     model_admission_allow: bool = False
     model_admission_bundle_path: str | None = Field(default=None, max_length=32_767)
+    agent_release_allow: bool = False
+    agent_release_bundle_path: str | None = Field(default=None, max_length=32_767)
     model_gateway_policy: ModelGatewayPolicy = Field(default_factory=_default_model_gateway_policy)
     model_health_cache_ttl_seconds: float = Field(default=15, gt=0, le=300)
     model_health_max_concurrency: int = Field(default=4, ge=1, le=16)
@@ -214,6 +216,10 @@ class Settings(BaseSettings):
         if self.model_admission_allow != (self.model_admission_bundle_path is not None):
             raise ValueError(
                 "model_admission_allow and model_admission_bundle_path must be set together"
+            )
+        if self.agent_release_allow != (self.agent_release_bundle_path is not None):
+            raise ValueError(
+                "agent_release_allow and agent_release_bundle_path must be set together"
             )
         if (
             self.workbench_runtime_retry_max_seconds

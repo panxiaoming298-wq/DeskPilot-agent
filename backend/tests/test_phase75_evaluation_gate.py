@@ -26,7 +26,7 @@ BASELINE = (
     Path(__file__).parent
     / "baselines"
     / "evaluations"
-    / "multi-agent-core-v16.baseline.json"
+    / "multi-agent-core-v17.baseline.json"
 )
 
 

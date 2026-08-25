@@ -15,7 +15,9 @@ from deskpilot.application.evaluation_service import EvaluationService
 from deskpilot.domain.evaluations import EvaluationReportRead
 from deskpilot.infrastructure.database import Database
 
-DEFAULT_BASELINE = Path("tests/baselines/evaluations/golden-resilience-v2.baseline.json")
+DEFAULT_BASELINE = Path(
+    "tests/baselines/evaluations/golden-resilience-v2-windows-v2.baseline.json"
+)
 
 
 async def _run_report() -> EvaluationReportRead:

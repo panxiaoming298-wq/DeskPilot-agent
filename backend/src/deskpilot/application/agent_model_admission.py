@@ -20,6 +20,15 @@ from deskpilot.domain.agent_model_admissions import (
     ApprovedAgentModelAdmission,
 )
 from deskpilot.domain.model_contracts import ModelLocation, ModelProviderDescriptor
+from deskpilot.domain.phase107_calibrations import (
+    Phase107BlindReviewPacket,
+    Phase107CalibrationBaseline,
+    Phase107CalibrationReport,
+    Phase107CalibrationRun,
+    Phase107CalibrationSuite,
+    Phase107HumanReviewBundle,
+    Phase107JudgeRun,
+)
 
 MAX_ADMISSION_BUNDLE_BYTES = 32 * 1024 * 1024
 
@@ -30,6 +39,135 @@ class AgentModelAdmissionError(RuntimeError):
 
 class AgentModelAdmissionRequiredError(AgentModelAdmissionError):
     code = "AGENT_MODEL_ADMISSION_REQUIRED"
+
+
+def build_phase115_admission_bundle(
+    *,
+    suite: Phase107CalibrationSuite,
+    run: Phase107CalibrationRun,
+    packet: Phase107BlindReviewPacket,
+    judge_run: Phase107JudgeRun,
+    reviews: Phase107HumanReviewBundle,
+    report: Phase107CalibrationReport,
+    baseline_id: str,
+    approved_by: str,
+    approved_at: datetime,
+    valid_until: datetime,
+) -> AgentModelAdmissionBundle:
+    """Approve only one fully replayed three-role, non-Fake cloud cohort."""
+
+    if (
+        run.schema_version != "deskpilot.phase115-calibration-run.v3"
+        or report.schema_version != "deskpilot.phase115-calibration-report.v3"
+        or report.status != "passed"
+        or run.provider.location is not ModelLocation.CLOUD
+        or run.provider.protocol.value == "fake"
+        or approved_at.tzinfo is None
+        or valid_until.tzinfo is None
+        or approved_at < report.evaluated_at
+        or valid_until > reviews.valid_until
+    ):
+        raise AgentModelAdmissionError(
+            "Phase-115 admission requires passed, current three-role cloud evidence"
+        )
+    service = Phase107CalibrationService()
+    try:
+        replayed = service.grade(
+            suite,
+            run,
+            packet,
+            judge_run,
+            reviews,
+            now=report.evaluated_at,
+        )
+    except (Phase107CalibrationError, ValidationError, ValueError, TypeError) as error:
+        raise AgentModelAdmissionError(
+            "Phase-115 admission evidence failed full calibration replay"
+        ) from error
+    if replayed.report_digest != report.report_digest:
+        raise AgentModelAdmissionError("Phase-115 calibration report replay changed")
+    baseline_material = {
+        "schema_version": "deskpilot.phase115-calibration-baseline.v3",
+        "baseline_id": baseline_id,
+        "suite_digest": suite.suite_digest,
+        "cohort_digest": run.cohort_digest,
+        "provider_snapshot_digest": run.provider_snapshot_digest,
+        "turn_planner_prompt_digest": run.turn_planner_prompt_digest,
+        "coordinator_prompt_digest": run.coordinator_prompt_digest,
+        "patch_prompt_digest": run.patch_prompt_digest,
+        "calibrated_agents": run.calibrated_agents,
+        "judge_provider_snapshot_digest": judge_run.judge_provider_snapshot_digest,
+        "judge_prompt_digest": judge_run.judge_prompt_digest,
+        "judge_schema_digest": judge_run.judge_schema_digest,
+        "minimum_acceptance_rate": 1.0,
+        "maximum_primary_disagreement_rate": 0.0,
+        "maximum_safety_reject_count": 0,
+        "minimum_judge_human_agreement_rate": 1.0,
+        "maximum_judge_false_accept_count": 0,
+        "source_report_digest": report.report_digest,
+        "previous_baseline_digest": None,
+        "approved_by": approved_by,
+    }
+    baseline = Phase107CalibrationBaseline.model_validate(
+        {
+            **baseline_material,
+            "approval_digest": sha256_digest(baseline_material),
+        }
+    )
+    if service.compare(baseline, report):
+        raise AgentModelAdmissionError("Phase-115 baseline does not approve the report")
+    admissions: list[ApprovedAgentModelAdmission] = []
+    for calibrated in run.calibrated_agents:
+        identity = {
+            "agent_id": calibrated.agent_id,
+            "agent_version": calibrated.agent_version,
+            "agent_contract_digest": calibrated.agent_contract_digest,
+            "prompt_package_digest": calibrated.prompt_package_digest,
+            "provider_snapshot_digest": run.provider_snapshot_digest,
+            "build_id": run.build_id,
+            "report_digest": report.report_digest,
+            "baseline_approval_digest": baseline.approval_digest,
+        }
+        material = {
+            "schema_version": "deskpilot.approved-agent-model-admission.v1",
+            "admission_id": f"ama_{sha256_digest(identity)}",
+            "agent_id": calibrated.agent_id,
+            "agent_version": calibrated.agent_version,
+            "agent_contract_digest": calibrated.agent_contract_digest,
+            "prompt_package_digest": calibrated.prompt_package_digest,
+            "provider": run.provider,
+            "provider_snapshot_digest": run.provider_snapshot_digest,
+            "build_id": run.build_id,
+            "request_schema_digest": run.request_schema_digest,
+            "run_digest": run.run_digest,
+            "report_digest": report.report_digest,
+            "baseline_approval_digest": baseline.approval_digest,
+            "review_bundle_digest": reviews.bundle_digest,
+            "approved_by": approved_by,
+            "approved_at": approved_at,
+            "valid_until": valid_until,
+        }
+        admissions.append(
+            ApprovedAgentModelAdmission.model_validate(
+                {**material, "admission_digest": sha256_digest(material)}
+            )
+        )
+    bundle_material = {
+        "schema_version": "deskpilot.agent-model-admission-bundle.v1",
+        "suite": suite,
+        "run": run,
+        "packet": packet,
+        "judge_run": judge_run,
+        "reviews": reviews,
+        "report": report,
+        "baseline": baseline,
+        "admissions": tuple(admissions),
+    }
+    bundle = AgentModelAdmissionBundle.model_validate(
+        {**bundle_material, "bundle_digest": sha256_digest(bundle_material)}
+    )
+    AgentModelAdmissionRegistry.from_bundle(bundle, now=approved_at)
+    return bundle
 
 
 class AgentModelAdmissionRegistry:

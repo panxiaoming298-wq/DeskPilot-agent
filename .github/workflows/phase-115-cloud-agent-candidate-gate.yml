@@ -1,0 +1,113 @@
+name: Phase 115 cloud Agent candidate gate
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-release-calibration-gate:
+    runs-on: windows-latest
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          python-version: "3.12.13"
+          working-directory: backend
+          enable-cache: true
+      - name: Install frozen Python dependencies
+        run: |
+          uv lock --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv sync --frozen --all-extras
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv pip check --python .venv\Scripts\python.exe
+      - name: Run static checks
+        run: |
+          uv run ruff check src tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run mypy
+      - name: Run Release and Calibration v3 gates
+        run: |
+          uv run pytest `
+            tests/test_agent_release_lifecycle.py `
+            tests/test_phase115_release_gate.py `
+            tests/test_phase107_calibration_gate.py `
+            tests/test_phase109_model_admission.py `
+            tests/test_agent_registry.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prove CI cannot capture or activate production evidence
+        env:
+          DESKPILOT_PHASE115_LIVE_ALLOW: "1"
+        run: |
+          uv run python -m deskpilot.phase107_gate capture --artifact-schema-version v3 --provider-id forbidden-ci-provider --build-id forbidden-ci-build --output forbidden-ci-run.json
+          if ($LASTEXITCODE -ne 2) { throw "CI live-capture guard did not fail closed" }
+          if (Test-Path forbidden-ci-run.json) { throw "CI produced a live evidence artifact" }
+      - name: Compare immutable evaluation baselines
+        run: |
+          $before = @(Get-ChildItem tests\baselines\evaluations -File | Sort-Object Name | ForEach-Object { "{0}|{1}" -f $_.Name,(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash })
+          uv run python -m deskpilot.evaluation_gate compare
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run python -m deskpilot.phase75_gate compare
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $after = @(Get-ChildItem tests\baselines\evaluations -File | Sort-Object Name | ForEach-Object { "{0}|{1}" -f $_.Name,(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash })
+          if (@(Compare-Object $before $after).Count -ne 0) { throw "Evaluation compare rewrote immutable baselines" }
+          git diff --exit-code -- tests/baselines/evaluations
+      - name: Build wheel and verify Agent Prompt resources
+        run: |
+          uv build --wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run python -c "from pathlib import Path; import zipfile; source=Path('src/deskpilot/agents/prompts'); expected={f'deskpilot/agents/prompts/{p.name}' for p in source.iterdir() if p.is_file() and p.suffix in {'.json','.txt'}}; wheel=max(Path('dist').glob('*.whl'), key=lambda p:p.stat().st_mtime_ns); missing=expected-set(zipfile.ZipFile(wheel).namelist()); assert not missing, sorted(missing); print(f'verified {len(expected)} prompt resources')"
+      - name: Run default backend suite
+        run: |
+          uv run pytest --junitxml=pytest-default.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run python -c "from xml.etree import ElementTree as E; root=E.parse('pytest-default.xml').getroot(); cases=[x for x in root.iter() if x.tag.rsplit('}',1)[-1]=='testcase']; failed=[x for x in cases if any(c.tag.rsplit('}',1)[-1] in {'failure','error'} for c in x)]; skipped=[x for x in cases if any(c.tag.rsplit('}',1)[-1]=='skipped' for c in x)]; assert not failed,len(failed); assert len(skipped)==12,len(skipped); print(f'verified {len(cases)-len(skipped)} passed and {len(skipped)} external skips')"
+
+  frontend-regression-gate:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/setup@v2
+        with:
+          version: 11.19.0
+          runtime: node@24.19.0
+          cache: true
+          cache-dependency-path: frontend/pnpm-lock.yaml
+          package-json-file: frontend/package.json
+          install: false
+      - name: Install frozen frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Run frontend regression
+        run: |
+          pnpm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm type-check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm build
+
+  whitespace-gate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: git diff --check

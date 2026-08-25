@@ -29,17 +29,45 @@ from deskpilot.domain.phase107_calibrations import (
     Phase107HumanReviewBundle,
     Phase107JudgeDecision,
 )
+from deskpilot.domain.turn_planning import (
+    TurnPlannerDecision,
+    TurnPlannerProposeStepsDecision,
+    TurnPlannerStepProposal,
+)
 from deskpilot.model_providers.fake import FakeModelProvider
 from deskpilot.phase107_gate import _parser
 from deskpilot.phase107_gate import main as phase107_main
 
 SUITE = Path(__file__).parent / "fixtures" / "phase107-live-agent-calibration-suite.v1.json"
+SUITE_V3 = (
+    Path(__file__).parent / "fixtures" / "phase115-live-agent-calibration-suite.v2.json"
+)
 FIXED_NOW = datetime(2026, 8, 23, 12, tzinfo=UTC)
 
 
 class CalibratedProposalProvider(FakeModelProvider):
     async def complete(self, request: ModelRequest) -> ModelResponse:
         response = await super().complete(request)
+        if (
+            request.output_schema is not None
+            and request.output_schema.name == "turn_planner_decision"
+        ):
+            planner_input = json.loads(request.messages[-1].content)
+            if planner_input["user_message"] == "请只读查看 backend 目录结构。":
+                output = TurnPlannerDecision(
+                    root=TurnPlannerProposeStepsDecision(
+                        kind="propose_steps",
+                        steps=(
+                            TurnPlannerStepProposal(
+                                offer_key=planner_input["offers"][0]["offer"][
+                                    "offer_key"
+                                ],
+                                parameters=(),
+                            ),
+                        ),
+                    )
+                ).model_dump(mode="json")
+                return response.model_copy(update={"structured_output": output})
         if (
             request.output_schema is None
             or request.output_schema.name != "workspace_patch_planner_loop_decision"
@@ -462,6 +490,64 @@ async def test_live_proposal_capture_blind_review_and_human_gate_pass() -> None:
         }
     )
     assert "CALIBRATED_AGENT_DRIFT" in service.compare(baseline, drifted_report)
+
+
+@pytest.mark.asyncio
+async def test_v3_calibrates_three_release_roles_and_replays_every_sample() -> None:
+    service = Phase107CalibrationService()
+    suite = service.load_suite(SUITE_V3)
+    run = await service.capture(
+        suite,
+        CalibratedProposalProvider(),
+        build_id="phase115-three-role-release",
+        turn_planner_version="2.0.0",
+        coordinator_version="2.0.0",
+        patch_version="2.0.0",
+        artifact_schema_version="v3",
+        now=FIXED_NOW,
+    )
+    assert run.schema_version == "deskpilot.phase115-calibration-run.v3"
+    assert tuple(item.calibration_role for item in run.calibrated_agents) == (
+        "turn_planner",
+        "dynamic_coordinator",
+        "patch_planner",
+    )
+    assert all(item.agent_version == "2.0.0" for item in run.calibrated_agents)
+    assert run.turn_planner_prompt_digest is not None
+    assert len(run.trials) == 8
+    assert all(item.deterministic_status == "passed" for item in run.trials)
+
+    packet = service.make_blind_packet(suite, run)
+    assert {item.task_kind for item in packet.samples} == {
+        "turn_planning",
+        "task_graph",
+        "patch_proposal",
+    }
+    judge_run = await service.judge(
+        suite,
+        run,
+        packet,
+        CalibratedJudgeProvider(),
+        build_id="phase115-independent-judge",
+        now=FIXED_NOW,
+    )
+    reviews = _review_bundle(
+        run.run_digest,
+        packet.packet_digest,
+        tuple(item.sample_id for item in packet.samples),
+    )
+    report = service.grade(
+        suite,
+        run,
+        packet,
+        judge_run,
+        reviews,
+        now=FIXED_NOW,
+    )
+    assert report.schema_version == "deskpilot.phase115-calibration-report.v3"
+    assert report.status == "passed"
+    assert report.calibrated_agents == run.calibrated_agents
+    assert report.turn_planner_prompt_digest == run.turn_planner_prompt_digest
 
 
 @pytest.mark.asyncio
