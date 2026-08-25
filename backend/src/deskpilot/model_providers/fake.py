@@ -462,6 +462,31 @@ class FakeModelProvider:
                 context_refs = request.metadata.get("task_graph_context_refs")
                 max_nodes = request.metadata.get("task_graph_max_nodes")
                 if (
+                    isinstance(capabilities, list)
+                    and capabilities
+                    and all(
+                        isinstance(item, dict) and "local_key" in item
+                        for item in capabilities
+                    )
+                    and isinstance(max_nodes, int)
+                    and len(capabilities) == max_nodes
+                ):
+                    return cast(
+                        dict[str, JsonValue],
+                        DynamicCoordinatorLoopDecision(
+                            root=AgentProposeTaskGraphDecision(
+                                nodes=tuple(
+                                    AgentTaskGraphNodeProposal.model_validate(item)
+                                    for item in capabilities
+                                ),
+                                output_node_key="run_fixed_test",
+                                decision_summary=(
+                                    "确认服务器封存的固定编码图，不扩展任何执行权限。"
+                                ),
+                            )
+                        ).model_dump(mode="json"),
+                    )
+                if (
                     not isinstance(capabilities, list)
                     or not capabilities
                     or not isinstance(capabilities[0], dict)

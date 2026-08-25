@@ -17,7 +17,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -25,12 +25,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
 from deskpilot.application.agent_model_loop import AgentModelLoopRuntime
-from deskpilot.application.agent_model_requests import build_patch_planner_model_request
+from deskpilot.application.agent_model_requests import (
+    build_dynamic_coordinator_model_request,
+    build_patch_planner_model_request,
+)
 from deskpilot.application.agent_verified_result_bridge import (
     AgentVerifiedResultBridge,
     AgentVerifiedResultBridgeError,
     AgentVerifiedResultPlanProof,
     ResearchAgentVerificationProof,
+    WorkspaceCodingCoordinatorVerificationProof,
     WorkspacePatchPlannerVerificationProof,
     WorkspaceReaderVerificationProof,
 )
@@ -44,6 +48,9 @@ from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import BoundAgentRef
 from deskpilot.domain.agent_loop import (
+    AgentProposeTaskGraphDecision,
+    AgentTaskGraphNodeProposal,
+    DynamicCoordinatorLoopDecision,
     WorkspacePatchLoopDecision,
     WorkspacePatchSubmitProposalDecision,
 )
@@ -106,6 +113,7 @@ AgentSourceParameter = Literal[
     "path",
     "primary_path",
     "secondary_path",
+    "project_path",
 ]
 
 
@@ -185,6 +193,13 @@ _PROFILES: dict[tuple[AgentSourceRoute, str], _AgentProfile] = {
         parameter_name="primary_path",
         agent_id="builtin.workspace_reader",
         capability_id="workspace.file.read.v1",
+    ),
+    ("workspace_coding_loop", "coordinate_coding"): _AgentProfile(
+        route_id="workspace_coding_loop",
+        source_local_key="coordinate_coding",
+        parameter_name="project_path",
+        agent_id="builtin.workspace_coordinator",
+        capability_id="workspace.dynamic.coordinate.v1",
     ),
     ("workspace_coding_loop", "inspect_secondary"): _AgentProfile(
         route_id="workspace_coding_loop",
@@ -505,6 +520,377 @@ class TaskLoopAgentRuntime:
         await self._record_agent_candidate(source, result)
         return result
 
+    async def run_coding_coordinator_candidate(
+        self,
+        source: SourceBoundAgentClaim,
+    ) -> AgentOutputResult:
+        """Persist one LOCAL-only confirmation of the server-sealed coding graph."""
+
+        profile = self._profile(source.binding)
+        if (
+            profile.route_id != "workspace_coding_loop"
+            or profile.source_local_key != "coordinate_coding"
+            or profile.agent_id != "builtin.workspace_coordinator"
+        ):
+            raise TaskLoopAgentConflictError(
+                "Source-bound claim is not the coding Coordinator node"
+            )
+        if self._model_loop is None:
+            raise TaskLoopAgentRuntimeUnavailableError(
+                "Coding Coordinator Model Turn runtime is unavailable"
+            )
+        task, expected = await self._coding_coordinator_context(source)
+        graph_material = {
+            "nodes": [item.model_dump(mode="json") for item in expected.nodes],
+            "output_node_key": expected.output_node_key,
+        }
+        graph_digest = sha256_digest(graph_material)
+        graph_binding_digest = sha256_digest(
+            {
+                "node_binding_digest": source.binding.binding_digest,
+                "graph_digest": graph_digest,
+            }
+        )
+        graph_binding_id = f"tgb_{graph_binding_digest}"
+        await self._mark_attempt_running(source)
+        await self._execution.start_invocation(
+            source.claimed.invocation.invocation_id,
+            source.claimed.claim_owner_id,
+            source.claimed.claim_fencing_token,
+        )
+        request = build_dynamic_coordinator_model_request(
+            request_id=(
+                "task-loop-coordinate-"
+                f"{source.claimed.invocation.invocation_id[-20:]}"
+            ),
+            task_id=source.binding.task_id,
+            privacy_mode=cast(PrivacyMode, task.privacy_mode),
+            budget=source.claimed.handoff.budget_allocation,
+            phase="propose_task_graph",
+            offered_capabilities=[
+                cast(dict[str, object], item.model_dump(mode="json"))
+                for item in expected.nodes
+            ],
+            allowed_context_refs=("task_contract", "conversation_message"),
+            max_nodes=len(expected.nodes),
+            repair_advice=None,
+            import_sources=[],
+        )
+        dispatched = await self._model_loop.dispatch(
+            source.claimed,
+            turn_no=1,
+            request=request,
+            decision_model=DynamicCoordinatorLoopDecision,
+        )
+        proposal = cast(DynamicCoordinatorLoopDecision, dispatched.decision).root
+        if (
+            not isinstance(proposal, AgentProposeTaskGraphDecision)
+            or proposal.nodes != expected.nodes
+            or proposal.output_node_key != expected.output_node_key
+        ):
+            await self._model_loop.fail(
+                source.claimed,
+                dispatched.turn_id,
+                "TASK_LOOP_COORDINATOR_GRAPH_REJECTED",
+                sha256_digest(proposal),
+            )
+            await self._settle_model_rejected(
+                source,
+                error_code="TASK_LOOP_COORDINATOR_GRAPH_REJECTED",
+            )
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Coordinator changed the server-sealed graph"
+            )
+        decision_id = await self._model_loop.accept(
+            source.claimed,
+            dispatched,
+            proposal,
+            binding_id=graph_binding_id,
+        )
+        decision_digest = sha256_digest(
+            {
+                "turn_id": dispatched.turn_id,
+                "invocation_id": source.claimed.invocation.invocation_id,
+                "decision": proposal.model_dump(mode="json"),
+                "response_digest": sha256_digest(dispatched.response),
+            }
+        )
+        result = self._coding_coordinator_agent_result(
+            source,
+            proposal,
+            graph_digest=graph_digest,
+            decision_id=decision_id,
+            decision_digest=decision_digest,
+            request_digest=dispatched.request_digest,
+            response_digest=sha256_digest(dispatched.response),
+        )
+        await self._execution.submit_result(
+            result,
+            owner_id=source.claimed.claim_owner_id,
+            fencing_token=source.claimed.claim_fencing_token,
+        )
+        await self._verify_coding_coordinator_result(
+            source,
+            result,
+            expected,
+            graph_binding_id=graph_binding_id,
+            graph_digest=graph_digest,
+        )
+        await self._record_agent_candidate(source, result)
+        return result
+
+    async def _coding_coordinator_context(
+        self,
+        source: SourceBoundAgentClaim,
+    ) -> tuple[TaskRecord, AgentProposeTaskGraphDecision]:
+        async with self._database.session() as session:
+            task = await session.get(TaskRecord, source.binding.task_id)
+            record = await session.scalar(
+                select(TaskPlanGenerationRecord).where(
+                    TaskPlanGenerationRecord.task_id == source.binding.task_id,
+                    TaskPlanGenerationRecord.plan_id
+                    == source.binding.composite_plan_id,
+                    TaskPlanGenerationRecord.plan_manifest_digest
+                    == source.binding.composite_plan_manifest_digest,
+                    TaskPlanGenerationRecord.status == "active",
+                )
+            )
+        if task is None or record is None:
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Coordinator lost its active sealed Plan"
+            )
+        try:
+            plan = ExecutablePlan.model_validate(record.manifest)
+        except ValidationError as error:
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Coordinator sealed Plan Schema was rejected"
+            ) from error
+        return task, self._coding_proposal_from_plan(source.binding, plan)
+
+    @staticmethod
+    def _coding_proposal_from_plan(
+        binding: ModelPlannerNodeBinding,
+        plan: ExecutablePlan,
+    ) -> AgentProposeTaskGraphDecision:
+        keys = (
+            "inspect_primary",
+            "inspect_secondary",
+            "plan_primary_patch",
+            "plan_secondary_patch",
+            "apply_patch",
+            "run_fixed_test",
+        )
+        prefix = f"s{binding.step_ordinal:02d}_"
+        by_key = {
+            item.local_key.removeprefix(prefix): item
+            for item in plan.nodes
+            if item.local_key.startswith(prefix)
+        }
+        if set(keys) - set(by_key) or "coordinate_coding" not in by_key:
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Coordinator fixed Plan nodes changed"
+            )
+        node_id_to_key = {item.node_id: key for key, item in by_key.items()}
+        input_specs: dict[str, tuple[str, str]] = {
+            "inspect_primary": ("route_explicit_file_path", "primary_path"),
+            "inspect_secondary": ("route_explicit_file_path", "secondary_path"),
+            "plan_primary_patch": ("route_patch_test_spec", "primary_change"),
+            "plan_secondary_patch": ("route_patch_test_spec", "secondary_change"),
+            "apply_patch": ("route_patch_test_spec", "patch_bundle"),
+            "run_fixed_test": (
+                (
+                    "route_python_test_spec"
+                    if binding.bound_input_manifest.get("test_kind") == "python"
+                    else "route_node_test_spec"
+                ),
+                "fixed_test",
+            ),
+        }
+        expected_capabilities = {
+            "inspect_primary": "workspace.file.read.v1",
+            "inspect_secondary": "workspace.file.read.v1",
+            "plan_primary_patch": "workspace.patch.propose.v1",
+            "plan_secondary_patch": "workspace.patch.propose.v1",
+            "apply_patch": "workspace.patch.bundle.v1",
+            "run_fixed_test": (
+                "workspace.python.test.v1"
+                if binding.bound_input_manifest.get("test_kind") == "python"
+                else "workspace.node.test.v1"
+            ),
+        }
+        expected_dependencies: dict[str, tuple[str, ...]] = {
+            "inspect_primary": (),
+            "inspect_secondary": (),
+            "plan_primary_patch": ("inspect_primary",),
+            "plan_secondary_patch": ("inspect_secondary",),
+            "apply_patch": ("plan_primary_patch", "plan_secondary_patch"),
+            "run_fixed_test": ("apply_patch",),
+        }
+        if binding.bound_input_manifest.get("test_kind") not in {"python", "node"}:
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Coordinator fixed test ecosystem changed"
+            )
+        proposals: list[AgentTaskGraphNodeProposal] = []
+        known = set(keys)
+        for key in keys:
+            node = by_key[key]
+            if node.capability is None:
+                raise TaskLoopAgentProofRejectedError(
+                    "Coding Coordinator downstream node lost its Capability"
+                )
+            input_source, binding_key = input_specs[key]
+            dependencies = tuple(
+                node_id_to_key[item]
+                for item in node.depends_on
+                if node_id_to_key.get(item) in known
+            )
+            if (
+                node.capability.capability_id != expected_capabilities[key]
+                or set(dependencies) != set(expected_dependencies[key])
+                or len(dependencies) != len(expected_dependencies[key])
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Coding Coordinator downstream Capability or dependency changed"
+                )
+            proposals.append(
+                AgentTaskGraphNodeProposal(
+                    local_key=key,
+                    target_capability_id=node.capability.capability_id,
+                    objective=node.objective,
+                    context_refs=("task_contract", "conversation_message"),
+                    input_source=cast(Any, input_source),
+                    input_binding_key=binding_key,
+                    depends_on=expected_dependencies[key],
+                    budget_slice=node.budget,
+                )
+            )
+        return AgentProposeTaskGraphDecision(
+            nodes=tuple(proposals),
+            output_node_key="run_fixed_test",
+            decision_summary="Confirm the exact server-sealed coding graph.",
+        )
+
+    async def _verify_coding_coordinator_result(
+        self,
+        source: SourceBoundAgentClaim,
+        result: AgentOutputResult,
+        expected: AgentProposeTaskGraphDecision,
+        *,
+        graph_binding_id: str,
+        graph_digest: str,
+    ) -> None:
+        async with self._database.session() as session, session.begin():
+            invocation = await session.get(
+                AgentInvocationRecord,
+                result.invocation_id,
+                with_for_update=True,
+            )
+            node = await session.get(
+                TaskExecutionNodeRecord,
+                source.binding.composite_node_id,
+                with_for_update=True,
+            )
+            persisted_result = await session.get(AgentResultRecord, result.result_id)
+            turns = tuple(
+                (await session.scalars(select(AgentModelTurnRecord).where(
+                    AgentModelTurnRecord.invocation_id == result.invocation_id
+                ))).all()
+            )
+            decisions = tuple(
+                (await session.scalars(select(AgentDecisionRecord).where(
+                    AgentDecisionRecord.invocation_id == result.invocation_id
+                ))).all()
+            )
+            if (
+                invocation is None
+                or node is None
+                or persisted_result is None
+                or len(turns) != 1
+                or len(decisions) != 1
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Coding Coordinator candidate persistence is incomplete"
+                )
+            turn, decision = turns[0], decisions[0]
+            try:
+                proposal = AgentProposeTaskGraphDecision.model_validate(decision.manifest)
+            except ValidationError as error:
+                raise TaskLoopAgentProofRejectedError(
+                    "Coding Coordinator decision Schema was rejected"
+                ) from error
+            decision_material = {
+                "turn_id": turn.turn_id,
+                "invocation_id": invocation.invocation_id,
+                "decision": decision.manifest,
+                "response_digest": turn.response_digest,
+            }
+            parsed_result = AgentOutputResult.model_validate(persisted_result.manifest)
+            if (
+                proposal.nodes != expected.nodes
+                or proposal.output_node_key != expected.output_node_key
+                or invocation.result_id != result.result_id
+                or invocation.execution_status != "result_submitted"
+                or invocation.verification_status not in {"pending", "verified"}
+                or node.status != "awaiting_verification"
+                or persisted_result.result_digest != result.result_digest
+                or turn.turn_no != 1
+                or turn.status != "succeeded"
+                or turn.response_digest is None
+                or decision.turn_id != turn.turn_id
+                or decision.kind != "propose_task_graph"
+                or decision.binding_id != graph_binding_id
+                or decision.decision_digest != sha256_digest(decision_material)
+                or parsed_result.output.get("graph_digest") != graph_digest
+                or result.input_digest != turn.request_digest
+                or result.model_response_digest != turn.response_digest
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Coding Coordinator candidate crossed its sealed graph binding"
+                )
+            if invocation.verification_status == "pending":
+                invocation.verification_status = "verified"
+                invocation.revision += 1
+
+    @staticmethod
+    def _coding_coordinator_agent_result(
+        source: SourceBoundAgentClaim,
+        proposal: AgentProposeTaskGraphDecision,
+        *,
+        graph_digest: str,
+        decision_id: str,
+        decision_digest: str,
+        request_digest: str,
+        response_digest: str,
+    ) -> AgentOutputResult:
+        output = {
+            "nodes": [item.model_dump(mode="json") for item in proposal.nodes],
+            "output_node_key": proposal.output_node_key,
+            "graph_digest": graph_digest,
+            "decision_digest": decision_digest,
+        }
+        identity = {
+            "invocation_id": source.claimed.invocation.invocation_id,
+            "attempt": source.claimed.invocation.attempt,
+            "decision_digest": decision_digest,
+        }
+        material = {
+            "schema_version": "deskpilot.agent-output-result.v1",
+            "result_id": f"res_{sha256_digest(identity)}",
+            "invocation_id": source.claimed.invocation.invocation_id,
+            "disposition": "candidate",
+            "output": output,
+            "evidence_refs": (f"agent-decision:{decision_id}",),
+            "limitation_codes": (),
+            "input_digest": request_digest,
+            "model_response_digest": response_digest,
+            "output_schema_digest": sha256_digest(
+                AgentProposeTaskGraphDecision.model_json_schema()
+            ),
+        }
+        return AgentOutputResult.model_validate(
+            {**material, "result_digest": sha256_digest(material)}
+        )
+
     async def run_patch_planner_candidate(
         self,
         source: SourceBoundAgentClaim,
@@ -606,6 +992,10 @@ class TaskLoopAgentRuntime:
                 dispatched.turn_id,
                 "TASK_LOOP_PATCH_PROPOSAL_REJECTED",
                 sha256_digest(proposal),
+            )
+            await self._settle_model_rejected(
+                source,
+                error_code="TASK_LOOP_PATCH_PROPOSAL_REJECTED",
             )
             raise TaskLoopAgentProofRejectedError(
                 "Patch Planner changed the exact server-offered replacement"
@@ -995,6 +1385,56 @@ class TaskLoopAgentRuntime:
                             verification_proof.evidence_snapshot.snapshot_digest
                         ),
                     }
+                elif profile.agent_id == "builtin.workspace_coordinator":
+                    expected_proposal = self._coding_proposal_from_plan(
+                        binding,
+                        composite_plan,
+                    )
+                    coordinator_proof = await self._coding_coordinator_proof(
+                        session,
+                        invocation,
+                    )
+                    graph_digest = sha256_digest(
+                        {
+                            "nodes": [
+                                item.model_dump(mode="json")
+                                for item in expected_proposal.nodes
+                            ],
+                            "output_node_key": expected_proposal.output_node_key,
+                        }
+                    )
+                    graph_binding_digest = sha256_digest(
+                        {
+                            "node_binding_digest": binding.binding_digest,
+                            "graph_digest": graph_digest,
+                        }
+                    )
+                    graph_binding_id = f"tgb_{graph_binding_digest}"
+                    result_ref = (
+                        AgentVerifiedResultBridge.workspace_coding_coordinator(
+                            plan_proof,
+                            coordinator_proof,
+                            expected_proposal=expected_proposal,
+                            expected_graph_binding_id=graph_binding_id,
+                            allow_pending_node_transition=True,
+                        )
+                    )
+                    parsed_result = AgentOutputResult.model_validate(result.manifest)
+                    output_manifest = {
+                        **parsed_result.output,
+                        "result_digest": result.result_digest,
+                    }
+                    verification_manifest = {
+                        "schema_version": (
+                            "deskpilot.agent-result-verification-reference.v1"
+                        ),
+                        "model_turn_id": coordinator_proof.model_turn.turn_id,
+                        "decision_id": coordinator_proof.decision.decision_id,
+                        "decision_digest": coordinator_proof.decision.decision_digest,
+                        "graph_digest": graph_digest,
+                        "verification_digest": result_ref.verification_digest,
+                        "agent_result_digest": result.result_digest,
+                    }
                 elif profile.agent_id == "builtin.workspace_patch_planner":
                     expected_change = self._expected_patch_change(
                         binding,
@@ -1244,6 +1684,97 @@ class TaskLoopAgentRuntime:
                 run.status = "failed"
                 run.revision += 1
                 run.updated_at = now
+
+    async def _settle_model_rejected(
+        self,
+        source: SourceBoundAgentClaim,
+        *,
+        error_code: str,
+    ) -> None:
+        """Fail one bounded model node after a usable but unauthorized decision."""
+
+        async with self._database.session() as session, session.begin():
+            record = await session.scalar(
+                select(TaskLoopNodeAttemptRecord)
+                .where(
+                    TaskLoopNodeAttemptRecord.attempt_id
+                    == source.attempt.attempt_id
+                )
+                .with_for_update()
+            )
+            node = await session.scalar(
+                select(TaskExecutionNodeRecord)
+                .where(
+                    TaskExecutionNodeRecord.node_id
+                    == source.binding.composite_node_id
+                )
+                .with_for_update()
+            )
+            run = await session.scalar(
+                select(TaskExecutionRunRecord)
+                .where(TaskExecutionRunRecord.run_id == source.attempt.run_id)
+                .with_for_update()
+            )
+            invocation = await session.scalar(
+                select(AgentInvocationRecord)
+                .where(
+                    AgentInvocationRecord.invocation_id
+                    == source.claimed.invocation.invocation_id
+                )
+                .with_for_update()
+            )
+            if record is None or node is None or run is None or invocation is None:
+                raise TaskLoopAgentNotFoundError(
+                    "Rejected model attempt, Invocation, node, or Run disappeared"
+                )
+            previous = self._attempt_from_record(record)
+            if (
+                previous.execution_id != source.execution_id
+                or previous.node_binding_id != source.binding.node_binding_id
+                or previous.status != "running"
+                or node.status != "running"
+                or invocation.execution_status != "running"
+                or invocation.verification_status != "not_requested"
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Rejected model decision crossed its running attempt"
+                )
+            now = utc_now()
+            error_digest = sha256_digest(
+                {
+                    "attempt_id": previous.attempt_id,
+                    "invocation_id": invocation.invocation_id,
+                    "error_code": error_code,
+                }
+            )
+            material = previous.model_dump(mode="python", exclude={"attempt_digest"})
+            material.update(
+                {
+                    "status": "failed",
+                    "revision": previous.revision + 1,
+                    "claim_owner_id": None,
+                    "claim_acquired_at": None,
+                    "claim_expires_at": None,
+                    "error_code": error_code,
+                    "error_digest": error_digest,
+                    "updated_at": now,
+                }
+            )
+            self._apply_attempt_record(record, self._build_attempt(material))
+            invocation.execution_status = "failed_terminal"
+            invocation.verification_status = "rejected"
+            invocation.finished_at = now
+            invocation.revision += 1
+            node.status = "failed"
+            node.revision += 1
+            node.claim_owner_id = None
+            node.claim_acquired_at = None
+            node.claim_heartbeat_at = None
+            node.claim_expires_at = None
+            node.updated_at = now
+            run.status = "failed"
+            run.revision += 1
+            run.updated_at = now
 
     async def _select_next(
         self,
@@ -1920,6 +2451,40 @@ class TaskLoopAgentRuntime:
                 "Patch Planner has no unique persisted ModelTurn decision"
             )
         return WorkspacePatchPlannerVerificationProof(
+            model_turn=turns[0],
+            decision=decisions[0],
+        )
+
+    @staticmethod
+    async def _coding_coordinator_proof(
+        session: AsyncSession,
+        invocation: AgentInvocationRecord,
+    ) -> WorkspaceCodingCoordinatorVerificationProof:
+        turns = tuple(
+            (
+                await session.scalars(
+                    select(AgentModelTurnRecord).where(
+                        AgentModelTurnRecord.invocation_id
+                        == invocation.invocation_id
+                    )
+                )
+            ).all()
+        )
+        decisions = tuple(
+            (
+                await session.scalars(
+                    select(AgentDecisionRecord).where(
+                        AgentDecisionRecord.invocation_id
+                        == invocation.invocation_id
+                    )
+                )
+            ).all()
+        )
+        if len(turns) != 1 or len(decisions) != 1:
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Coordinator has no unique persisted ModelTurn decision"
+            )
+        return WorkspaceCodingCoordinatorVerificationProof(
             model_turn=turns[0],
             decision=decisions[0],
         )

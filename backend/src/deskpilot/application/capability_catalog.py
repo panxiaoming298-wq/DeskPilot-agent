@@ -266,6 +266,19 @@ def create_builtin_capability_catalog(
                 workspace_write=False,
             ),
             _pack(
+                capability_id="workspace.dynamic.coordinate.v1",
+                runtime_enabled=True,
+                description=(
+                    "只确认服务器封存的固定任务图、依赖与预算；不授予新路径、"
+                    "工具、节点或权限。"
+                ),
+                allowed_operations=("conversation-workspace.graph.confirm",),
+                max_risk_level=ToolRiskLevel.R0,
+                external_ingress=True,
+                external_egress=False,
+                workspace_write=False,
+            ),
+            _pack(
                 capability_id="workspace.patch.propose.v1",
                 runtime_enabled=True,
                 description=(

@@ -31,7 +31,9 @@ class TaskLoopAgentAdapterManifest(BaseModel):
     agent_id: str = Field(min_length=1, max_length=128)
     agent_versions: tuple[str, ...] = Field(min_length=1, max_length=8)
     capability_id: str = Field(min_length=1, max_length=128)
-    parameter_name: Literal["goal", "path", "primary_path", "secondary_path"]
+    parameter_name: Literal[
+        "goal", "path", "primary_path", "secondary_path", "project_path"
+    ]
     runtime_enabled: Literal[True] = True
     manifest_digest: str = Field(pattern=DIGEST_PATTERN)
 
@@ -139,6 +141,15 @@ def create_task_loop_agent_adapter_registry(
     if workspace_coding_loop_available:
         manifests.extend(
             (
+                TaskLoopAgentAdapterManifest.build(
+                    adapter_id="builtin.task-loop.workspace-coding-coordinator.v1",
+                    route_id="workspace_coding_loop",
+                    source_local_key="coordinate_coding",
+                    agent_id="builtin.workspace_coordinator",
+                    agent_versions=("1.1.0",),
+                    capability_id="workspace.dynamic.coordinate.v1",
+                    parameter_name="project_path",
+                ),
                 TaskLoopAgentAdapterManifest.build(
                     adapter_id="builtin.task-loop.workspace-coding-primary.v1",
                     route_id="workspace_coding_loop",

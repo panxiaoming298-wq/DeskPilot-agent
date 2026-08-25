@@ -314,7 +314,9 @@ class TaskLoopExecutionCoordinator:
         elif source.route_id == "workspace_file_read":
             await self._agents.run_workspace_file_candidate(source)
         elif source.route_id == "workspace_coding_loop":
-            if source.binding.mapping.source_local_key in {
+            if source.binding.mapping.source_local_key == "coordinate_coding":
+                await self._agents.run_coding_coordinator_candidate(source)
+            elif source.binding.mapping.source_local_key in {
                 "inspect_primary",
                 "inspect_secondary",
             }:
@@ -692,7 +694,7 @@ class TaskLoopExecutionCoordinator:
         )
         if not coding_bindings:
             return
-        if len(coding_bindings) != 6 or len(coding_bindings) != len(bindings):
+        if len(coding_bindings) != 7 or len(coding_bindings) != len(bindings):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery has an incomplete Route binding set"
             )
@@ -740,6 +742,11 @@ class TaskLoopExecutionCoordinator:
             for item in results
             if item.result_kind == CapabilityResultKind.WORKSPACE_FILE.value
         )
+        coordinator_results = tuple(
+            item
+            for item in results
+            if item.result_kind == CapabilityResultKind.COORDINATION_PLAN.value
+        )
         patch_results = tuple(
             item
             for item in results
@@ -760,7 +767,8 @@ class TaskLoopExecutionCoordinator:
             }
         )
         if (
-            len(reader_results) != 2
+            len(coordinator_results) != 1
+            or len(reader_results) != 2
             or len(proposal_results) != 2
             or len(patch_results) != 1
             or not 1 <= len(test_results) <= 2
@@ -768,6 +776,79 @@ class TaskLoopExecutionCoordinator:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery evidence cardinality changed"
             )
+        coordination_result = coordinator_results[0]
+        coordination_attempt = attempts[coordination_result.attempt_id]
+        coordination_output = coordination_result.output_manifest
+        coordination_verification = coordination_result.verification_manifest
+        raw_graph_nodes = coordination_output.get("nodes")
+        output_node_key = coordination_output.get("output_node_key")
+        graph_digest = coordination_output.get("graph_digest")
+        coordinator_agent = coordination_result.agent_binding_manifest or {}
+        coordinator_binding = next(
+            (
+                item
+                for item in coding_bindings
+                if item.mapping_manifest.get("source_local_key")
+                == "coordinate_coding"
+            ),
+            None,
+        )
+        reader_bindings = tuple(
+            item
+            for item in coding_bindings
+            if item.mapping_manifest.get("source_local_key")
+            in {"inspect_primary", "inspect_secondary"}
+        )
+        reader_nodes = tuple(
+            (
+                await session.scalars(
+                    select(TaskExecutionNodeRecord).where(
+                        TaskExecutionNodeRecord.node_id.in_(
+                            [item.composite_node_id for item in reader_bindings]
+                        )
+                    )
+                )
+            ).all()
+        )
+        if (
+            coordination_attempt.status != "verified"
+            or coordinator_binding is None
+            or len(reader_bindings) != 2
+            or len(reader_nodes) != 2
+            or any(
+                item.depends_on != [coordinator_binding.composite_node_id]
+                for item in reader_nodes
+            )
+            or not isinstance(raw_graph_nodes, list)
+            or len(raw_graph_nodes) != 6
+            or output_node_key != "run_fixed_test"
+            or not isinstance(graph_digest, str)
+            or graph_digest
+            != sha256_digest(
+                {
+                    "nodes": raw_graph_nodes,
+                    "output_node_key": output_node_key,
+                }
+            )
+            or coordination_verification.get("graph_digest") != graph_digest
+            or not isinstance(coordination_verification.get("decision_digest"), str)
+            or coordinator_agent.get("agent_id")
+            != "builtin.workspace_coordinator"
+            or coordinator_agent.get("version") != "1.1.0"
+        ):
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding Coordinator graph proof changed"
+            )
+        coordinator_evidence = {
+            "agent_id": "builtin.workspace_coordinator",
+            "agent_version": "1.1.0",
+            "node_count": len(raw_graph_nodes),
+            "output_node_key": output_node_key,
+            "graph_digest": graph_digest,
+            "decision_digest": coordination_verification["decision_digest"],
+            "result_ref_digest": coordination_result.result_ref_digest,
+            "verification_digest": coordination_result.verification_digest,
+        }
         try:
             readers = tuple(
                 WorkspaceFileRead.model_validate(item.output_manifest)
@@ -961,6 +1042,7 @@ class TaskLoopExecutionCoordinator:
             "plan_generation": execution.plan_generation,
             "plan_manifest_digest": execution.plan_manifest_digest,
             "reader_evidence": reader_evidence,
+            "coordinator_evidence": coordinator_evidence,
             "patch_planner_evidence": sorted(
                 proposal_evidence,
                 key=lambda item: str(item["path"]),

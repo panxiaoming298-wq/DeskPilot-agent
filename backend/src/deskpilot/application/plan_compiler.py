@@ -1456,6 +1456,7 @@ def workspace_coding_loop_contract(
 
     suffix = task_id.removeprefix("tsk_")
     capability_ids = (
+        "workspace.dynamic.coordinate.v1",
         "workspace.file.read.v1",
         "workspace.patch.propose.v1",
         "workspace.patch.bundle.v1",
@@ -1479,7 +1480,8 @@ def workspace_coding_loop_contract(
         version=1,
         goal_ref=f"artifact://task-input/{task_id}",
         normalized_objective=(
-            "由两个独立本地 Reader 并行读取服务器绑定文件；两个无执行权 Patch Planner"
+            "由受约束 Coordinator 确认服务器封存的固定编码图；两个独立本地 Reader"
+            "并行读取服务器绑定文件；两个无执行权 Patch Planner"
             "只能提议服务器封存的精确替换；全部结果分别验证后执行经用户确认的多文件"
             "Patch，再运行服务器固定测试并独立验收交付"
         ),
@@ -1488,7 +1490,8 @@ def workspace_coding_loop_contract(
                 criterion_id="ac_workspace_coding_loop",
                 kind=AcceptanceKind.OUTPUT_REQUIREMENT,
                 description=(
-                    "结果必须绑定两个 Reader ResultRef、两个 Patch Proposal ResultRef、"
+                    "结果必须绑定一个 Coordinator 图确认、两个 Reader ResultRef、"
+                    "两个 Patch Proposal ResultRef、"
                     "内容寻址 Patch 回执、固定测试结果、失败/Repair 历史和最终确定性验收。"
                 ),
                 verification_requirement=VerificationRequirement.DETERMINISTIC,
@@ -1497,6 +1500,7 @@ def workspace_coding_loop_contract(
         ),
         constraints=(
             "local_only_coding_loop_v1",
+            "server_bounded_coordinator_graph_v1",
             "two_independent_read_only_children_v1",
             "verified_result_join_before_patch_planner_v1",
             "unprivileged_patch_planner_model_turn_v1",
@@ -1517,15 +1521,15 @@ def workspace_coding_loop_contract(
         ),
         max_risk_level=ToolRiskLevel.R1,
         budget=TaskBudget(
-            max_model_calls=4,
+            max_model_calls=5,
             max_tool_calls=4,
-            max_input_tokens=40_000,
-            max_output_tokens=4_000,
-            max_wall_seconds=600,
+            max_input_tokens=56_000,
+            max_output_tokens=6_000,
+            max_wall_seconds=660,
             max_retries=1,
-            max_cost_micros=200_000,
+            max_cost_micros=300_000,
             max_handoffs=0,
-            max_plan_nodes=8,
+            max_plan_nodes=9,
         ),
         output_contract=OutputContract(media_type="application/json", language="zh-CN"),
         capabilities=refs,
@@ -1539,6 +1543,16 @@ def workspace_coding_loop_draft(
     test_kind: Literal["python", "node"],
     contract_version: int = 1,
 ) -> DraftPlan:
+    coordinator_budget = PlanNodeBudget(
+        model_calls=1,
+        tool_calls=0,
+        input_tokens=12_000,
+        output_tokens=2_000,
+        wall_seconds=60,
+        retries=0,
+        cost_micros=100_000,
+        handoffs=0,
+    )
     reader_budget = PlanNodeBudget(
         model_calls=1,
         tool_calls=1,
@@ -1603,11 +1617,24 @@ def workspace_coding_loop_draft(
         ),
         nodes=(
             DraftPlanNode(
+                local_key="coordinate_coding",
+                kind=DraftNodeKind.AGENT,
+                objective=(
+                    "只确认服务器封存的六节点编码图、精确依赖和预算；不得创建"
+                    "路径、工具、节点、预算或权限。"
+                ),
+                agent_selector="builtin.workspace_coordinator",
+                capability_requirements=("workspace.dynamic.coordinate.v1",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=coordinator_budget,
+            ),
+            DraftPlanNode(
                 local_key="inspect_primary",
                 kind=DraftNodeKind.AGENT,
                 objective="独立读取主要目标文件并形成确定性版本证明。",
                 agent_selector="builtin.workspace_reader",
                 capability_requirements=("workspace.file.read.v1",),
+                depends_on=("coordinate_coding",),
                 verification_profile=VerificationProfile.DETERMINISTIC,
                 budget=reader_budget,
             ),
@@ -1617,6 +1644,7 @@ def workspace_coding_loop_draft(
                 objective="独立读取上下文文件并形成确定性版本证明。",
                 agent_selector="builtin.workspace_reader",
                 capability_requirements=("workspace.file.read.v1",),
+                depends_on=("coordinate_coding",),
                 verification_profile=VerificationProfile.DETERMINISTIC,
                 budget=reader_budget,
             ),

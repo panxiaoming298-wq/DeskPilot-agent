@@ -703,6 +703,18 @@ class WorkspaceCodingPlannerEvidenceRead(BaseModel):
     verification_digest: str = Field(pattern=DIGEST_PATTERN)
 
 
+class WorkspaceCodingCoordinatorEvidenceRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    agent_id: Literal["builtin.workspace_coordinator"]
+    agent_version: Literal["1.1.0"]
+    node_count: Literal[6]
+    output_node_key: Literal["run_fixed_test"]
+    graph_digest: str = Field(pattern=DIGEST_PATTERN)
+    decision_digest: str = Field(pattern=DIGEST_PATTERN)
+    verification_digest: str = Field(pattern=DIGEST_PATTERN)
+
+
 class WorkspaceCodingTestRunRead(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -742,6 +754,7 @@ class WorkspaceCodingDeliveryWorkbenchRead(BaseModel):
     delivery_id: str = Field(pattern=r"^wcd_[0-9a-f]{64}$")
     changed_files: tuple[str, ...] = Field(min_length=2, max_length=2)
     changes: tuple[WorkspaceCodingChangeRead, ...] = Field(min_length=2, max_length=2)
+    coordinator_evidence: WorkspaceCodingCoordinatorEvidenceRead
     patch_planner_evidence: tuple[WorkspaceCodingPlannerEvidenceRead, ...] = Field(
         min_length=2,
         max_length=2,

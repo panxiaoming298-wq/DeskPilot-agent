@@ -50,6 +50,7 @@ from deskpilot.domain.task_loop_execution import (
     TaskLoopNodeAttempt,
     TaskLoopVerifiedResult,
     WorkspaceCodingChangeRead,
+    WorkspaceCodingCoordinatorEvidenceRead,
     WorkspaceCodingDeliveryWorkbenchRead,
     WorkspaceCodingFailureRepairRead,
     WorkspaceCodingPlannerEvidenceRead,
@@ -1304,6 +1305,7 @@ class TaskLoopActivationRuntime:
             )
         try:
             raw_changes = manifest["structured_diff"]
+            raw_coordinator = manifest["coordinator_evidence"]
             raw_planners = manifest["patch_planner_evidence"]
             raw_tests = manifest["test_runs"]
             raw_failures = manifest["failure_repair_history"]
@@ -1324,6 +1326,19 @@ class TaskLoopActivationRuntime:
             changes = tuple(
                 WorkspaceCodingChangeRead.model_validate(item)
                 for item in raw_changes
+            )
+            coordinator = WorkspaceCodingCoordinatorEvidenceRead.model_validate(
+                {
+                    "agent_id": raw_coordinator["agent_id"],
+                    "agent_version": raw_coordinator["agent_version"],
+                    "node_count": raw_coordinator["node_count"],
+                    "output_node_key": raw_coordinator["output_node_key"],
+                    "graph_digest": raw_coordinator["graph_digest"],
+                    "decision_digest": raw_coordinator["decision_digest"],
+                    "verification_digest": raw_coordinator[
+                        "verification_digest"
+                    ],
+                }
             )
             planners = tuple(
                 WorkspaceCodingPlannerEvidenceRead.model_validate(
@@ -1393,6 +1408,7 @@ class TaskLoopActivationRuntime:
             delivery_id=record.delivery_id,
             changed_files=changed_files,
             changes=tuple(sorted(changes, key=lambda item: item.path)),
+            coordinator_evidence=coordinator,
             patch_planner_evidence=tuple(
                 sorted(planners, key=lambda item: item.path)
             ),

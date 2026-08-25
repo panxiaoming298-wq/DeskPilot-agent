@@ -30,6 +30,7 @@ from deskpilot.application.task_loop_agent_adapter_registry import (
 )
 from deskpilot.application.task_loop_agent_runtime import (
     TaskLoopAgentConflictError,
+    TaskLoopAgentProofRejectedError,
     TaskLoopAgentRuntime,
 )
 from deskpilot.application.task_loop_execution_coordinator import (
@@ -46,6 +47,7 @@ from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
     AgentModelTurnRecord,
     ConversationMessageRecord,
+    TaskExecutionNodeRecord,
     TaskLoopCapabilityApprovalRecord,
     TaskLoopNodeAttemptRecord,
     TaskLoopVerifiedResultRecord,
@@ -141,6 +143,25 @@ def _propose_bound_patch(request: Any) -> dict[str, Any]:
     }
 
 
+def _confirm_bound_coding_graph(request: Any) -> dict[str, Any]:
+    nodes = request.metadata["task_graph_allowed_capabilities"]
+    assert isinstance(nodes, list) and len(nodes) == 6
+    return {
+        "schema_version": "deskpilot.agent-decision.v1",
+        "kind": "propose_task_graph",
+        "nodes": nodes,
+        "output_node_key": "run_fixed_test",
+        "decision_summary": "Confirm the exact server-sealed coding graph.",
+    }
+
+
+def _tamper_bound_coding_graph(request: Any) -> dict[str, Any]:
+    decision = _confirm_bound_coding_graph(request)
+    nodes = json.loads(json.dumps(decision["nodes"]))
+    nodes[0]["objective"] = f"{nodes[0]['objective']} unauthorized drift"
+    return {**decision, "nodes": nodes}
+
+
 class _PassThroughContextMemory:
     async def build_for_turn(self, *args: Any) -> tuple[None, Any]:
         return None, args[-1]
@@ -204,7 +225,12 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
     )
     await database.migrate()
     provider = ScriptedTurnPlannerProvider(
-        [_select_coding_loop, _propose_bound_patch, _propose_bound_patch]
+        [
+            _select_coding_loop,
+            _confirm_bound_coding_graph,
+            _propose_bound_patch,
+            _propose_bound_patch,
+        ]
     )
     planner, planning, task_loops, _composer = _runtimes(database, provider)
     workspace_root = tmp_path / "workspace"
@@ -319,6 +345,14 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
         await task_loops.plan(task_id)
         await coordinator.advance(task_id, "activate-worker")
 
+        coordinated = await coordinator.advance(task_id, "coordinator-worker")
+        assert coordinated.command.kind == "execute_agent"
+        coordination_verified = await coordinator.advance(
+            task_id,
+            "coordinator-verifier",
+        )
+        assert coordination_verified.command.kind == "verify_candidate"
+
         parallel = await coordinator.advance(task_id, "parallel-reader-worker")
         assert parallel.command.kind == "execute_agent_batch"
         assert len(parallel.command.node_ids) == 2
@@ -424,6 +458,19 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
             "passed",
         ]
         assert len(public_payload["patch_planner_evidence"]) == 2
+        assert public_payload["coordinator_evidence"] == {
+            "agent_id": "builtin.workspace_coordinator",
+            "agent_version": "1.1.0",
+            "node_count": 6,
+            "output_node_key": "run_fixed_test",
+            "graph_digest": public_payload["coordinator_evidence"]["graph_digest"],
+            "decision_digest": public_payload["coordinator_evidence"][
+                "decision_digest"
+            ],
+            "verification_digest": public_payload["coordinator_evidence"][
+                "verification_digest"
+            ],
+        }
 
         async with database.session() as session:
             attempts = tuple(
@@ -466,9 +513,10 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
             "local_fake_model_quality_unproven",
             "git_commit_not_created",
         ]
-        assert len(model_turns) == 2
+        assert len(model_turns) == 3
         assert all(item.status == "succeeded" for item in model_turns)
         assert sorted(item.result_kind for item in results) == [
+            "coordination_plan",
             "patch_proposal",
             "patch_proposal",
             "patch_receipt",
@@ -496,6 +544,144 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
         await database.dispose()
 
 
+@pytest.mark.asyncio
+async def test_coding_coordinator_rejects_graph_drift_before_readers(
+    tmp_path: Path,
+) -> None:
+    database = Database(
+        f"sqlite+aiosqlite:///{(tmp_path / 'coordinator-drift.db').as_posix()}"
+    )
+    await database.migrate()
+    provider = ScriptedTurnPlannerProvider(
+        [_select_coding_loop, _tamper_bound_coding_graph]
+    )
+    planner, planning, task_loops, _composer = _runtimes(database, provider)
+    workspace_root = tmp_path / "workspace"
+    (workspace_root / "backend" / "tests").mkdir(parents=True)
+    (workspace_root / "backend" / "one.py").write_text(
+        "VALUE = 'old-one'\n",
+        encoding="utf-8",
+    )
+    (workspace_root / "backend" / "two.py").write_text(
+        "VALUE = 'old-two'\n",
+        encoding="utf-8",
+    )
+    (workspace_root / "backend" / "tests" / "test_one.py").write_text(
+        "def test_one():\n    assert True\n",
+        encoding="utf-8",
+    )
+    workspace = WorkspaceFileRuntime(
+        str(workspace_root),
+        str(tmp_path / "staging"),
+    )
+    capability_registry = create_builtin_capability_executor_registry(
+        planner._capabilities,  # noqa: SLF001
+        workspace=workspace,
+        python_tests=_RepairingPythonRuntime(),
+        workspace_patches=workspace,
+    )
+    execution = AgentExecutionRuntime(
+        database,
+        planning._compiler,  # noqa: SLF001
+        planner._agents,  # noqa: SLF001
+        max_parallel=2,
+    )
+    model_loop = AgentModelLoopRuntime(
+        database,
+        execution,
+        planner._agents,  # noqa: SLF001
+        planner._gateway,  # noqa: SLF001
+        _PassThroughContextMemory(),  # type: ignore[arg-type]
+    )
+    adapters = create_task_loop_agent_adapter_registry(
+        research_available=False,
+        workspace_file_available=True,
+        workspace_coding_loop_available=True,
+    )
+    activation = TaskLoopActivationRuntime(
+        database,
+        task_loops,
+        planner,
+        planning,
+        execution,
+        ModelPlannerNodeBinder(
+            planner._agents,  # noqa: SLF001
+            capability_registry,
+            adapters,
+        ),
+    )
+    agents = TaskLoopAgentRuntime(
+        database,
+        execution,
+        adapters,
+        workspace=workspace,
+        model_loop=model_loop,
+    )
+    coordinator = TaskLoopExecutionCoordinator(
+        database,
+        activation,
+        agents=agents,
+        turn_planner=planner,
+    )
+    try:
+        task_id, fallback = await _seed_turn(
+            database,
+            suffix="d",
+            message=(
+                "inspect backend/one.py and backend/two.py apply "
+                "[{\"path\":\"backend/one.py\",\"old_text\":\"VALUE = 'old-one'\","
+                "\"new_text\":\"VALUE = 'new-one'\"},{\"path\":\"backend/two.py\","
+                "\"old_text\":\"VALUE = 'old-two'\",\"new_text\":"
+                "\"VALUE = 'new-two'\"}] in backend then test tests/test_one.py"
+            ),
+        )
+        await planner.prepare(
+            task_id,
+            fallback.user_message_id,
+            fallback,
+            frozenset({"workspace_coding_loop:python"}),
+        )
+        await planner.interpret(task_id)
+        await task_loops.plan(task_id)
+        await coordinator.advance(task_id, "activate-worker")
+        with pytest.raises(
+            TaskLoopAgentProofRejectedError,
+            match="server-sealed graph",
+        ):
+            await coordinator.advance(task_id, "coordinator-worker")
+
+        async with database.session() as session:
+            nodes = tuple(
+                (
+                    await session.scalars(
+                        select(TaskExecutionNodeRecord).order_by(
+                            TaskExecutionNodeRecord.local_key
+                        )
+                    )
+                ).all()
+            )
+            turns = tuple(
+                (await session.scalars(select(AgentModelTurnRecord))).all()
+            )
+            results = tuple(
+                (await session.scalars(select(TaskLoopVerifiedResultRecord))).all()
+            )
+        coordinate = next(
+            item for item in nodes if item.local_key.endswith("coordinate_coding")
+        )
+        readers = tuple(
+            item
+            for item in nodes
+            if item.local_key.endswith(("inspect_primary", "inspect_secondary"))
+        )
+        assert coordinate.status == "failed"
+        assert len(readers) == 2 and all(item.status == "pending" for item in readers)
+        assert len(turns) == 1 and turns[0].status == "failed"
+        assert results == ()
+    finally:
+        await database.dispose()
+
+
 def test_coding_loop_recipe_has_two_parallel_readers_and_verified_patch_join() -> None:
     from deskpilot.application.capability_catalog import create_builtin_capability_catalog
 
@@ -507,8 +693,12 @@ def test_coding_loop_recipe_has_two_parallel_readers_and_verified_patch_join() -
         capabilities=capabilities,
     )
     by_key = {item.local_key: item for item in draft.nodes}
-    assert by_key["inspect_primary"].depends_on == ()
-    assert by_key["inspect_secondary"].depends_on == ()
+    assert by_key["coordinate_coding"].depends_on == ()
+    assert by_key["coordinate_coding"].agent_selector == (
+        "builtin.workspace_coordinator"
+    )
+    assert by_key["inspect_primary"].depends_on == ("coordinate_coding",)
+    assert by_key["inspect_secondary"].depends_on == ("coordinate_coding",)
     assert by_key["plan_primary_patch"].depends_on == ("inspect_primary",)
     assert by_key["plan_secondary_patch"].depends_on == ("inspect_secondary",)
     assert set(by_key["apply_patch"].depends_on) == {
@@ -596,7 +786,9 @@ async def test_coding_loop_amendment_fences_old_claim_and_late_result(
         f"sqlite+aiosqlite:///{(tmp_path / 'amendment.db').as_posix()}"
     )
     await database.migrate()
-    provider = ScriptedTurnPlannerProvider([_select_coding_loop])
+    provider = ScriptedTurnPlannerProvider(
+        [_select_coding_loop, _confirm_bound_coding_graph]
+    )
     planner, planning, task_loops, _composer = _runtimes(database, provider)
     workspace_root = tmp_path / "workspace"
     (workspace_root / "backend" / "tests").mkdir(parents=True)
@@ -628,6 +820,13 @@ async def test_coding_loop_amendment_fences_old_claim_and_late_result(
         planner._agents,  # noqa: SLF001
         max_parallel=2,
     )
+    model_loop = AgentModelLoopRuntime(
+        database,
+        execution,
+        planner._agents,  # noqa: SLF001
+        planner._gateway,  # noqa: SLF001
+        _PassThroughContextMemory(),  # type: ignore[arg-type]
+    )
     adapters = create_task_loop_agent_adapter_registry(
         research_available=False,
         workspace_file_available=True,
@@ -650,6 +849,7 @@ async def test_coding_loop_amendment_fences_old_claim_and_late_result(
         execution,
         adapters,
         workspace=workspace,
+        model_loop=model_loop,
     )
     coordinator = TaskLoopExecutionCoordinator(
         database,
@@ -680,15 +880,15 @@ async def test_coding_loop_amendment_fences_old_claim_and_late_result(
         activated = await activation.activate(task_id)
         active_read = await activation.get(task_id)
         assert active_read is not None
-        primary = next(
+        coordinate = next(
             item
             for item in active_read.nodes
-            if item.local_key.endswith("inspect_primary")
+            if item.local_key.endswith("coordinate_coding")
         )
         stale = await agents.claim_next(
             activated.execution_id,
             "old-generation-worker",
-            node_id=primary.node_id,
+            node_id=coordinate.node_id,
         )
         assert stale is not None
 
@@ -699,12 +899,12 @@ async def test_coding_loop_amendment_fences_old_claim_and_late_result(
         run = await execution.get(activated.run_id)
         assert run.status.value == "cancelled"
         cancelled_node = next(
-            item for item in run.nodes if item.node_id == primary.node_id
+            item for item in run.nodes if item.node_id == coordinate.node_id
         )
         assert cancelled_node.status.value == "cancelled"
         assert cancelled_node.claim_fencing_token > stale.claimed.claim_fencing_token
         with pytest.raises(TaskLoopAgentConflictError):
-            await agents.run_workspace_file_candidate(stale)
+            await agents.run_coding_coordinator_candidate(stale)
 
         successor_task_id = f"tsk_{'b' * 32}"
         successor_message_id = f"msg_{'b' * 32}"

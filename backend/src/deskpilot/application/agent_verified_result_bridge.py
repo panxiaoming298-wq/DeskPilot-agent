@@ -15,7 +15,10 @@ from pydantic import ValidationError
 
 from deskpilot.application.artifact_delivery_runtime import POLICY_DIGEST, POLICY_ID
 from deskpilot.core.canonical_json import sha256_digest
-from deskpilot.domain.agent_loop import WorkspacePatchSubmitProposalDecision
+from deskpilot.domain.agent_loop import (
+    AgentProposeTaskGraphDecision,
+    WorkspacePatchSubmitProposalDecision,
+)
 from deskpilot.domain.agent_runtime import AgentOutputResult, AgentResult
 from deskpilot.domain.artifact_runtime import ClaimVerdictRead
 from deskpilot.domain.capability_execution import (
@@ -107,6 +110,14 @@ class WorkspaceReaderVerificationProof:
 @dataclass(frozen=True, slots=True)
 class WorkspacePatchPlannerVerificationProof:
     """Persisted one-turn Patch Planner decision with no execution authority."""
+
+    model_turn: AgentModelTurnRecord
+    decision: AgentDecisionRecord
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceCodingCoordinatorVerificationProof:
+    """Persisted one-turn confirmation of a server-sealed coding graph."""
 
     model_turn: AgentModelTurnRecord
     decision: AgentDecisionRecord
@@ -372,6 +383,111 @@ class AgentVerifiedResultBridge:
             result_kind=CapabilityResultKind.PATCH_PROPOSAL,
             result_schema_digest=sha256_digest(
                 WorkspacePatchSubmitProposalDecision.model_json_schema()
+            ),
+            result_digest=result.result_digest,
+            verification_digest=verification_digest,
+        )
+
+    @classmethod
+    def workspace_coding_coordinator(
+        cls,
+        plan_proof: AgentVerifiedResultPlanProof,
+        verification_proof: WorkspaceCodingCoordinatorVerificationProof,
+        *,
+        expected_proposal: AgentProposeTaskGraphDecision,
+        expected_graph_binding_id: str,
+        allow_pending_node_transition: bool = False,
+    ) -> VerifiedCapabilityResultRef:
+        """Bridge an exact fixed-graph confirmation without creating another DAG."""
+
+        resolved = cls._resolve_plan_proof(
+            plan_proof,
+            expected_route_id="workspace_coding_loop",
+            expected_source_local_key="coordinate_coding",
+            expected_agent_id="builtin.workspace_coordinator",
+            expected_capability_id="workspace.dynamic.coordinate.v1",
+            allow_pending_node_transition=allow_pending_node_transition,
+        )
+        try:
+            result = AgentOutputResult.model_validate(plan_proof.result.manifest)
+            proposal = AgentProposeTaskGraphDecision.model_validate(
+                verification_proof.decision.manifest
+            )
+        except ValidationError as error:
+            raise AgentVerifiedResultProofRejectedError(
+                "Workspace coding Coordinator proof Schema was rejected"
+            ) from error
+        cls._assert_agent_result_record(plan_proof, result)
+        turn = verification_proof.model_turn
+        decision = verification_proof.decision
+        graph_material = {
+            "nodes": [item.model_dump(mode="json") for item in expected_proposal.nodes],
+            "output_node_key": expected_proposal.output_node_key,
+        }
+        graph_digest = sha256_digest(graph_material)
+        decision_material = {
+            "turn_id": turn.turn_id,
+            "invocation_id": plan_proof.invocation.invocation_id,
+            "decision": decision.manifest,
+            "response_digest": turn.response_digest,
+        }
+        expected_output = {
+            "nodes": [item.model_dump(mode="json") for item in proposal.nodes],
+            "output_node_key": proposal.output_node_key,
+            "graph_digest": graph_digest,
+            "decision_digest": decision.decision_digest,
+        }
+        if (
+            proposal.nodes != expected_proposal.nodes
+            or proposal.output_node_key != expected_proposal.output_node_key
+            or turn.invocation_id != plan_proof.invocation.invocation_id
+            or turn.turn_no != 1
+            or turn.status != "succeeded"
+            or turn.response_digest is None
+            or decision.turn_id != turn.turn_id
+            or decision.invocation_id != plan_proof.invocation.invocation_id
+            or decision.kind != "propose_task_graph"
+            or decision.binding_id != expected_graph_binding_id
+            or decision.decision_digest != sha256_digest(decision_material)
+            or result.output != expected_output
+            or result.evidence_refs != (f"agent-decision:{decision.decision_id}",)
+            or result.limitation_codes
+            or result.input_digest != turn.request_digest
+            or result.model_response_digest != turn.response_digest
+            or result.output_schema_digest
+            != sha256_digest(AgentProposeTaskGraphDecision.model_json_schema())
+        ):
+            raise AgentVerifiedResultProofRejectedError(
+                "Workspace coding Coordinator changed its sealed graph proof"
+            )
+        verification_digest = sha256_digest(
+            {
+                "schema_version": (
+                    "deskpilot.workspace-coding-coordinator-verification-proof.v1"
+                ),
+                "step_binding_digest": plan_proof.step_binding.step_binding_digest,
+                "plan_manifest_digest": plan_proof.composite_plan.plan_manifest_digest,
+                "node_spec_digest": plan_proof.node.node_spec_digest,
+                "invocation_id": plan_proof.invocation.invocation_id,
+                "invocation_attempt": plan_proof.invocation.attempt,
+                "turn_id": turn.turn_id,
+                "request_digest": turn.request_digest,
+                "response_digest": turn.response_digest,
+                "decision_digest": decision.decision_digest,
+                "graph_digest": graph_digest,
+                "agent_result_digest": result.result_digest,
+            }
+        )
+        return VerifiedCapabilityResultRef.build(
+            task_id=plan_proof.run.task_id,
+            run_id=plan_proof.run.run_id,
+            plan_generation=plan_proof.run.plan_generation,
+            producer_node_id=plan_proof.node.node_id,
+            producer_attempt=plan_proof.invocation.attempt,
+            capability=resolved.capability,
+            result_kind=CapabilityResultKind.COORDINATION_PLAN,
+            result_schema_digest=sha256_digest(
+                AgentProposeTaskGraphDecision.model_json_schema()
             ),
             result_digest=result.result_digest,
             verification_digest=verification_digest,
@@ -729,5 +845,7 @@ __all__ = [
     "AgentVerifiedResultProofRejectedError",
     "AgentVerifiedResultSourceBindingError",
     "ResearchAgentVerificationProof",
+    "WorkspaceCodingCoordinatorVerificationProof",
+    "WorkspacePatchPlannerVerificationProof",
     "WorkspaceReaderVerificationProof",
 ]
