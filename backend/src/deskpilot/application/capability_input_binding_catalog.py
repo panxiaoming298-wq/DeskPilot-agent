@@ -390,6 +390,7 @@ class _InputProfile:
     input_model: type[BaseModel]
     enum_parameters: frozenset[str] = frozenset()
     consumes: tuple[CapabilityResultKind, ...] = ()
+    fixed_parameter_names: frozenset[str] = frozenset()
 
 
 class CapabilityInputBindingCatalog:
@@ -405,6 +406,7 @@ class CapabilityInputBindingCatalog:
                 type[BaseModel],
                 frozenset[str],
                 tuple[CapabilityResultKind, ...],
+                frozenset[str],
             ],
             ...,
         ] = (
@@ -416,6 +418,7 @@ class CapabilityInputBindingCatalog:
                 KnowledgeLocalExecutorInput,
                 frozenset(),
                 (),
+                frozenset(),
             ),
             (
                 "mcp_text_metrics",
@@ -425,6 +428,7 @@ class CapabilityInputBindingCatalog:
                 McpTextMetricsExecutorInput,
                 frozenset(),
                 (),
+                frozenset(),
             ),
             (
                 "workspace_snapshot_check",
@@ -434,6 +438,7 @@ class CapabilityInputBindingCatalog:
                 WorkspaceSnapshotCheckExecutorInput,
                 frozenset({"profile"}),
                 (),
+                frozenset(),
             ),
             (
                 "workspace_python_test",
@@ -443,6 +448,7 @@ class CapabilityInputBindingCatalog:
                 WorkspacePythonTestExecutorInput,
                 frozenset(),
                 (),
+                frozenset(),
             ),
             (
                 "workspace_node_test",
@@ -452,6 +458,7 @@ class CapabilityInputBindingCatalog:
                 WorkspaceNodeTestExecutorInput,
                 frozenset(),
                 (),
+                frozenset(),
             ),
             (
                 "workspace_project_search",
@@ -461,6 +468,7 @@ class CapabilityInputBindingCatalog:
                 WorkspaceProjectSearchExecutorInput,
                 frozenset(),
                 (),
+                frozenset(),
             ),
             (
                 "workspace_project_batch_read",
@@ -470,6 +478,7 @@ class CapabilityInputBindingCatalog:
                 WorkspaceProjectBatchReadExecutorInput,
                 frozenset(),
                 (),
+                frozenset(),
             ),
             (
                 "workspace_git_inspect",
@@ -479,6 +488,7 @@ class CapabilityInputBindingCatalog:
                 WorkspaceGitInspectExecutorInput,
                 frozenset({"operation"}),
                 (),
+                frozenset(),
             ),
             (
                 "workspace_command_profile",
@@ -488,6 +498,7 @@ class CapabilityInputBindingCatalog:
                 WorkspaceCommandExecutorInput,
                 frozenset(),
                 (),
+                frozenset({"command_profile_id"}),
             ),
             (
                 "workspace_patch_bundle",
@@ -497,6 +508,37 @@ class CapabilityInputBindingCatalog:
                 WorkspacePatchBundleExecutorInput,
                 frozenset(),
                 (),
+                frozenset(),
+            ),
+            (
+                "workspace_coding_loop",
+                "workspace.patch.bundle.v1",
+                "apply_patch",
+                ("changes_json",),
+                WorkspacePatchBundleExecutorInput,
+                frozenset(),
+                (),
+                frozenset({"test_kind"}),
+            ),
+            (
+                "workspace_coding_loop",
+                "workspace.python.test.v1",
+                "run_fixed_test",
+                ("project_path", "test_path"),
+                WorkspacePythonTestExecutorInput,
+                frozenset(),
+                (),
+                frozenset({"test_kind"}),
+            ),
+            (
+                "workspace_coding_loop",
+                "workspace.node.test.v1",
+                "run_fixed_test",
+                ("project_path", "test_path"),
+                WorkspaceNodeTestExecutorInput,
+                frozenset(),
+                (),
+                frozenset({"test_kind"}),
             ),
             (
                 "research_to_html",
@@ -506,6 +548,7 @@ class CapabilityInputBindingCatalog:
                 ArtifactHtmlExecutorInput,
                 frozenset(),
                 (CapabilityResultKind.VERIFIED_CLAIMS,),
+                frozenset(),
             ),
             (
                 "research_to_html",
@@ -515,9 +558,10 @@ class CapabilityInputBindingCatalog:
                 BrowserVerifyExecutorInput,
                 frozenset(),
                 (CapabilityResultKind.ARTIFACT,),
+                frozenset(),
             ),
         )
-        profiles: dict[tuple[str, str, str], _InputProfile] = {}
+        profiles: dict[tuple[str, str, str, str, str], _InputProfile] = {}
         for (
             route_id,
             capability_id,
@@ -526,6 +570,7 @@ class CapabilityInputBindingCatalog:
             model,
             enum_names,
             consumes,
+            fixed_parameter_names,
         ) in definitions:
             pack = capabilities.resolve_preferred(capability_id)
             capability = CapabilityRef(
@@ -533,14 +578,37 @@ class CapabilityInputBindingCatalog:
                 version=pack.version,
                 digest=pack.digest,
             )
-            profiles[(pack.capability_id, pack.version, pack.digest)] = _InputProfile(
+            fixed_parameters: dict[str, str] = {}
+            variant_key: str = route_id
+            if route_id == "workspace_coding_loop":
+                test_kind = (
+                    "python"
+                    if capability_id == "workspace.python.test.v1"
+                    else "node"
+                    if capability_id == "workspace.node.test.v1"
+                    else None
+                )
+                # The Patch capability is present in both fixed variants; its
+                # exact recipe digest is checked dynamically from the binding.
+                if test_kind is not None:
+                    fixed_parameters = {"test_kind": test_kind}
+                    variant_key = f"{route_id}:{test_kind}"
+            profiles[
+                (
+                    pack.capability_id,
+                    pack.version,
+                    pack.digest,
+                    route_id,
+                    local_key,
+                )
+            ] = _InputProfile(
                 capability=capability,
                 route_id=route_id,
                 route_manifest_digest=sha256_digest(
                     {
                         **RouteRecipeCatalog.manifest(route_id, "2"),
-                        "variant_key": route_id,
-                        "fixed_parameters": {},
+                        "variant_key": variant_key,
+                        "fixed_parameters": fixed_parameters,
                     }
                 ),
                 source_local_key=local_key,
@@ -548,6 +616,7 @@ class CapabilityInputBindingCatalog:
                 input_model=model,
                 enum_parameters=enum_names,
                 consumes=consumes,
+                fixed_parameter_names=fixed_parameter_names,
             )
         self._profiles = profiles
 
@@ -572,7 +641,13 @@ class CapabilityInputBindingCatalog:
                 "Capability input requires exact eligible capability-node authority"
             )
         profile = self._profiles.get(
-            (capability.capability_id, capability.version, capability.digest)
+            (
+                capability.capability_id,
+                capability.version,
+                capability.digest,
+                node_binding.recipe.route_id,
+                node_binding.mapping.source_local_key,
+            )
         )
         if profile is None:
             raise CapabilityInputProfileNotFoundError(
@@ -599,6 +674,19 @@ class CapabilityInputBindingCatalog:
                     **RouteRecipeCatalog.manifest(profile.route_id, "2"),
                     "variant_key": f"{profile.route_id}:{profile_id}",
                     "fixed_parameters": {"command_profile_id": profile_id},
+                }
+            )
+        elif profile.route_id == "workspace_coding_loop":
+            test_kind = node_binding.bound_input_manifest.get("test_kind")
+            if test_kind not in {"python", "node"}:
+                raise CapabilityInputLineageRejectedError(
+                    "Coding-loop fixed test kind is invalid"
+                )
+            expected_recipe_digest = sha256_digest(
+                {
+                    **RouteRecipeCatalog.manifest(profile.route_id, "2"),
+                    "variant_key": f"{profile.route_id}:{test_kind}",
+                    "fixed_parameters": {"test_kind": test_kind},
                 }
             )
         if (
@@ -679,27 +767,50 @@ class CapabilityInputBindingCatalog:
                 "Derived capability input has no server binding"
             )
         by_name = {item.parameter_name: item for item in node_binding.parameter_bindings}
-        if set(by_name) != set(profile.parameter_names):
+        if len(by_name) != len(node_binding.parameter_bindings):
             raise CapabilityInputLineageRejectedError(
-                "Capability input parameters do not match the trusted recipe"
+                "Capability input repeats a persisted parameter proof"
             )
-        normalized: dict[str, str] = {}
-        for name in profile.parameter_names:
-            normalized[name] = canonicalize_capability_parameter(
-                by_name[name].value,
+        all_normalized = {
+            name: canonicalize_capability_parameter(
+                item.value,
                 enum_value=name in profile.enum_parameters,
             )
+            for name, item in by_name.items()
+        }
         if (
-            profile.route_id != "workspace_command_profile"
-            and normalized != node_binding.bound_input_manifest
+            profile.route_id not in {"workspace_command_profile", "workspace_coding_loop"}
+            and set(all_normalized) != set(profile.parameter_names)
         ):
+            raise CapabilityInputLineageRejectedError(
+                "Capability input contains parameters outside its trusted recipe"
+            )
+        expected_bound = dict(all_normalized)
+        for name in profile.fixed_parameter_names:
+            fixed_value = node_binding.bound_input_manifest.get(name)
+            if not isinstance(fixed_value, str) or not fixed_value:
+                raise CapabilityInputLineageRejectedError(
+                    "Capability fixed parameter is missing"
+                )
+            expected_bound[name] = fixed_value
+        if expected_bound != node_binding.bound_input_manifest:
             raise CapabilityInputLineageRejectedError(
                 "Capability normalized input changed from its persisted node binding"
             )
+        if not set(profile.parameter_names).issubset(all_normalized):
+            raise CapabilityInputLineageRejectedError(
+                "Capability node parameters do not match the trusted recipe"
+            )
+        normalized = {
+            name: all_normalized[name]
+            for name in profile.parameter_names
+        }
         result: dict[str, object] = dict(normalized)
         if profile.route_id == "knowledge_lookup":
             result["limit"] = 10
-        elif profile.route_id == "workspace_patch_bundle":
+        elif profile.route_id in {"workspace_patch_bundle", "workspace_coding_loop"} and (
+            profile.capability.capability_id == "workspace.patch.bundle.v1"
+        ):
             try:
                 decoded = json.loads(normalized["changes_json"])
             except (TypeError, json.JSONDecodeError) as error:

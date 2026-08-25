@@ -490,6 +490,7 @@ def create_app(
         task_loop_agent_adapters = create_task_loop_agent_adapter_registry(
             research_available=research_runtime is not None,
             workspace_file_available=True,
+            workspace_coding_loop_available=True,
         )
         task_loop_activation_runtime = TaskLoopActivationRuntime(
             database,

@@ -127,7 +127,7 @@ class TaskLoopActivationRuntime:
                 raise TaskLoopActivationNotEligibleError(
                     "Task Loop does not contain a sealed planned Draft"
                 )
-            revalidated = await self._turn_planner.revalidate_deferred_plan(task_id)
+            revalidated = await self._turn_planner.revalidate_task_loop_plan(task_id)
             if bundle.loop.source.turn_plan_binding_digest != (
                 revalidated.planning.binding.binding_digest
                 if revalidated.planning.binding is not None
@@ -1569,7 +1569,8 @@ class TaskLoopActivationRuntime:
         expected_result_id = f"tlr_{sha256_digest(result_id_material)}"
         capability_manifest = result_ref.capability.model_dump(mode="json")
         verified_failure = bool(
-            result.result_kind == "command_profile"
+            result.result_kind
+            in {"workspace_check", "python_test", "node_test", "command_profile"}
             and result.output_manifest.get("status") != "passed"
         )
         if (

@@ -91,7 +91,11 @@ class ModelPlannerNodeBinder:
 
         if draft.source.task_id != revalidated.planning.task_id:
             raise ModelPlannerNodeProofRejectedError("Revalidated proposal crosses the sealed Task")
-        if len(steps) != len(revalidated.steps) or not 2 <= len(steps) <= 8:
+        # Task-loop planning admits either the historical 2-8 Offer composition
+        # or one server-owned planner-only Offer whose recipe expands to a DAG.
+        # ``revalidate_task_loop_plan`` is the authority boundary that prevents
+        # legacy direct-execution single-step Offers from reaching this binder.
+        if len(steps) != len(revalidated.steps) or not 1 <= len(steps) <= 8:
             raise ModelPlannerNodeProofRejectedError(
                 "Sealed and revalidated step sets do not match"
             )

@@ -1440,6 +1440,212 @@ def workspace_dynamic_patch_test_draft(
     return DraftPlan.model_validate(material)
 
 
+def workspace_coding_loop_contract(
+    task_id: str,
+    capabilities: CapabilityCatalog,
+    *,
+    test_kind: Literal["python", "node"],
+) -> TaskContract:
+    """Authorize one persistent LOCAL-only inspect/patch/test coding loop.
+
+    The two file inputs and the complete Patch bundle are message-bound before
+    execution.  The model cannot turn either Reader result into new authority;
+    both verified ResultRefs are nevertheless mandatory dependencies of the
+    Patch node and therefore form the fixed verified join for this checkpoint.
+    """
+
+    suffix = task_id.removeprefix("tsk_")
+    capability_ids = (
+        "workspace.file.read.v1",
+        "workspace.patch.bundle.v1",
+        (
+            "workspace.python.test.v1"
+            if test_kind == "python"
+            else "workspace.node.test.v1"
+        ),
+    )
+    refs = tuple(
+        CapabilityRef(
+            capability_id=pack.capability_id,
+            version=pack.version,
+            digest=pack.digest,
+        )
+        for pack in (capabilities.resolve_preferred(item) for item in capability_ids)
+    )
+    return TaskContract(
+        contract_id=f"tc_{suffix}",
+        task_id=task_id,
+        version=1,
+        goal_ref=f"artifact://task-input/{task_id}",
+        normalized_objective=(
+            "由两个独立本地 Reader 并行读取服务器绑定文件；仅在两个结果分别验证后，"
+            "执行经用户精确确认的多文件 Patch，再运行服务器固定测试并独立验收交付"
+        ),
+        acceptance_criteria=(
+            AcceptanceCriterion(
+                criterion_id="ac_workspace_coding_loop",
+                kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+                description=(
+                    "结果必须绑定两个 Reader ResultRef、内容寻址 Patch 回执、固定测试"
+                    "结果、失败/Repair 历史和最终确定性验收。"
+                ),
+                verification_requirement=VerificationRequirement.DETERMINISTIC,
+                origin="trusted_template",
+            ),
+        ),
+        constraints=(
+            "local_only_coding_loop_v1",
+            "two_independent_read_only_children_v1",
+            "verified_result_join_before_patch_v1",
+            "exact_multi_file_patch_confirmation_v1",
+            "server_bound_fixed_test_v1",
+            "single_bounded_test_repair_v1",
+            "no_shell",
+            "no_dynamic_code",
+            "no_dependency_install",
+            "no_automatic_push",
+            "no_automatic_replay_after_workspace_write_v1",
+        ),
+        privacy_policy=PrivacyPolicy(
+            classification="internal",
+            allowed_provider_locations=(ModelLocation.LOCAL,),
+            allowed_privacy_modes=("local_only", "local_preferred", "balanced"),
+            external_egress_allowed=False,
+        ),
+        max_risk_level=ToolRiskLevel.R1,
+        budget=TaskBudget(
+            max_model_calls=4,
+            max_tool_calls=4,
+            max_input_tokens=40_000,
+            max_output_tokens=4_000,
+            max_wall_seconds=450,
+            max_retries=1,
+            max_cost_micros=200_000,
+            max_handoffs=0,
+            max_plan_nodes=6,
+        ),
+        output_contract=OutputContract(media_type="application/json", language="zh-CN"),
+        capabilities=refs,
+        created_by="trusted_template",
+    )
+
+
+def workspace_coding_loop_draft(
+    task_id: str,
+    *,
+    test_kind: Literal["python", "node"],
+    contract_version: int = 1,
+) -> DraftPlan:
+    reader_budget = PlanNodeBudget(
+        model_calls=2,
+        tool_calls=1,
+        input_tokens=20_000,
+        output_tokens=2_000,
+        wall_seconds=60,
+        retries=0,
+        cost_micros=100_000,
+        handoffs=0,
+    )
+    patch_budget = PlanNodeBudget(
+        model_calls=0,
+        tool_calls=1,
+        input_tokens=0,
+        output_tokens=0,
+        wall_seconds=120,
+        retries=0,
+        cost_micros=0,
+        handoffs=0,
+    )
+    test_budget = PlanNodeBudget(
+        model_calls=0,
+        tool_calls=1,
+        input_tokens=0,
+        output_tokens=0,
+        wall_seconds=180,
+        retries=1,
+        cost_micros=0,
+        handoffs=0,
+    )
+    zero = PlanNodeBudget(
+        model_calls=0,
+        tool_calls=0,
+        input_tokens=0,
+        output_tokens=0,
+        wall_seconds=15,
+        retries=0,
+        cost_micros=0,
+        handoffs=0,
+    )
+    test_capability = (
+        "workspace.python.test.v1"
+        if test_kind == "python"
+        else "workspace.node.test.v1"
+    )
+    return DraftPlan(
+        task_id=task_id,
+        contract_version=contract_version,
+        producer=PlanProducer(
+            kind="trusted_template",
+            producer_ref="workspace_coding_loop.v1",
+        ),
+        nodes=(
+            DraftPlanNode(
+                local_key="inspect_primary",
+                kind=DraftNodeKind.AGENT,
+                objective="独立读取主要目标文件并形成确定性版本证明。",
+                agent_selector="builtin.workspace_reader",
+                capability_requirements=("workspace.file.read.v1",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=reader_budget,
+            ),
+            DraftPlanNode(
+                local_key="inspect_secondary",
+                kind=DraftNodeKind.AGENT,
+                objective="独立读取上下文文件并形成确定性版本证明。",
+                agent_selector="builtin.workspace_reader",
+                capability_requirements=("workspace.file.read.v1",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=reader_budget,
+            ),
+            DraftPlanNode(
+                local_key="apply_patch",
+                kind=DraftNodeKind.CAPABILITY,
+                objective="只在两个 Reader ResultRef 均已验证后准备并提交精确多文件 Patch。",
+                capability_selector="workspace.patch.bundle.v1",
+                depends_on=("inspect_primary", "inspect_secondary"),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=patch_budget,
+            ),
+            DraftPlanNode(
+                local_key="run_fixed_test",
+                kind=DraftNodeKind.CAPABILITY,
+                objective="在内容寻址 Patch 回执之后运行服务器固定测试。",
+                capability_selector=test_capability,
+                depends_on=("apply_patch",),
+                acceptance_refs=("ac_workspace_coding_loop",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=test_budget,
+            ),
+            DraftPlanNode(
+                local_key="final_acceptance",
+                kind=DraftNodeKind.FINAL_ACCEPTANCE,
+                objective="独立复核双 Reader、Patch、Test 与 Repair 证明链。",
+                depends_on=("run_fixed_test",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+            DraftPlanNode(
+                local_key="delivery",
+                kind=DraftNodeKind.DELIVERY,
+                objective="只基于完整 verified ResultRef 链交付编码结果。",
+                depends_on=("final_acceptance",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+        ),
+    )
+
+
 def _direct_capability_contract(
     task_id: str,
     capabilities: CapabilityCatalog,

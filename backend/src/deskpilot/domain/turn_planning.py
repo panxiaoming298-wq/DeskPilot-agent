@@ -50,7 +50,12 @@ TurnPlannerAdjudicationOutcome = Literal[
     "needs_user_input",
     "unsupported",
 ]
-TurnPlanBindingStatus = Literal["bound", "multi_step_deferred", "not_applicable"]
+TurnPlanBindingStatus = Literal[
+    "bound",
+    "multi_step_deferred",
+    "task_loop_deferred",
+    "not_applicable",
+]
 TurnPlannerParameterName = Annotated[str, Field(pattern=TOKEN_PATTERN)]
 
 
@@ -994,12 +999,21 @@ class TurnPlanBinding(BaseModel):
         if self.status == "bound":
             if self.offer is None or self.plan is None:
                 raise ValueError("Bound turn plan requires an offer and executable plan")
+        elif self.status == "task_loop_deferred":
+            if self.offer is None or self.plan is not None:
+                raise ValueError(
+                    "Task-loop deferred binding requires one offer and no active plan"
+                )
         elif self.offer is not None or self.plan is not None:
             raise ValueError("Non-bound turn plan cannot reference an offer or plan")
         if self.status == "multi_step_deferred" and (
             self.reason_code != "MULTI_STEP_PLAN_DEFERRED"
         ):
             raise ValueError("Deferred turn plan binding reason changed")
+        if self.status == "task_loop_deferred" and (
+            self.reason_code != "MODEL_PLANNER_SINGLE_STEP"
+        ):
+            raise ValueError("Task-loop deferred binding reason changed")
         values = self.model_dump(mode="json")
         identity = _record_material(values, "binding_id", "binding_digest")
         if self.binding_id != _content_id("tpb", identity):
@@ -1128,7 +1142,12 @@ class TurnPlanningRead(BaseModel):
             ):
                 raise ValueError("Turn planning proposal parameter length is invalid")
         expected_status: TurnPlanBindingStatus = (
-            "bound"
+            (
+                "task_loop_deferred"
+                if self.binding.reason_code == "MODEL_PLANNER_SINGLE_STEP"
+                and self.binding.plan is None
+                else "bound"
+            )
             if self.adjudication.outcome == "single_step"
             else (
                 "multi_step_deferred"
@@ -1138,7 +1157,7 @@ class TurnPlanningRead(BaseModel):
         )
         if self.binding.status != expected_status:
             raise ValueError("Turn plan binding status does not match adjudication")
-        if self.binding.status == "bound" and (
+        if self.binding.status in {"bound", "task_loop_deferred"} and (
             self.binding.offer != self.adjudication.selected_offers[0]
         ):
             raise ValueError("Turn plan binding changed the adjudicated offer")
@@ -1284,7 +1303,12 @@ class TurnPlanningWorkbenchRead(BaseModel):
         if self.adjudication is None or self.binding is None:
             raise ValueError("Terminal Turn planning Workbench summary lacks an outcome")
         expected_binding: TurnPlanBindingStatus = (
-            "bound"
+            (
+                "task_loop_deferred"
+                if self.binding.reason_code == "MODEL_PLANNER_SINGLE_STEP"
+                and self.binding.status == "task_loop_deferred"
+                else "bound"
+            )
             if self.adjudication.outcome == "single_step"
             else (
                 "multi_step_deferred"

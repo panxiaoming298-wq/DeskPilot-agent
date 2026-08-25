@@ -2592,7 +2592,7 @@ class TaskWorkbenchService:
             or adjudication is None
             or binding is None
             or adjudication.outcome != "single_step"
-            or binding.status != "bound"
+            or binding.status != "task_loop_deferred"
             or binding.offer is None
             or len(adjudication.selected_offers) != 1
             or binding.offer != adjudication.selected_offers[0]

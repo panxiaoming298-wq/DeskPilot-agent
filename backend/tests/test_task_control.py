@@ -176,8 +176,18 @@ def test_pause_before_running_is_rejected_without_stopping_processor(
 
     assert response.status_code == 409
     assert response.headers["content-type"] == "application/problem+json"
-    assert response.json()["code"] == "TASK_TRANSITION_NOT_ALLOWED"
-    assert response.json()["current_status"] in {"created", "classifying"}
+    problem = response.json()
+    assert problem["code"] in {
+        "TASK_TRANSITION_NOT_ALLOWED",
+        "TASK_REVISION_CONFLICT",
+    }
+    if problem["code"] == "TASK_TRANSITION_NOT_ALLOWED":
+        assert problem["current_status"] in {"created", "classifying"}
+    else:
+        # The background processor may advance after ``_control`` reads the
+        # Task revision but before the command acquires the Task lock.  That
+        # stale command must be rejected rather than pause a newer state.
+        assert problem["expected_last_event_seq"] < problem["current_last_event_seq"]
     _wait_for_status(slow_client, task_id, "succeeded")
 
 

@@ -379,7 +379,12 @@ class AgentExecutionRuntime:
             return await self._read_run(session, run)
 
     async def claim_next(
-        self, run_id: str, owner_id: str, *, lease_seconds: int = 60
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        lease_seconds: int = 60,
+        node_id: str | None = None,
     ) -> ClaimedInvocation | None:
         if not 5 <= lease_seconds <= 600:
             raise ValueError("Lease must be between 5 and 600 seconds")
@@ -407,7 +412,7 @@ class AgentExecutionRuntime:
             )
             if int(active_count or 0) >= self._max_parallel:
                 return None
-            node = await session.scalar(
+            node_statement = (
                 select(TaskExecutionNodeRecord)
                 .where(
                     TaskExecutionNodeRecord.run_id == run_id,
@@ -415,7 +420,13 @@ class AgentExecutionRuntime:
                     TaskExecutionNodeRecord.runtime_enabled.is_(True),
                     TaskExecutionNodeRecord.bound_agent.is_not(None),
                 )
-                .order_by(TaskExecutionNodeRecord.local_key)
+            )
+            if node_id is not None:
+                node_statement = node_statement.where(
+                    TaskExecutionNodeRecord.node_id == node_id
+                )
+            node = await session.scalar(
+                node_statement.order_by(TaskExecutionNodeRecord.local_key)
                 .limit(1)
                 .with_for_update(skip_locked=True)
             )

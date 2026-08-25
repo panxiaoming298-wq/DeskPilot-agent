@@ -658,9 +658,9 @@ class TaskLoopExecutionNodeRead(BaseModel):
         ):
             raise ValueError("Task-loop command node projection is incomplete")
         if self.verified_failure_result_count and (
-            self.kind is not DraftNodeKind.CAPABILITY or self.command_plan_id is None
+            self.kind is not DraftNodeKind.CAPABILITY
         ):
-            raise ValueError("Only command capability nodes may expose failure ResultRefs")
+            raise ValueError("Only capability nodes may expose failure ResultRefs")
         if (
             self.created_at.tzinfo is None
             or self.updated_at.tzinfo is None

@@ -261,6 +261,7 @@ class MultiStepPlanRuntime:
                         .where(
                             or_(
                                 TurnPlanBindingRecord.status == "multi_step_deferred",
+                                TurnPlanBindingRecord.status == "task_loop_deferred",
                                 and_(
                                     TurnPlanBindingRecord.status == "bound",
                                     TurnRouteRecord.route_id.in_(
@@ -525,7 +526,7 @@ class MultiStepPlanRuntime:
                 )
                 or (
                     adjudication.outcome == "single_step"
-                    and binding.status == "bound"
+                    and binding.status == "task_loop_deferred"
                     and binding.reason_code == "MODEL_PLANNER_SINGLE_STEP"
                     and len(adjudication.selected_offers) == 1
                     and any(

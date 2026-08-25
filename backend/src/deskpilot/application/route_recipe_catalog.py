@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Literal, cast
 
@@ -18,6 +19,8 @@ from deskpilot.application.plan_compiler import (
     research_to_html_draft,
     workspace_agent_patch_test_contract,
     workspace_agent_patch_test_draft,
+    workspace_coding_loop_contract,
+    workspace_coding_loop_draft,
     workspace_command_profile_contract,
     workspace_command_profile_draft,
     workspace_directory_analyze_contract,
@@ -73,6 +76,7 @@ RouteId = Literal[
     "workspace_project_batch_read",
     "workspace_git_inspect",
     "workspace_command_profile",
+    "workspace_coding_loop",
 ]
 RouteRecipeVersion = Literal["1", "2"]
 
@@ -279,6 +283,17 @@ _PLANNER_ONLY_ROUTE_SPECS: Mapping[RouteId, dict[str, object]] = MappingProxyTyp
             "capabilities": ("workspace.command.run.v1",),
             "max_risk": "R0",
         },
+        "workspace_coding_loop": {
+            "route_id": "workspace_coding_loop",
+            "producer_ref": "workspace_coding_loop.v1",
+            "capabilities": (
+                "workspace.file.read.v1",
+                "workspace.patch.bundle.v1",
+                "workspace.python.test.v1",
+                "workspace.node.test.v1",
+            ),
+            "max_risk": "R1",
+        },
     }
 )
 
@@ -354,6 +369,14 @@ _PARAMETERS: Mapping[RouteId, tuple[RouteParameterSpec, ...]] = MappingProxyType
             RouteParameterSpec("project_path"),
             RouteParameterSpec("command_profile_id", allowed_values=COMMAND_PROFILE_IDS),
         ),
+        "workspace_coding_loop": (
+            RouteParameterSpec("primary_path"),
+            RouteParameterSpec("secondary_path"),
+            RouteParameterSpec("changes_json"),
+            RouteParameterSpec("project_path"),
+            RouteParameterSpec("test_path"),
+            RouteParameterSpec("test_kind", allowed_values=("python", "node")),
+        ),
     }
 )
 
@@ -399,6 +422,11 @@ class RouteRecipeCatalog:
             ),
             draft.draft.nodes[0],
         )
+        if draft.route_id == "workspace_coding_loop":
+            test_kind = draft.fixed_parameters.get("test_kind")
+            if test_kind not in {"python", "node"}:
+                raise RouteRecipeError("Coding-loop Offer lacks its fixed test kind")
+            return f"{operational.objective} Fixed test ecosystem: {test_kind}."
         if draft.route_id != "workspace_command_profile":
             return operational.objective
         profile_id = draft.fixed_parameters.get("command_profile_id")
@@ -434,6 +462,7 @@ class RouteRecipeCatalog:
             elif route_id in {
                 "workspace_agent_patch_test",
                 "workspace_dynamic_patch_test",
+                "workspace_coding_loop",
             }:
                 variants.extend(
                     (
@@ -644,6 +673,13 @@ class RouteRecipeCatalog:
             return workspace_command_profile_contract(
                 task_id, capabilities
             ), workspace_command_profile_draft(task_id)
+        if route_id == "workspace_coding_loop":
+            test_kind = cast(Literal["python", "node"], params["test_kind"])
+            return workspace_coding_loop_contract(
+                task_id,
+                capabilities,
+                test_kind=test_kind,
+            ), workspace_coding_loop_draft(task_id, test_kind=test_kind)
         if route_id == "workspace_file_replace":
             return workspace_file_replace_contract(
                 task_id, capabilities
@@ -736,6 +772,57 @@ class RouteRecipeCatalog:
                 or any(not isinstance(item, str) or not item for item in paths)
             ):
                 raise RouteRecipeError("Project batch-read paths are invalid")
+        if route_id == "workspace_coding_loop":
+            try:
+                changes = json.loads(parameters["changes_json"])
+            except (KeyError, TypeError, json.JSONDecodeError) as error:
+                raise RouteRecipeError("Coding-loop Patch changes are not valid JSON") from error
+            if (
+                not isinstance(changes, list)
+                or len(changes) != 2
+                or any(
+                    not isinstance(item, dict)
+                    or set(item) != {"path", "old_text", "new_text"}
+                    or any(not isinstance(item[key], str) for key in item)
+                    for item in changes
+                )
+            ):
+                raise RouteRecipeError("Coding-loop Patch changes are invalid")
+            paths = [str(item["path"]) for item in changes]
+            if len(paths) != len(set(paths)):
+                raise RouteRecipeError("Coding-loop Patch paths must be unique")
+            primary_path = parameters["primary_path"]
+            secondary_path = parameters["secondary_path"]
+            project_path = parameters["project_path"]
+            test_path = parameters["test_path"]
+            bound_paths = {primary_path, secondary_path}
+            if len(bound_paths) != 2 or set(paths) != bound_paths:
+                raise RouteRecipeError(
+                    "Coding-loop Patch paths must exactly match both Reader paths"
+                )
+            project = RouteRecipeCatalog._relative_path(project_path, allow_dot=True)
+            for value in (*bound_paths, *paths):
+                candidate = RouteRecipeCatalog._relative_path(value)
+                if project.parts and candidate.parts[: len(project.parts)] != project.parts:
+                    raise RouteRecipeError(
+                        "Coding-loop Reader and Patch paths must stay inside the project"
+                    )
+            RouteRecipeCatalog._relative_path(test_path)
+
+    @staticmethod
+    def _relative_path(value: str, *, allow_dot: bool = False) -> PurePosixPath:
+        normalized = value.replace("\\", "/")
+        path = PurePosixPath(normalized)
+        if (
+            not normalized
+            or path.is_absolute()
+            or (bool(path.parts) and ":" in path.parts[0])
+            or ".." in path.parts
+            or (not allow_dot and not path.parts)
+            or any(part in {"", "."} for part in path.parts)
+        ):
+            raise RouteRecipeError("Coding-loop path is not a safe relative path")
+        return PurePosixPath() if allow_dot and normalized == "." else path
 
 
 def _unquote(value: str) -> str:

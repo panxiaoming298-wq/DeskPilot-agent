@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0056_workspace_command_plan_bindings"
+CURRENT_REVISION = "0058_workspace_coding_deliveries"
 
 
 def _sync_url(path: Path) -> str:
@@ -159,7 +159,8 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
             "task_loop_verified_results",
             "task_loop_capability_approvals",
             "task_loop_cycle_events",
-            "workspace_command_plan_bindings",
+                "workspace_command_plan_bindings",
+                "workspace_coding_deliveries",
         }.issubset(inspector.get_table_names())
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
@@ -709,7 +710,7 @@ def test_stage_116_workspace_command_plan_binding_migration_is_guarded(
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0056_workspace_command_plan_bindings",
         target_revision="0055_planner_only_single_task_loop",
         insert_statement="""
             INSERT INTO workspace_command_plan_bindings (
@@ -757,6 +758,164 @@ def test_stage_116_workspace_command_plan_binding_migration_is_guarded(
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
         assert "workspace_command_plan_bindings" not in inspect(
+            connection
+        ).get_table_names()
+    engine.dispose()
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_116b_task_loop_deferred_binding_migration_is_guarded(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-116b-task-loop-deferred-binding.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspect(connection).get_check_constraints("turn_plan_bindings")
+        }
+    engine.dispose()
+    assert "task_loop_deferred" in constraints["ck_turn_plan_binding_status"]
+    assert "task_loop_deferred" in constraints["ck_turn_plan_binding_target"]
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0057_task_loop_deferred_binding",
+        target_revision="0056_workspace_command_plan_bindings",
+        insert_statement="""
+            INSERT INTO turn_plan_bindings (
+                binding_id, task_id, user_message_id, user_message_digest,
+                adjudication_id, adjudication_digest, status,
+                offer_id, offer_digest, plan_id, plan_generation,
+                plan_manifest_digest, contract_id, contract_version,
+                contract_digest, reason_code, manifest, binding_digest, created_at
+            ) VALUES (
+                :binding_id, :task_id, :message_id, :digest,
+                :adjudication_id, :digest, 'task_loop_deferred',
+                :offer_id, :digest, NULL, NULL,
+                NULL, NULL, NULL, NULL,
+                'MODEL_PLANNER_SINGLE_STEP', :empty_object, :binding_digest,
+                :created_at
+            )
+        """,
+        parameters={
+            "binding_id": "tpb_" + "1" * 64,
+            "task_id": "tsk_" + "2" * 32,
+            "message_id": "msg_" + "3" * 32,
+            "adjudication_id": "tpa_" + "4" * 64,
+            "offer_id": "tpo_" + "5" * 64,
+            "digest": "6" * 64,
+            "binding_digest": "7" * 64,
+            "empty_object": "{}",
+            "created_at": "2026-08-25 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT binding_id, status, binding_digest
+            FROM turn_plan_bindings WHERE binding_id = :binding_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM turn_plan_bindings WHERE binding_id = :binding_id"
+        ),
+    )
+
+    command.downgrade(config, "0056_workspace_command_plan_bindings")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspect(connection).get_check_constraints("turn_plan_bindings")
+        }
+    engine.dispose()
+    assert "task_loop_deferred" not in constraints["ck_turn_plan_binding_status"]
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_116b_workspace_coding_delivery_migration_is_guarded(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-116b-workspace-coding-delivery.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        columns = {
+            item["name"]
+            for item in inspector.get_columns("workspace_coding_deliveries")
+        }
+        constraints = {
+            item["name"]
+            for item in inspector.get_check_constraints(
+                "workspace_coding_deliveries"
+            )
+        }
+    engine.dispose()
+    assert {
+        "delivery_id",
+        "execution_id",
+        "task_id",
+        "run_id",
+        "plan_manifest_digest",
+        "changed_file_count",
+        "test_run_count",
+        "failure_count",
+        "rollback_available",
+        "manifest",
+        "delivery_digest",
+    }.issubset(columns)
+    assert constraints == {"ck_workspace_coding_delivery_counts"}
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0057_task_loop_deferred_binding",
+        insert_statement="""
+            INSERT INTO workspace_coding_deliveries (
+                delivery_id, execution_id, task_id, run_id, plan_id,
+                plan_manifest_digest, changed_file_count, test_run_count,
+                failure_count, rollback_available, manifest, delivery_digest,
+                created_at
+            ) VALUES (
+                :delivery_id, :execution_id, :task_id, :run_id, :plan_id,
+                :digest, 2, 1, 0, 1, :empty_object, :delivery_digest,
+                :created_at
+            )
+        """,
+        parameters={
+            "delivery_id": "wcd_" + "1" * 64,
+            "execution_id": "tlx_" + "2" * 64,
+            "task_id": "tsk_" + "3" * 32,
+            "run_id": "run_" + "4" * 64,
+            "plan_id": "epl_" + "5" * 64,
+            "digest": "6" * 64,
+            "delivery_digest": "7" * 64,
+            "empty_object": "{}",
+            "created_at": "2026-08-25 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT delivery_id, execution_id, delivery_digest
+            FROM workspace_coding_deliveries WHERE delivery_id = :delivery_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM workspace_coding_deliveries "
+            "WHERE delivery_id = :delivery_id"
+        ),
+    )
+
+    command.downgrade(config, "0057_task_loop_deferred_binding")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert "workspace_coding_deliveries" not in inspect(
             connection
         ).get_table_names()
     engine.dispose()

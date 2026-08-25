@@ -1,0 +1,499 @@
+from __future__ import annotations
+
+import json
+import sys
+import threading
+from pathlib import Path
+from typing import Any
+
+import pytest
+from sqlalchemy import select
+
+from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
+from deskpilot.application.builtin_capability_executors import (
+    create_builtin_capability_executor_registry,
+)
+from deskpilot.application.capability_execution_engine import CapabilityExecutionEngine
+from deskpilot.application.capability_execution_runtime import CapabilityExecutionRuntime
+from deskpilot.application.capability_input_binding_catalog import (
+    CapabilityInputBindingCatalog,
+)
+from deskpilot.application.model_planner_node_binder import ModelPlannerNodeBinder
+from deskpilot.application.route_recipe_catalog import RouteRecipeCatalog, RouteRecipeError
+from deskpilot.application.task_loop_activation_runtime import TaskLoopActivationRuntime
+from deskpilot.application.task_loop_agent_adapter_registry import (
+    create_task_loop_agent_adapter_registry,
+)
+from deskpilot.application.task_loop_agent_runtime import TaskLoopAgentRuntime
+from deskpilot.application.task_loop_execution_coordinator import (
+    TaskLoopExecutionCoordinator,
+)
+from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
+from deskpilot.core.canonical_json import sha256_digest
+from deskpilot.domain.workspace_files import (
+    WorkspaceFileRead,
+    WorkspacePythonTestRead,
+    WorkspacePythonTestSnapshot,
+)
+from deskpilot.infrastructure.database import Database
+from deskpilot.infrastructure.models import (
+    TaskLoopCapabilityApprovalRecord,
+    TaskLoopNodeAttemptRecord,
+    TaskLoopVerifiedResultRecord,
+    WorkspaceCodingDeliveryRecord,
+)
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from test_multi_step_plan_runtime import (  # noqa: E402
+    NOW,
+    ScriptedTurnPlannerProvider,
+    _runtimes,
+    _seed_turn,
+)
+
+
+def _coding_loop_offer_key(request: Any) -> str:
+    payload = json.loads(request.messages[1].content)
+    matches = [
+        item["offer"]["offer_key"]
+        for item in payload["offers"]
+        if {spec["parameter_name"] for spec in item["parameter_specs"]}
+        == {
+            "primary_path",
+            "secondary_path",
+            "changes_json",
+            "project_path",
+            "test_path",
+        }
+    ]
+    assert len(matches) == 1
+    return str(matches[0])
+
+
+def _select_coding_loop(request: Any) -> dict[str, Any]:
+    changes_json = json.dumps(
+        [
+            {
+                "path": "backend/one.py",
+                "old_text": "VALUE = 'old-one'",
+                "new_text": "VALUE = 'new-one'",
+            },
+            {
+                "path": "backend/two.py",
+                "old_text": "VALUE = 'old-two'",
+                "new_text": "VALUE = 'new-two'",
+            },
+        ],
+        separators=(",", ":"),
+    )
+    return {
+        "schema_version": "deskpilot.turn-planner-decision.v1",
+        "kind": "propose_steps",
+        "steps": [
+            {
+                "offer_key": _coding_loop_offer_key(request),
+                "parameters": [
+                    {"name": "primary_path", "value": "backend/one.py"},
+                    {"name": "secondary_path", "value": "backend/two.py"},
+                    {"name": "changes_json", "value": changes_json},
+                    {"name": "project_path", "value": "backend"},
+                    {"name": "test_path", "value": "tests/test_one.py"},
+                ],
+            }
+        ],
+    }
+
+
+class _ParallelWorkspace(WorkspaceFileRuntime):
+    def __init__(self, workspace_root: str, staging_root: str) -> None:
+        super().__init__(workspace_root, staging_root)
+        self._reader_barrier = threading.Barrier(2, timeout=5)
+        self._call_lock = threading.Lock()
+        self.parallel_read_paths: list[str] = []
+
+    def read(self, relative_path: str) -> WorkspaceFileRead:
+        if relative_path in {"backend/one.py", "backend/two.py"}:
+            with self._call_lock:
+                self.parallel_read_paths.append(relative_path)
+            self._reader_barrier.wait()
+        return super().read(relative_path)
+
+
+class _RepairingPythonRuntime:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(self, snapshot: WorkspacePythonTestSnapshot) -> WorkspacePythonTestRead:
+        self.calls += 1
+        failed = self.calls == 1
+        material: dict[str, object] = {
+            "schema_version": "deskpilot.workspace-python-test.v1",
+            "profile": "pytest-file",
+            "project_path": snapshot.project_path,
+            "test_path": snapshot.test_path,
+            "snapshot_digest": snapshot.snapshot_digest,
+            "runtime_digest": "f" * 64,
+            "status": "failed" if failed else "passed",
+            "exit_code": 1 if failed else 0,
+            "passed_count": 0 if failed else 1,
+            "failed_count": 1 if failed else 0,
+            "skipped_count": 0,
+            "error_count": 0,
+            "duration_ms": 10,
+            "output": "1 failed" if failed else "1 passed",
+            "output_truncated": False,
+            "isolation_mode": "windows_appcontainer",
+            "network_access": False,
+            "process_limit": 1,
+        }
+        return WorkspacePythonTestRead.model_validate(
+            {**material, "result_digest": sha256_digest(material)}
+        )
+
+
+@pytest.mark.asyncio
+async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
+    tmp_path: Path,
+) -> None:
+    database = Database(
+        f"sqlite+aiosqlite:///{(tmp_path / 'coding-loop.db').as_posix()}"
+    )
+    await database.migrate()
+    provider = ScriptedTurnPlannerProvider([_select_coding_loop])
+    planner, planning, task_loops, _composer = _runtimes(database, provider)
+    workspace_root = tmp_path / "workspace"
+    backend = workspace_root / "backend"
+    tests = backend / "tests"
+    tests.mkdir(parents=True)
+    (backend / "one.py").write_text("VALUE = 'old-one'\n", encoding="utf-8")
+    (backend / "two.py").write_text("VALUE = 'old-two'\n", encoding="utf-8")
+    (tests / "test_one.py").write_text(
+        "def test_one():\n    assert True\n",
+        encoding="utf-8",
+    )
+    workspace = _ParallelWorkspace(
+        str(workspace_root),
+        str(tmp_path / "staging"),
+    )
+    python_tests = _RepairingPythonRuntime()
+    registry = create_builtin_capability_executor_registry(
+        planner._capabilities,  # noqa: SLF001
+        workspace=workspace,
+        python_tests=python_tests,
+        workspace_patches=workspace,
+    )
+    execution = AgentExecutionRuntime(
+        database,
+        planning._compiler,  # noqa: SLF001
+        planner._agents,  # noqa: SLF001
+        max_parallel=2,
+        clock=lambda: NOW,
+    )
+    adapters = create_task_loop_agent_adapter_registry(
+        research_available=False,
+        workspace_file_available=True,
+        workspace_coding_loop_available=True,
+    )
+    activation = TaskLoopActivationRuntime(
+        database,
+        task_loops,
+        planner,
+        planning,
+        execution,
+        ModelPlannerNodeBinder(
+            planner._agents,  # noqa: SLF001
+            registry,
+            adapters,
+        ),
+        clock=lambda: NOW,
+    )
+    capabilities = CapabilityExecutionRuntime(
+        database,
+        CapabilityInputBindingCatalog(planner._capabilities),  # noqa: SLF001
+        registry,
+        CapabilityExecutionEngine(registry),
+        clock=lambda: NOW,
+    )
+    agents = TaskLoopAgentRuntime(
+        database,
+        execution,
+        adapters,
+        workspace=workspace,
+    )
+    coordinator = TaskLoopExecutionCoordinator(
+        database,
+        activation,
+        capabilities=capabilities,
+        agents=agents,
+        turn_planner=planner,
+    )
+    changes_json = json.dumps(
+        [
+            {
+                "path": "backend/one.py",
+                "old_text": "VALUE = 'old-one'",
+                "new_text": "VALUE = 'new-one'",
+            },
+            {
+                "path": "backend/two.py",
+                "old_text": "VALUE = 'old-two'",
+                "new_text": "VALUE = 'new-two'",
+            },
+        ],
+        separators=(",", ":"),
+    )
+    message = (
+        "inspect backend/one.py and backend/two.py apply "
+        f"{changes_json} in backend then test tests/test_one.py"
+    )
+    try:
+        task_id, fallback = await _seed_turn(
+            database,
+            suffix="b",
+            message=message,
+        )
+        await planner.prepare(
+            task_id,
+            fallback.user_message_id,
+            fallback,
+            frozenset({"workspace_coding_loop:python"}),
+        )
+        interpreted = await planner.interpret(task_id)
+        assert interpreted.adjudication is not None
+        assert interpreted.adjudication.outcome == "single_step", (
+            interpreted.run.status,
+            interpreted.run.failure,
+            interpreted.binding,
+        )
+        await task_loops.plan(task_id)
+        await coordinator.advance(task_id, "activate-worker")
+
+        parallel = await coordinator.advance(task_id, "parallel-reader-worker")
+        assert parallel.command.kind == "execute_agent_batch"
+        assert len(parallel.command.node_ids) == 2
+        assert sorted(workspace.parallel_read_paths) == [
+            "backend/one.py",
+            "backend/two.py",
+        ]
+        assert sum(node.candidate_present for node in parallel.read.nodes) == 2
+
+        restarted_agents = TaskLoopAgentRuntime(
+            database,
+            execution,
+            adapters,
+            workspace=workspace,
+        )
+        reader_restart = TaskLoopExecutionCoordinator(
+            database,
+            activation,
+            capabilities=capabilities,
+            agents=restarted_agents,
+            turn_planner=planner,
+        )
+        first_verified = await reader_restart.advance(task_id, "reader-verifier-1")
+        second_verified = await reader_restart.advance(task_id, "reader-verifier-2")
+        assert first_verified.command.kind == "verify_candidate"
+        assert second_verified.command.kind == "verify_candidate"
+
+        waiting = await reader_restart.advance(task_id, "patch-prepare-worker")
+        assert waiting.command.kind == "execute_capability"
+        assert waiting.read.workspace_patch is not None
+        assert waiting.read.execution is not None
+        assert waiting.read.execution.status == "awaiting_user"
+
+        await coordinator.approve_workspace_patch(
+            task_id,
+            waiting.read.workspace_patch.confirmation_digest,
+            expected_execution_revision=waiting.read.execution.revision,
+        )
+        restarted = TaskLoopExecutionCoordinator(
+            database,
+            activation,
+            capabilities=capabilities,
+            agents=agents,
+            turn_planner=planner,
+        )
+        patched = await restarted.advance(task_id, "patch-commit-worker")
+        assert patched.command.kind == "execute_capability"
+        assert (backend / "one.py").read_text(encoding="utf-8") == (
+            "VALUE = 'new-one'\n"
+        )
+        assert (backend / "two.py").read_text(encoding="utf-8") == (
+            "VALUE = 'new-two'\n"
+        )
+
+        failed_test = await restarted.advance(task_id, "test-worker-1")
+        assert failed_test.command.kind == "execute_capability"
+        assert next(
+            node
+            for node in failed_test.read.nodes
+            if node.local_key.endswith("run_fixed_test")
+        ).status == "failed"
+        repair = await restarted.advance(task_id, "repair-worker")
+        assert repair.command.kind == "start_repair"
+        passed_test = await restarted.advance(task_id, "test-worker-2")
+        assert passed_test.command.kind == "execute_capability"
+        assert python_tests.calls == 2
+
+        final_verify = await restarted.advance(task_id, "final-verifier")
+        delivered = await restarted.advance(task_id, "delivery-worker")
+        assert final_verify.command.kind == "reduce_control_node"
+        assert delivered.command.kind == "reduce_control_node"
+        assert delivered.read.execution is not None
+        assert delivered.read.execution.status == "succeeded"
+
+        async with database.session() as session:
+            attempts = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopNodeAttemptRecord).order_by(
+                            TaskLoopNodeAttemptRecord.node_id,
+                            TaskLoopNodeAttemptRecord.attempt,
+                        )
+                    )
+                ).all()
+            )
+            results = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopVerifiedResultRecord).order_by(
+                            TaskLoopVerifiedResultRecord.created_at
+                        )
+                    )
+                ).all()
+            )
+            approval = await session.scalar(select(TaskLoopCapabilityApprovalRecord))
+            coding_delivery = await session.scalar(
+                select(WorkspaceCodingDeliveryRecord)
+            )
+        assert approval is not None and approval.status == "consumed"
+        assert coding_delivery is not None
+        assert coding_delivery.changed_file_count == 2
+        assert coding_delivery.test_run_count == 2
+        assert coding_delivery.failure_count == 1
+        assert coding_delivery.rollback_available is True
+        assert coding_delivery.manifest["changed_files"] == [
+            "backend/one.py",
+            "backend/two.py",
+        ]
+        assert coding_delivery.manifest["remaining_risks"] == [
+            "local_fake_model_quality_unproven",
+            "git_commit_not_created",
+        ]
+        assert sorted(item.result_kind for item in results) == [
+            "patch_receipt",
+            "python_test",
+            "python_test",
+            "workspace_file",
+            "workspace_file",
+        ]
+        test_attempts = [
+            item for item in attempts if item.node_id == failed_test.command.node_id
+        ]
+        patch_attempt = next(
+            item for item in attempts if item.node_id == patched.command.node_id
+        )
+        dependency_refs = patch_attempt.input_manifest["dependency_result_refs"]
+        assert isinstance(dependency_refs, list) and len(dependency_refs) == 2
+        assert [item.status for item in test_attempts] == ["failed", "verified"]
+        assert test_attempts[0].receipt_digest is not None
+        assert test_attempts[0].receipt_manifest["result_ref_digest"] == next(
+            item.result_ref_digest
+            for item in results
+            if item.attempt_id == test_attempts[0].attempt_id
+        )
+    finally:
+        await database.dispose()
+
+
+def test_coding_loop_recipe_has_two_parallel_readers_and_verified_patch_join() -> None:
+    from deskpilot.application.capability_catalog import create_builtin_capability_catalog
+
+    capabilities = create_builtin_capability_catalog()
+    contract, draft = RouteRecipeCatalog.compile(
+        task_id="tsk_" + "c" * 32,
+        route_id="workspace_coding_loop",
+        parameters={"test_kind": "python"},
+        capabilities=capabilities,
+    )
+    by_key = {item.local_key: item for item in draft.nodes}
+    assert by_key["inspect_primary"].depends_on == ()
+    assert by_key["inspect_secondary"].depends_on == ()
+    assert set(by_key["apply_patch"].depends_on) == {
+        "inspect_primary",
+        "inspect_secondary",
+    }
+    assert by_key["run_fixed_test"].budget.retries == 1
+    assert tuple(
+        item.value for item in contract.privacy_policy.allowed_provider_locations
+    ) == ("local",)
+
+
+def test_coding_loop_offers_expose_their_fixed_test_ecosystem() -> None:
+    from deskpilot.application.capability_catalog import create_builtin_capability_catalog
+
+    offers = RouteRecipeCatalog.offers_for(
+        task_id="tsk_" + "d" * 32,
+        capabilities=create_builtin_capability_catalog(),
+        eligible_variant_keys=frozenset(
+            {"workspace_coding_loop:python", "workspace_coding_loop:node"}
+        ),
+    )
+
+    descriptions = {
+        item.variant_key: RouteRecipeCatalog.intent_description(item) for item in offers
+    }
+    assert descriptions["workspace_coding_loop:python"].endswith(
+        "Fixed test ecosystem: python."
+    )
+    assert descriptions["workspace_coding_loop:node"].endswith(
+        "Fixed test ecosystem: node."
+    )
+
+
+def test_coding_loop_rejects_unread_or_out_of_project_patch_paths() -> None:
+    valid_changes = json.dumps(
+        [
+            {"path": "backend/one.py", "old_text": "one", "new_text": "ONE"},
+            {"path": "backend/two.py", "old_text": "two", "new_text": "TWO"},
+        ],
+        separators=(",", ":"),
+    )
+    base = {
+        "primary_path": "backend/one.py",
+        "secondary_path": "backend/two.py",
+        "changes_json": valid_changes,
+        "project_path": "backend",
+        "test_path": "tests/test_one.py",
+    }
+
+    def bind(proposed: dict[str, str]) -> None:
+        RouteRecipeCatalog.bind_parameters(
+            "workspace_coding_loop",
+            "\n".join(proposed.values()),
+            proposed,
+            fixed_parameters={"test_kind": "python"},
+        )
+
+    bind(base)
+    unread = {
+        **base,
+        "changes_json": valid_changes.replace("backend/two.py", "backend/three.py"),
+    }
+    with pytest.raises(RouteRecipeError, match="exactly match both Reader"):
+        bind(unread)
+
+    escaped = {
+        **base,
+        "primary_path": "outside/one.py",
+        "changes_json": valid_changes.replace("backend/one.py", "outside/one.py"),
+    }
+    with pytest.raises(RouteRecipeError, match="stay inside the project"):
+        bind(escaped)
+
+    traversal = {**base, "test_path": "../tests/test_one.py"}
+    with pytest.raises(RouteRecipeError, match="safe relative path"):
+        bind(traversal)

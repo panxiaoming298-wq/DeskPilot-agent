@@ -191,11 +191,14 @@ class AgentVerifiedResultBridge:
         verification_proof: WorkspaceReaderVerificationProof,
         *,
         allow_pending_node_transition: bool = False,
+        expected_route_id: str = "workspace_file_read",
+        expected_source_local_key: str = "workspace_file_read",
+        source_parameter_name: str = "path",
     ) -> VerifiedCapabilityResultRef:
         resolved = cls._resolve_plan_proof(
             plan_proof,
-            expected_route_id="workspace_file_read",
-            expected_source_local_key="workspace_file_read",
+            expected_route_id=expected_route_id,
+            expected_source_local_key=expected_source_local_key,
             expected_agent_id="builtin.workspace_reader",
             expected_capability_id="workspace.file.read.v1",
             allow_pending_node_transition=allow_pending_node_transition,
@@ -210,7 +213,7 @@ class AgentVerifiedResultBridge:
                 "Workspace Reader result Schema was rejected"
             ) from error
         cls._assert_agent_result_record(plan_proof, result)
-        bound_path = cls._parameter(plan_proof.step_binding, "path")
+        bound_path = cls._parameter(plan_proof.step_binding, source_parameter_name)
         if workspace.relative_path != bound_path:
             raise AgentVerifiedResultSourceBindingError(
                 "Workspace path does not match the immutable source-step binding"

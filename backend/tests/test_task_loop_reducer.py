@@ -169,6 +169,27 @@ def test_active_claim_prevents_parallel_dispatch_from_one_reducer() -> None:
     assert command.reason_code == "NODE_EXECUTION_IN_FLIGHT"
 
 
+def test_two_ready_agents_form_one_canonical_parallel_batch() -> None:
+    second = _node(
+        "4",
+        local_key="inspect_secondary",
+        channel="agent",
+        status="ready",
+    )
+    first = _node(
+        "3",
+        local_key="inspect_primary",
+        channel="agent",
+        status="ready",
+    )
+
+    command = TaskLoopReducer().decide(_snapshot(second, first))
+
+    assert command.kind == "execute_agent_batch"
+    assert command.node_id is None
+    assert command.node_ids == tuple(sorted((first.node_id, second.node_id)))
+
+
 def test_waiting_user_and_budget_are_stable_commands() -> None:
     waiting = _node(
         "3",

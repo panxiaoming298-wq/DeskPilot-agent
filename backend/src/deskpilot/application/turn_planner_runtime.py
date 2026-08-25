@@ -602,7 +602,7 @@ class TurnPlannerRuntime:
             )
             is_planner_only_single = bool(
                 adjudication.outcome == "single_step"
-                and binding.status == "bound"
+                and binding.status == "task_loop_deferred"
                 and binding.reason_code == "MODEL_PLANNER_SINGLE_STEP"
                 and len(adjudication.selected_offers) == 1
             )
@@ -628,10 +628,7 @@ class TurnPlannerRuntime:
                     )
                 if is_planner_only_single and (
                     binding.offer != offer.ref
-                    or binding.plan is None
-                    or binding.plan.plan_id != offer.expected_plan.plan_id
-                    or binding.plan.plan_manifest_digest
-                    != offer.expected_plan.plan_manifest_digest
+                    or binding.plan is not None
                 ):
                     raise TurnPlannerProofRejectedError(
                         "Planner-only single-step Binding changed from its Offer"
@@ -679,7 +676,7 @@ class TurnPlannerRuntime:
             adjudication is None
             or binding is None
             or adjudication.outcome != "single_step"
-            or binding.status != "bound"
+            or binding.status not in {"bound", "task_loop_deferred"}
             or len(adjudication.selected_offers) != 1
             or adjudication.proposal_manifest is None
         ):
@@ -1556,14 +1553,24 @@ class TurnPlannerRuntime:
         for _ in range(3):
             try:
                 async with self._database.session() as session, session.begin():
-                    activated = (
-                        await self._planning.activate_initial_once_in_session(
-                            session,
-                            draft.contract,
-                            draft.draft,
+                    # Planner-only single Offers are authorization inputs for the
+                    # generic Task Loop.  Their source Plan must not consume the
+                    # task's generation-1 planning slot: the composed Task Loop
+                    # Plan is the only plan that may be activated and executed.
+                    if RouteRecipeCatalog.is_planner_only_route(
+                        offer.trusted_recipe.route_id
+                    ):
+                        activated_plan = offer.expected_plan
+                    else:
+                        activated = (
+                            await self._planning.activate_initial_once_in_session(
+                                session,
+                                draft.contract,
+                                draft.draft,
+                            )
                         )
-                    )
-                    if activated.plan != offer.expected_plan:
+                        activated_plan = activated.plan
+                    if activated_plan != offer.expected_plan:
                         raise TurnPlannerProofRejectedError(
                             "Activated Plan changed from the precompiled Offer"
                         )
@@ -1634,7 +1641,7 @@ class TurnPlannerRuntime:
                         adjudication=adjudication,
                         offer=offer,
                         parameters=parameters,
-                        plan=activated.plan,
+                        plan=activated_plan,
                         route=route,
                         now=now,
                     )
@@ -1807,11 +1814,18 @@ class TurnPlannerRuntime:
             raise TurnPlannerProofRejectedError(
                 "Bound Plan changed from the precompiled Offer"
             )
-        plan_ref = TurnPlanningPlanRef(
-            plan_id=plan.plan_id,
-            plan_generation=plan.plan_generation,
-            plan_manifest_digest=plan.plan_manifest_digest,
-            task_contract=plan.task_contract,
+        planner_only = RouteRecipeCatalog.is_planner_only_route(
+            offer.trusted_recipe.route_id
+        )
+        plan_ref = (
+            None
+            if planner_only
+            else TurnPlanningPlanRef(
+                plan_id=plan.plan_id,
+                plan_generation=plan.plan_generation,
+                plan_manifest_digest=plan.plan_manifest_digest,
+                task_contract=plan.task_contract,
+            )
         )
         binding = TurnPlanBinding.build(
             task_id=run.task_id,
@@ -1819,7 +1833,7 @@ class TurnPlannerRuntime:
             user_message_digest=run.user_message_digest,
             adjudication_id=adjudication.adjudication_id,
             adjudication_digest=adjudication.adjudication_digest,
-            status="bound",
+            status="task_loop_deferred" if planner_only else "bound",
             offer=offer.ref,
             plan=plan_ref,
             reason_code="MODEL_PLANNER_SINGLE_STEP",
@@ -1931,12 +1945,18 @@ class TurnPlannerRuntime:
                         draft=draft,
                         message=message,
                     )
-                    activated = await self._planning.activate_initial_once_in_session(
-                        session,
-                        draft.contract,
-                        draft.draft,
-                    )
-                    if activated.plan != offer.expected_plan:
+                    if RouteRecipeCatalog.is_planner_only_route(
+                        offer.trusted_recipe.route_id
+                    ):
+                        activated_plan = offer.expected_plan
+                    else:
+                        activated = await self._planning.activate_initial_once_in_session(
+                            session,
+                            draft.contract,
+                            draft.draft,
+                        )
+                        activated_plan = activated.plan
+                    if activated_plan != offer.expected_plan:
                         raise TurnPlannerProofRejectedError(
                             "Activated Plan changed from the precompiled Offer"
                         )
@@ -2003,7 +2023,7 @@ class TurnPlannerRuntime:
                         adjudication=adjudication,
                         offer=offer,
                         parameters=parameters,
-                        plan=activated.plan,
+                        plan=activated_plan,
                         route=route,
                         now=now,
                     )

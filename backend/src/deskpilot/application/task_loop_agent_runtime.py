@@ -84,7 +84,17 @@ from deskpilot.infrastructure.models import (
     utc_now,
 )
 
-AgentSourceRoute = Literal["research_to_html", "workspace_file_read"]
+AgentSourceRoute = Literal[
+    "research_to_html",
+    "workspace_file_read",
+    "workspace_coding_loop",
+]
+AgentSourceParameter = Literal[
+    "goal",
+    "path",
+    "primary_path",
+    "secondary_path",
+]
 
 
 class TaskLoopAgentRuntimeError(RuntimeError):
@@ -128,7 +138,7 @@ class SourceBoundAgentClaim:
     binding: ModelPlannerNodeBinding
     attempt: TaskLoopNodeAttempt
     route_id: AgentSourceRoute
-    parameter_name: Literal["goal", "path"]
+    parameter_name: AgentSourceParameter
     parameter_value: str
     claimed: ClaimedInvocation
 
@@ -137,23 +147,37 @@ class SourceBoundAgentClaim:
 class _AgentProfile:
     route_id: AgentSourceRoute
     source_local_key: str
-    parameter_name: Literal["goal", "path"]
+    parameter_name: AgentSourceParameter
     agent_id: str
     capability_id: str
 
 
-_PROFILES: dict[AgentSourceRoute, _AgentProfile] = {
-    "research_to_html": _AgentProfile(
+_PROFILES: dict[tuple[AgentSourceRoute, str], _AgentProfile] = {
+    ("research_to_html", "research"): _AgentProfile(
         route_id="research_to_html",
         source_local_key="research",
         parameter_name="goal",
         agent_id="builtin.web_researcher",
         capability_id="research.read.v1",
     ),
-    "workspace_file_read": _AgentProfile(
+    ("workspace_file_read", "workspace_file_read"): _AgentProfile(
         route_id="workspace_file_read",
         source_local_key="workspace_file_read",
         parameter_name="path",
+        agent_id="builtin.workspace_reader",
+        capability_id="workspace.file.read.v1",
+    ),
+    ("workspace_coding_loop", "inspect_primary"): _AgentProfile(
+        route_id="workspace_coding_loop",
+        source_local_key="inspect_primary",
+        parameter_name="primary_path",
+        agent_id="builtin.workspace_reader",
+        capability_id="workspace.file.read.v1",
+    ),
+    ("workspace_coding_loop", "inspect_secondary"): _AgentProfile(
+        route_id="workspace_coding_loop",
+        source_local_key="inspect_secondary",
+        parameter_name="secondary_path",
         agent_id="builtin.workspace_reader",
         capability_id="workspace.file.read.v1",
     ),
@@ -184,6 +208,7 @@ class TaskLoopAgentRuntime:
         owner_id: str,
         *,
         lease_seconds: int = 60,
+        node_id: str | None = None,
     ) -> SourceBoundAgentClaim | None:
         """Claim the first exact source-bound Agent and create its shared attempt.
 
@@ -193,7 +218,7 @@ class TaskLoopAgentRuntime:
         """
 
         async with self._database.session() as session:
-            selected = await self._select_next(session, execution_id)
+            selected = await self._select_next(session, execution_id, node_id=node_id)
         if selected is None:
             return None
         execution, binding, profile = selected
@@ -201,6 +226,7 @@ class TaskLoopAgentRuntime:
             execution.run_id,
             owner_id,
             lease_seconds=lease_seconds,
+            node_id=binding.composite_node_id,
         )
         if claimed is None:
             return None
@@ -219,6 +245,7 @@ class TaskLoopAgentRuntime:
     async def recover_pending(
         self,
         execution_id: str,
+        node_id: str | None = None,
     ) -> SourceBoundAgentClaim | None:
         """Reconstruct one persisted verification claim after process restart.
 
@@ -234,15 +261,21 @@ class TaskLoopAgentRuntime:
             execution = self._execution_from_record(execution_record)
             if execution.status != "active":
                 return None
+            attempt_query = select(TaskLoopNodeAttemptRecord).where(
+                TaskLoopNodeAttemptRecord.execution_id == execution_id,
+                TaskLoopNodeAttemptRecord.status == "awaiting_verification",
+            )
+            if node_id is not None:
+                attempt_query = attempt_query.where(
+                    TaskLoopNodeAttemptRecord.node_id == node_id
+                )
             attempts = tuple(
                 (
                     await session.scalars(
-                        select(TaskLoopNodeAttemptRecord)
-                        .where(
-                            TaskLoopNodeAttemptRecord.execution_id == execution_id,
-                            TaskLoopNodeAttemptRecord.status == "awaiting_verification",
+                        attempt_query.order_by(
+                            TaskLoopNodeAttemptRecord.node_id,
+                            TaskLoopNodeAttemptRecord.created_at,
                         )
-                        .order_by(TaskLoopNodeAttemptRecord.created_at)
                     )
                 ).all()
             )
@@ -250,7 +283,7 @@ class TaskLoopAgentRuntime:
                 return None
             if len(attempts) > 1:
                 raise TaskLoopAgentProofRejectedError(
-                    "Task Loop has more than one pending Agent verification"
+                    "Task Loop recovery target is not a unique Agent verification"
                 )
             attempt_record = attempts[0]
             attempt = self._attempt_from_record(attempt_record)
@@ -320,6 +353,45 @@ class TaskLoopAgentRuntime:
                 claimed=claimed,
             )
 
+    async def claim_batch(
+        self,
+        execution_id: str,
+        owner_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        lease_seconds: int = 60,
+    ) -> tuple[SourceBoundAgentClaim, ...]:
+        """Claim one canonical ready Agent batch without broadening authority.
+
+        ``AgentExecutionRuntime`` enforces its configured parallel ceiling for
+        every individual claim.  The caller supplies only node identities that
+        came from one proof-checked reducer snapshot; parameters and Agent
+        authority are reloaded independently for every claim.
+        """
+
+        if not 2 <= len(node_ids) <= 2 or tuple(sorted(node_ids)) != node_ids:
+            raise TaskLoopAgentProofRejectedError(
+                "Parallel Agent batch must contain two canonical node IDs"
+            )
+        claims: list[SourceBoundAgentClaim] = []
+        for node_id in node_ids:
+            claimed = await self.claim_next(
+                execution_id,
+                owner_id,
+                lease_seconds=lease_seconds,
+                node_id=node_id,
+            )
+            if claimed is None:
+                raise TaskLoopAgentConflictError(
+                    "Parallel Agent batch could not acquire every selected node"
+                )
+            claims.append(claimed)
+        if {item.binding.composite_node_id for item in claims} != set(node_ids):
+            raise TaskLoopAgentConflictError(
+                "Parallel Agent claims differ from their reducer-selected batch"
+            )
+        return tuple(sorted(claims, key=lambda item: item.binding.composite_node_id))
+
     async def run_research(self, source: SourceBoundAgentClaim) -> object:
         """Run existing ResearchRuntime with only the sealed ``goal`` value."""
 
@@ -348,7 +420,7 @@ class TaskLoopAgentRuntime:
         :meth:`persist_verified_result` can accept it.
         """
 
-        if source.route_id != "workspace_file_read" or source.parameter_name != "path":
+        if not self._is_workspace_file_source(source):
             raise TaskLoopAgentConflictError(
                 "Source-bound claim is not a Workspace file-read node"
             )
@@ -379,7 +451,7 @@ class TaskLoopAgentRuntime:
     ) -> AgentOutputResult:
         """Persist a deterministic Workspace candidate without minting ResultRef."""
 
-        if source.route_id != "workspace_file_read" or source.parameter_name != "path":
+        if not self._is_workspace_file_source(source):
             raise TaskLoopAgentConflictError(
                 "Source-bound claim is not a Workspace file-read node"
             )
@@ -516,6 +588,9 @@ class TaskLoopAgentRuntime:
                         plan_proof,
                         workspace_proof,
                         allow_pending_node_transition=True,
+                        expected_route_id=profile.route_id,
+                        expected_source_local_key=profile.source_local_key,
+                        source_parameter_name=profile.parameter_name,
                     )
                     output_manifest = dict(workspace_proof.workspace_result.manifest)
                     verification_manifest = {
@@ -532,18 +607,12 @@ class TaskLoopAgentRuntime:
                         "agent_result_digest": result.result_digest,
                     }
 
-                agent_binding_manifest = {
-                    "schema_version": "deskpilot.agent-result-binding-reference.v1",
-                    "node_binding_id": binding.node_binding_id,
-                    "node_binding_digest": binding.binding_digest,
-                    "bound_agent": (
-                        binding.effective_authority.bound_agent.model_dump(mode="json")
-                        if binding.effective_authority.bound_agent is not None
-                        else None
-                    ),
-                    "invocation_id": invocation.invocation_id,
-                    "invocation_attempt": invocation.attempt,
-                }
+                bound_agent = binding.effective_authority.bound_agent
+                if bound_agent is None:
+                    raise TaskLoopAgentProofRejectedError(
+                        "Agent node lost its exact effective Agent authority"
+                    )
+                agent_binding_manifest = bound_agent.model_dump(mode="json")
                 agent_binding_digest = sha256_digest(agent_binding_manifest)
                 agent_result_proof_digest = sha256_digest(
                     {
@@ -588,7 +657,7 @@ class TaskLoopAgentRuntime:
                     agent_binding_digest=agent_binding_digest,
                     executor_manifest_digest=None,
                     agent_result_proof_digest=agent_result_proof_digest,
-                    input_binding_digest=binding.bound_input_digest,
+                    input_binding_digest=attempt.input_digest,
                     context_digest=attempt.context_digest,
                     candidate_digest=None,
                     result_kind=result_ref.result_kind.value,
@@ -735,6 +804,8 @@ class TaskLoopAgentRuntime:
         self,
         session: AsyncSession,
         execution_id: str,
+        *,
+        node_id: str | None = None,
     ) -> tuple[TaskLoopExecution, ModelPlannerNodeBinding, _AgentProfile] | None:
         record = await session.get(TaskLoopExecutionRecord, execution_id)
         if record is None:
@@ -742,7 +813,7 @@ class TaskLoopAgentRuntime:
         execution = self._execution_from_record(record)
         if execution.status != "active":
             return None
-        node = await session.scalar(
+        node_statement = (
             select(TaskExecutionNodeRecord)
             .where(
                 TaskExecutionNodeRecord.run_id == execution.run_id,
@@ -750,7 +821,13 @@ class TaskLoopAgentRuntime:
                 TaskExecutionNodeRecord.runtime_enabled.is_(True),
                 TaskExecutionNodeRecord.bound_agent.is_not(None),
             )
-            .order_by(TaskExecutionNodeRecord.local_key)
+        )
+        if node_id is not None:
+            node_statement = node_statement.where(
+                TaskExecutionNodeRecord.node_id == node_id
+            )
+        node = await session.scalar(
+            node_statement.order_by(TaskExecutionNodeRecord.local_key)
             .limit(1)
         )
         if node is None:
@@ -1480,14 +1557,26 @@ class TaskLoopAgentRuntime:
                 "Agent node authority or runtime eligibility changed"
             )
         values = binding.bound_input_manifest
-        if set(values) != {profile.parameter_name} or not values[profile.parameter_name]:
+        if not values.get(profile.parameter_name):
             raise TaskLoopAgentProofRejectedError(
                 "Agent source-step input shape changed"
             )
         parameter_values = {
             item.parameter_name: item.value for item in binding.parameter_bindings
         }
-        if parameter_values != values:
+        fixed_names = (
+            {"test_kind"}
+            if profile.route_id == "workspace_coding_loop"
+            else set()
+        )
+        if (
+            set(values) != set(parameter_values) | fixed_names
+            or any(values.get(name) != value for name, value in parameter_values.items())
+            or (
+                fixed_names
+                and values.get("test_kind") not in {"python", "node"}
+            )
+        ):
             raise TaskLoopAgentProofRejectedError(
                 "Agent source-step parameter binding changed"
             )
@@ -1571,12 +1660,28 @@ class TaskLoopAgentRuntime:
 
     @staticmethod
     def _profile(binding: ModelPlannerNodeBinding) -> _AgentProfile:
-        profile = _PROFILES.get(cast(AgentSourceRoute, binding.recipe.route_id))
+        profile = _PROFILES.get(
+            (
+                cast(AgentSourceRoute, binding.recipe.route_id),
+                binding.mapping.source_local_key,
+            )
+        )
         if profile is None:
             raise TaskLoopAgentProofRejectedError(
                 "Agent source Route is not activated by stage 112B"
             )
         return profile
+
+    @staticmethod
+    def _is_workspace_file_source(source: SourceBoundAgentClaim) -> bool:
+        return source.route_id in {
+            "workspace_file_read",
+            "workspace_coding_loop",
+        } and source.parameter_name in {
+            "path",
+            "primary_path",
+            "secondary_path",
+        }
 
     @staticmethod
     def _execution_from_record(record: TaskLoopExecutionRecord) -> TaskLoopExecution:

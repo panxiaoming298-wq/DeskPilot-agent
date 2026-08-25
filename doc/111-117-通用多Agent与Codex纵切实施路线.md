@@ -181,6 +181,8 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 > 实施授权：不依赖 115B 外部授权。自动化可以使用 LOCAL-only/Fake Provider 证明持久化、并行、fencing、审批和恢复语义，但不能证明真实模型质量。
 
+> 第一检查点（2026-08-26）：同一持久 TaskLoop 已走通两个独立 Reader 并行调查、双 verified ResultRef join、精确双文件 Patch 确认、服务器固定 Test、一次已知失败 Repair、final acceptance 和结构化 Delivery 证据持久化。重启恢复不重跑已验证 Reader，失败 ResultRef 不解锁后继。尚未闭合同会话 amendment 的旧 generation/lease fencing、真实版本化 Patch Planner Model Handoff 和用户可见 Delivery 投影，因此 116B 仍为进行中。详见[第一检查点文档](116B-持久并行编码循环第一检查点.md)。
+
 - Turn Planner、Dynamic Coordinator、Explorer/Reader、Patch Planner、Test Runner 与独立 Verifier 通过版本化 Contract/Handoff 协作；至少证明两个独立 Child 并行调查和一个依赖 verified ResultRef 的 join。
 - 同一会话的新用户消息可以补充约束、纠正方向或要求停止；服务器封存旧 generation/lease，生成新的不可变计划代，不把迟到结果绑定到新计划。
 - 执行循环覆盖 `Inspect → Plan → Delegate → Patch → Test → Repair → Verify → Deliver`，测试失败只能在总预算、最大计划代和 no-progress 约束内继续。

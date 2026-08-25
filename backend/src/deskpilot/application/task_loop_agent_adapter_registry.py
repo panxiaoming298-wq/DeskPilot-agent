@@ -22,12 +22,16 @@ class TaskLoopAgentAdapterManifest(BaseModel):
         "deskpilot.task-loop-agent-adapter.v1"
     )
     adapter_id: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,127}$")
-    route_id: Literal["research_to_html", "workspace_file_read"]
+    route_id: Literal[
+        "research_to_html",
+        "workspace_file_read",
+        "workspace_coding_loop",
+    ]
     source_local_key: str = Field(min_length=1, max_length=64)
     agent_id: str = Field(min_length=1, max_length=128)
     agent_versions: tuple[str, ...] = Field(min_length=1, max_length=8)
     capability_id: str = Field(min_length=1, max_length=128)
-    parameter_name: Literal["goal", "path"]
+    parameter_name: Literal["goal", "path", "primary_path", "secondary_path"]
     runtime_enabled: Literal[True] = True
     manifest_digest: str = Field(pattern=DIGEST_PATTERN)
 
@@ -60,11 +64,11 @@ class TaskLoopAgentAdapterRegistry:
         self,
         manifests: tuple[TaskLoopAgentAdapterManifest, ...] = (),
     ) -> None:
-        self._by_route: dict[str, TaskLoopAgentAdapterManifest] = {
-            item.route_id: item for item in manifests
+        self._by_route_node: dict[tuple[str, str], TaskLoopAgentAdapterManifest] = {
+            (item.route_id, item.source_local_key): item for item in manifests
         }
-        if len(self._by_route) != len(manifests):
-            raise ValueError("Task Loop Agent adapter Routes must be unique")
+        if len(self._by_route_node) != len(manifests):
+            raise ValueError("Task Loop Agent adapter Route/node pairs must be unique")
 
     def resolve(
         self,
@@ -74,7 +78,7 @@ class TaskLoopAgentAdapterRegistry:
         bound_agent: BoundAgentRef,
         capability: CapabilityRef,
     ) -> TaskLoopAgentAdapterManifest:
-        manifest = self._by_route.get(route_id)
+        manifest = self._by_route_node.get((route_id, source_local_key))
         if (
             manifest is None
             or not manifest.runtime_enabled
@@ -89,7 +93,10 @@ class TaskLoopAgentAdapterRegistry:
         return manifest
 
     def manifests(self) -> tuple[TaskLoopAgentAdapterManifest, ...]:
-        return tuple(self._by_route[key] for key in sorted(self._by_route))
+        return tuple(
+            self._by_route_node[key]
+            for key in sorted(self._by_route_node)
+        )
 
     @property
     def snapshot_digest(self) -> str:
@@ -102,6 +109,7 @@ def create_task_loop_agent_adapter_registry(
     *,
     research_available: bool,
     workspace_file_available: bool,
+    workspace_coding_loop_available: bool = False,
 ) -> TaskLoopAgentAdapterRegistry:
     manifests: list[TaskLoopAgentAdapterManifest] = []
     if research_available:
@@ -126,6 +134,29 @@ def create_task_loop_agent_adapter_registry(
                 agent_versions=("1.0.0", "1.1.0", "1.2.0"),
                 capability_id="workspace.file.read.v1",
                 parameter_name="path",
+            )
+        )
+    if workspace_coding_loop_available:
+        manifests.extend(
+            (
+                TaskLoopAgentAdapterManifest.build(
+                    adapter_id="builtin.task-loop.workspace-coding-primary.v1",
+                    route_id="workspace_coding_loop",
+                    source_local_key="inspect_primary",
+                    agent_id="builtin.workspace_reader",
+                    agent_versions=("1.0.0", "1.1.0", "1.2.0"),
+                    capability_id="workspace.file.read.v1",
+                    parameter_name="primary_path",
+                ),
+                TaskLoopAgentAdapterManifest.build(
+                    adapter_id="builtin.task-loop.workspace-coding-secondary.v1",
+                    route_id="workspace_coding_loop",
+                    source_local_key="inspect_secondary",
+                    agent_id="builtin.workspace_reader",
+                    agent_versions=("1.0.0", "1.1.0", "1.2.0"),
+                    capability_id="workspace.file.read.v1",
+                    parameter_name="secondary_path",
+                ),
             )
         )
     return TaskLoopAgentAdapterRegistry(tuple(manifests))

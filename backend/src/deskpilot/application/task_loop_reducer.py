@@ -47,6 +47,7 @@ TaskLoopReducerCommandKind = Literal[
     "activate_plan",
     "execute_capability",
     "execute_agent",
+    "execute_agent_batch",
     "verify_candidate",
     "reduce_control_node",
     "wait_user",
@@ -268,6 +269,7 @@ class TaskLoopReducerCommand(BaseModel):
     )
     kind: TaskLoopReducerCommandKind
     node_id: str | None = Field(default=None, pattern=PLAN_NODE_ID_PATTERN)
+    node_ids: tuple[str, ...] = Field(default=(), min_length=0, max_length=2)
     expected_execution_revision: int = Field(ge=0)
     reason_code: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,99}$")
     source_progress_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -283,9 +285,20 @@ class TaskLoopReducerCommand(BaseModel):
             "wait_user",
             "start_repair",
         }
-        if targeted != (self.node_id is not None):
+        batched = self.kind == "execute_agent_batch"
+        if (
+            targeted != (self.node_id is not None)
+            or batched != bool(self.node_ids)
+            or (batched and len(self.node_ids) != 2)
+            or (not batched and self.node_ids)
+            or len(self.node_ids) != len(set(self.node_ids))
+            or tuple(sorted(self.node_ids)) != self.node_ids
+        ):
             raise ValueError("Reducer command target shape is invalid")
         material = self.model_dump(mode="json", exclude={"command_digest"})
+        if not self.node_ids:
+            # Keep every pre-116B command digest byte-for-byte replayable.
+            material.pop("node_ids")
         if self.command_digest != sha256_digest(material):
             raise ValueError("Reducer command digest does not match")
         return self
@@ -298,8 +311,9 @@ class TaskLoopReducerCommand(BaseModel):
         kind: TaskLoopReducerCommandKind,
         reason_code: str,
         node_id: str | None = None,
+        node_ids: tuple[str, ...] = (),
     ) -> Self:
-        values = {
+        values: dict[str, Any] = {
             "schema_version": "deskpilot.task-loop-reducer-command.v1",
             "kind": kind,
             "node_id": node_id,
@@ -307,6 +321,8 @@ class TaskLoopReducerCommand(BaseModel):
             "reason_code": reason_code,
             "source_progress_digest": snapshot.semantic_progress_digest,
         }
+        if node_ids:
+            values["node_ids"] = node_ids
         return cls.model_validate(
             {**values, "command_digest": sha256_digest(values)}
         )
@@ -373,6 +389,27 @@ class TaskLoopReducer:
         if snapshot.active_claim_count:
             return self._command(snapshot, "noop", "NODE_EXECUTION_IN_FLIGHT")
 
+        ready_agents = tuple(
+            sorted(
+                (
+                    item
+                    for item in snapshot.nodes
+                    if item.status == "ready"
+                    and item.channel == "agent"
+                    and item.dependencies_verified
+                ),
+                key=lambda item: (item.local_key, item.node_id),
+            )
+        )
+        if len(ready_agents) >= 2:
+            selected = ready_agents[:2]
+            return self._command(
+                snapshot,
+                "execute_agent_batch",
+                "PARALLEL_AGENT_BATCH_READY",
+                node_ids=tuple(sorted(item.node_id for item in selected)),
+            )
+
         ready = self._first(snapshot, status="ready")
         if ready is not None:
             if not ready.dependencies_verified:
@@ -424,12 +461,14 @@ class TaskLoopReducer:
         reason_code: str,
         *,
         node_id: str | None = None,
+        node_ids: tuple[str, ...] = (),
     ) -> TaskLoopReducerCommand:
         return TaskLoopReducerCommand.build(
             snapshot=snapshot,
             kind=kind,
             reason_code=reason_code,
             node_id=node_id,
+            node_ids=node_ids,
         )
 
 

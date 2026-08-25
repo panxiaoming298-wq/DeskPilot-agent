@@ -96,6 +96,7 @@ RouteId = Literal[
     "workspace_project_batch_read",
     "workspace_git_inspect",
     "workspace_command_profile",
+    "workspace_coding_loop",
 ]
 CLASSIFIER_VERSION = "deskpilot.turn-router.rules.v5"
 MODEL_PLANNER_CLASSIFIER_VERSION = "deskpilot.turn-router.model-planner.v1"
@@ -2144,9 +2145,7 @@ class TurnRouter:
             raise TurnRouteProofRejectedError("Model Route planning proof changed") from error
         if (
             bound is None
-            or binding.status != "bound"
             or binding.offer is None
-            or binding.plan is None
             or adjudication.outcome != "single_step"
             or adjudication.proposal_digest is None
             or adjudication.parameter_bindings_digest is None
@@ -2165,6 +2164,18 @@ class TurnRouter:
         )
         if offer is None:
             raise TurnRouteProofRejectedError("Model Route bound Offer is missing")
+        direct_binding = binding.status == "bound" and binding.plan is not None
+        task_loop_binding = bool(
+            binding.status == "task_loop_deferred"
+            and binding.plan is None
+            and RouteRecipeCatalog.is_planner_only_route(
+                offer.trusted_recipe.route_id
+            )
+        )
+        if not direct_binding and not task_loop_binding:
+            raise TurnRouteProofRejectedError(
+                "Model Route has neither direct nor Task Loop execution authority"
+            )
         if (
             record.user_message_id != run.user_message_id
             or message_digest != run.user_message_digest
@@ -2196,8 +2207,16 @@ class TurnRouter:
             recipe_digest=offer.trusted_recipe.route_manifest_digest,
             parameter_bindings_digest=adjudication.parameter_bindings_digest,
             contract_digest=offer.task_contract.digest,
-            plan_id=binding.plan.plan_id,
-            plan_manifest_digest=binding.plan.plan_manifest_digest,
+            plan_id=(
+                binding.plan.plan_id
+                if binding.plan is not None
+                else offer.expected_plan.plan_id
+            ),
+            plan_manifest_digest=(
+                binding.plan.plan_manifest_digest
+                if binding.plan is not None
+                else offer.expected_plan.plan_manifest_digest
+            ),
             model_candidate_digest=adjudication.proposal_digest,
             candidate_digest=bound.candidate_digest,
         )

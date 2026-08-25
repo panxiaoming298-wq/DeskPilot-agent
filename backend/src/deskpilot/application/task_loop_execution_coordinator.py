@@ -9,9 +9,10 @@ path rather than a reason to replay a Provider call.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ValidationError
 from sqlalchemy import func, select
@@ -21,9 +22,16 @@ from deskpilot.application.artifact_delivery_runtime import (
     ArtifactDeliveryError,
     ArtifactDeliveryRuntime,
 )
+from deskpilot.application.builtin_capability_executors import (
+    WorkspacePatchCapabilityOutput,
+)
 from deskpilot.application.capability_execution_runtime import (
     CapabilityExecutionRuntime,
     CapabilityExecutionRuntimeError,
+)
+from deskpilot.application.capability_input_binding_catalog import (
+    BoundCapabilityInput,
+    WorkspacePatchBundleExecutorInput,
 )
 from deskpilot.application.task_loop_activation_runtime import (
     TaskLoopActivationRuntime,
@@ -52,11 +60,17 @@ from deskpilot.domain.task_loop_execution import (
     TaskLoopVerifiedResult,
 )
 from deskpilot.domain.task_plans import DraftNodeKind, PlanNodeBudget
-from deskpilot.domain.workspace_files import WorkspacePatchPreview
+from deskpilot.domain.workspace_files import (
+    WorkspaceFileRead,
+    WorkspaceNodeTestRead,
+    WorkspacePatchPreview,
+    WorkspacePythonTestRead,
+)
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
     AgentInvocationRecord,
     AgentModelTurnRecord,
+    ModelPlannerNodeBindingRecord,
     TaskExecutionNodeRecord,
     TaskExecutionRunRecord,
     TaskLoopCapabilityApprovalRecord,
@@ -66,6 +80,7 @@ from deskpilot.infrastructure.models import (
     TaskLoopNodeAttemptRecord,
     TaskLoopVerifiedResultRecord,
     TaskRecord,
+    WorkspaceCodingDeliveryRecord,
     utc_now,
 )
 
@@ -133,6 +148,8 @@ class TaskLoopExecutionCoordinator:
             await self._execute_capability(task_id, owner_id, command)
         elif command.kind == "execute_agent":
             await self._execute_agent(before, owner_id, command)
+        elif command.kind == "execute_agent_batch":
+            await self._execute_agent_batch(before, owner_id, command)
         elif command.kind == "verify_candidate":
             await self._verify_candidate(before, task_id, owner_id, command)
         elif command.kind == "reduce_control_node":
@@ -216,14 +233,62 @@ class TaskLoopExecutionCoordinator:
             raise TaskLoopExecutionCoordinatorUnavailableError(
                 "Agent Task Loop runtime is unavailable"
             )
-        source = await self._agents.claim_next(execution.execution_id, owner_id)
+        source = await self._agents.claim_next(
+            execution.execution_id,
+            owner_id,
+            node_id=command.node_id,
+        )
         if source is None or source.binding.composite_node_id != command.node_id:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Agent runtime did not claim the reducer-selected node"
             )
+        await self._run_agent_candidate(source)
+
+    async def _execute_agent_batch(
+        self,
+        read: TaskLoopExecutionRead,
+        owner_id: str,
+        command: TaskLoopReducerCommand,
+    ) -> None:
+        execution = self._required_execution(read)
+        if self._agents is None or len(command.node_ids) != 2:
+            raise TaskLoopExecutionCoordinatorUnavailableError(
+                "Parallel Agent Task Loop runtime is unavailable"
+            )
+        selected = {
+            item.node_id: item
+            for item in read.nodes
+            if item.node_id in set(command.node_ids)
+        }
+        if (
+            set(selected) != set(command.node_ids)
+            or any(
+                item.kind is not DraftNodeKind.AGENT
+                or item.status != "ready"
+                or not item.dependencies_verified
+                for item in selected.values()
+            )
+        ):
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Parallel Agent batch changed after reducer selection"
+            )
+        claims = await self._agents.claim_batch(
+            execution.execution_id,
+            owner_id,
+            command.node_ids,
+        )
+        await asyncio.gather(
+            *(self._run_agent_candidate(source) for source in claims)
+        )
+
+    async def _run_agent_candidate(self, source: SourceBoundAgentClaim) -> None:
+        if self._agents is None:
+            raise TaskLoopExecutionCoordinatorUnavailableError(
+                "Agent Task Loop runtime is unavailable"
+            )
         if source.route_id == "research_to_html":
             await self._agents.run_research(source)
-        elif source.route_id == "workspace_file_read":
+        elif source.route_id in {"workspace_file_read", "workspace_coding_loop"}:
             await self._agents.run_workspace_file_candidate(source)
         else:  # pragma: no cover - registry and dataclass Literals are closed.
             raise TaskLoopExecutionCoordinatorProofRejectedError(
@@ -250,7 +315,10 @@ class TaskLoopExecutionCoordinator:
                 "Only Agent or Capability nodes may expose candidates"
             )
         execution = self._required_execution(read)
-        source = await self._agents.recover_pending(execution.execution_id)
+        source = await self._agents.recover_pending(
+            execution.execution_id,
+            node_id=command.node_id,
+        )
         if source is None or source.binding.composite_node_id != command.node_id:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Persisted Agent candidate differs from the reducer target"
@@ -283,7 +351,7 @@ class TaskLoopExecutionCoordinator:
             raise TaskLoopExecutionCoordinatorUnavailableError(
                 "Turn Planner proof runtime is unavailable"
             )
-        deferred = await self._turn_planner.revalidate_deferred_plan(task_id)
+        deferred = await self._turn_planner.revalidate_task_loop_plan(task_id)
         ordinal = source.binding.step_ordinal
         if not 1 <= ordinal <= len(deferred.steps):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
@@ -389,7 +457,13 @@ class TaskLoopExecutionCoordinator:
             item
             for item in results
             if not (
-                item.result_kind == CapabilityResultKind.COMMAND_PROFILE.value
+                item.result_kind
+                in {
+                    CapabilityResultKind.WORKSPACE_CHECK.value,
+                    CapabilityResultKind.PYTHON_TEST.value,
+                    CapabilityResultKind.NODE_TEST.value,
+                    CapabilityResultKind.COMMAND_PROFILE.value,
+                }
                 and item.output_manifest.get("status") != "passed"
             )
         )
@@ -535,6 +609,11 @@ class TaskLoopExecutionCoordinator:
                     "Delivery control state changed before completion"
                 )
             now = utc_now()
+            await self._persist_workspace_coding_delivery(
+                session,
+                execution,
+                now=now,
+            )
             node.status = "verified"
             node.revision += 1
             node.updated_at = now
@@ -550,6 +629,291 @@ class TaskLoopExecutionCoordinator:
                 kind="succeeded",
                 now=now,
             )
+
+    async def _persist_workspace_coding_delivery(
+        self,
+        session: AsyncSession,
+        execution: TaskLoopExecution,
+        *,
+        now: datetime,
+    ) -> None:
+        bindings = tuple(
+            (
+                await session.scalars(
+                    select(ModelPlannerNodeBindingRecord).where(
+                        ModelPlannerNodeBindingRecord.execution_id
+                        == execution.execution_id
+                    )
+                )
+            ).all()
+        )
+        coding_bindings = tuple(
+            item
+            for item in bindings
+            if item.recipe_manifest.get("route_id") == "workspace_coding_loop"
+        )
+        if not coding_bindings:
+            return
+        if len(coding_bindings) != 4 or len(coding_bindings) != len(bindings):
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery has an incomplete Route binding set"
+            )
+        result_records = tuple(
+            (
+                await session.scalars(
+                    select(TaskLoopVerifiedResultRecord)
+                    .where(
+                        TaskLoopVerifiedResultRecord.execution_id
+                        == execution.execution_id
+                    )
+                    .order_by(
+                        TaskLoopVerifiedResultRecord.node_id,
+                        TaskLoopVerifiedResultRecord.created_at,
+                    )
+                )
+            ).all()
+        )
+        try:
+            results = tuple(
+                self._verified_result_from_record(item) for item in result_records
+            )
+        except ValidationError as error:
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery ResultRefs are invalid"
+            ) from error
+        attempts = {
+            item.attempt_id: item
+            for item in (
+                await session.scalars(
+                    select(TaskLoopNodeAttemptRecord).where(
+                        TaskLoopNodeAttemptRecord.execution_id
+                        == execution.execution_id
+                    )
+                )
+            ).all()
+        }
+        if any(item.attempt_id not in attempts for item in results):
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery lost a producer attempt"
+            )
+
+        reader_results = tuple(
+            item
+            for item in results
+            if item.result_kind == CapabilityResultKind.WORKSPACE_FILE.value
+        )
+        patch_results = tuple(
+            item
+            for item in results
+            if item.result_kind == CapabilityResultKind.PATCH_RECEIPT.value
+        )
+        test_results = tuple(
+            item
+            for item in results
+            if item.result_kind
+            in {
+                CapabilityResultKind.PYTHON_TEST.value,
+                CapabilityResultKind.NODE_TEST.value,
+            }
+        )
+        if len(reader_results) != 2 or len(patch_results) != 1 or not 1 <= len(
+            test_results
+        ) <= 2:
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery evidence cardinality changed"
+            )
+        try:
+            readers = tuple(
+                WorkspaceFileRead.model_validate(item.output_manifest)
+                for item in reader_results
+            )
+            patch_result = patch_results[0]
+            patch_output = WorkspacePatchCapabilityOutput.model_validate(
+                patch_result.output_manifest
+            )
+            patch_attempt = attempts[patch_result.attempt_id]
+            bound_patch = BoundCapabilityInput.model_validate(
+                patch_attempt.input_manifest
+            )
+        except (KeyError, ValidationError) as error:
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery evidence Schema changed"
+            ) from error
+        if (
+            patch_output.receipt.status != "committed"
+            or not isinstance(
+                bound_patch.arguments,
+                WorkspacePatchBundleExecutorInput,
+            )
+        ):
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery has no committed exact Patch"
+            )
+        changes = tuple(bound_patch.arguments.changes)
+        change_receipts = {
+            item.relative_path: item for item in patch_output.receipt.change_receipts
+        }
+        changed_paths = {item.path for item in changes}
+        if (
+            len(changes) != 2
+            or len(change_receipts) != 2
+            or set(change_receipts) != changed_paths
+            or {item.relative_path for item in readers} != changed_paths
+        ):
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery Patch differs from Reader scope"
+            )
+
+        test_evidence: list[dict[str, Any]] = []
+        failure_history: list[dict[str, Any]] = []
+        passed_count = 0
+        for result in test_results:
+            try:
+                output = (
+                    WorkspacePythonTestRead.model_validate(result.output_manifest)
+                    if result.result_kind == CapabilityResultKind.PYTHON_TEST.value
+                    else WorkspaceNodeTestRead.model_validate(result.output_manifest)
+                )
+            except ValidationError as error:
+                raise TaskLoopExecutionCoordinatorProofRejectedError(
+                    "Workspace coding delivery test evidence changed"
+                ) from error
+            attempt = attempts[result.attempt_id]
+            test_evidence.append(
+                {
+                    "result_kind": result.result_kind,
+                    "attempt": attempt.attempt,
+                    "project_path": output.project_path,
+                    "test_path": output.test_path,
+                    "status": output.status,
+                    "exit_code": output.exit_code,
+                    "result_ref_digest": result.result_ref_digest,
+                    "result_digest": result.output_digest,
+                    "verification_digest": result.verification_digest,
+                }
+            )
+            if output.status == "passed":
+                passed_count += 1
+                if attempt.status != "verified":
+                    raise TaskLoopExecutionCoordinatorProofRejectedError(
+                        "Passed workspace test is not edge eligible"
+                    )
+            else:
+                if attempt.status != "failed" or attempt.receipt_digest is None:
+                    raise TaskLoopExecutionCoordinatorProofRejectedError(
+                        "Failed workspace test lost its immutable failure receipt"
+                    )
+                failure_history.append(
+                    {
+                        "attempt": attempt.attempt,
+                        "status": output.status,
+                        "result_ref_digest": result.result_ref_digest,
+                        "failure_receipt_digest": attempt.receipt_digest,
+                    }
+                )
+        if passed_count != 1 or len(failure_history) > 1:
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery has no unique successful fixed test"
+            )
+
+        structured_diff = [
+            {
+                "path": item.path,
+                "old_text": item.old_text,
+                "new_text": item.new_text,
+            }
+            for item in sorted(changes, key=lambda item: item.path)
+        ]
+        rollback_points = [
+            {
+                "path": path,
+                "backup_relative_path": change_receipts[path].backup_relative_path,
+                "previous_version_digest": (
+                    change_receipts[path].previous_version_digest
+                ),
+                "version_digest": change_receipts[path].version_digest,
+                "receipt_digest": change_receipts[path].receipt_digest,
+            }
+            for path in sorted(changed_paths)
+        ]
+        reader_evidence = [
+            {
+                "path": reader.relative_path,
+                "version_digest": reader.version_digest,
+                "content_digest": reader.content_digest,
+                "result_ref_digest": next(
+                    item.result_ref_digest
+                    for item in reader_results
+                    if item.output_digest == reader.result_digest
+                ),
+            }
+            for reader in sorted(readers, key=lambda item: item.relative_path)
+        ]
+        delivery_material: dict[str, Any] = {
+            "schema_version": "deskpilot.workspace-coding-delivery.v1",
+            "task_id": execution.task_id,
+            "execution_id": execution.execution_id,
+            "run_id": execution.run_id,
+            "plan_id": execution.plan_id,
+            "plan_generation": execution.plan_generation,
+            "plan_manifest_digest": execution.plan_manifest_digest,
+            "reader_evidence": reader_evidence,
+            "structured_diff": structured_diff,
+            "diff_digest": sha256_digest({"changes": structured_diff}),
+            "patch_result_ref_digest": patch_result.result_ref_digest,
+            "patch_receipt_digest": patch_output.receipt.receipt_digest,
+            "changed_files": sorted(changed_paths),
+            "test_runs": sorted(test_evidence, key=lambda item: int(item["attempt"])),
+            "failure_repair_history": failure_history,
+            "remaining_risks": [
+                "local_fake_model_quality_unproven",
+                "git_commit_not_created",
+            ],
+            "rollback_points": rollback_points,
+            "rollback_available": all(
+                item["backup_relative_path"] is not None for item in rollback_points
+            ),
+            "created_at": now.isoformat(),
+        }
+        delivery_id = f"wcd_{sha256_digest(delivery_material)}"
+        manifest = {**delivery_material, "delivery_id": delivery_id}
+        delivery_digest = sha256_digest(manifest)
+        existing = await session.scalar(
+            select(WorkspaceCodingDeliveryRecord)
+            .where(
+                WorkspaceCodingDeliveryRecord.execution_id
+                == execution.execution_id
+            )
+            .with_for_update()
+        )
+        if existing is not None:
+            if (
+                existing.delivery_id != delivery_id
+                or existing.manifest != manifest
+                or existing.delivery_digest != delivery_digest
+            ):
+                raise TaskLoopExecutionCoordinatorProofRejectedError(
+                    "Workspace coding delivery changed after persistence"
+                )
+            return
+        session.add(
+            WorkspaceCodingDeliveryRecord(
+                delivery_id=delivery_id,
+                execution_id=execution.execution_id,
+                task_id=execution.task_id,
+                run_id=execution.run_id,
+                plan_id=execution.plan_id,
+                plan_manifest_digest=execution.plan_manifest_digest,
+                changed_file_count=len(changed_paths),
+                test_run_count=len(test_results),
+                failure_count=len(failure_history),
+                rollback_available=bool(delivery_material["rollback_available"]),
+                manifest=manifest,
+                delivery_digest=delivery_digest,
+                created_at=now,
+            )
+        )
+        await session.flush()
 
     async def _record_no_progress(
         self,

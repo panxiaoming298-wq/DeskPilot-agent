@@ -1049,9 +1049,14 @@ class CapabilityExecutionRuntime:
             raise CapabilityExecutionRuntimeProofRejectedError(
                 "Capability verification changed its immutable candidate"
             )
-        command_failure = bool(
-            work.bound_input.workspace_command_plan_step is not None
-            and candidate.result_kind is CapabilityResultKind.COMMAND_PROFILE
+        verified_failure = bool(
+            candidate.result_kind
+            in {
+                CapabilityResultKind.WORKSPACE_CHECK,
+                CapabilityResultKind.PYTHON_TEST,
+                CapabilityResultKind.NODE_TEST,
+                CapabilityResultKind.COMMAND_PROFILE,
+            }
             and candidate.output_manifest.get("status") != "passed"
         )
         if (work.bound_input.workspace_command_plan_step is not None) is not (
@@ -1105,6 +1110,25 @@ class CapabilityExecutionRuntime:
             result_ref_digest=result_ref.result_ref_digest,
             created_at=now,
         )
+        failure_code = (
+            "WORKSPACE_COMMAND_STEP_FAILED"
+            if verified_failure
+            and candidate.result_kind is CapabilityResultKind.COMMAND_PROFILE
+            else "CAPABILITY_CHECK_FAILED" if verified_failure else None
+        )
+        failure_receipt = (
+            {
+                "schema_version": "deskpilot.verified-capability-failure-receipt.v1",
+                "attempt_id": work.attempt_id,
+                "result_kind": candidate.result_kind.value,
+                "result_ref_digest": result_ref.result_ref_digest,
+                "result_digest": candidate.result_digest,
+                "verification_digest": verified.verification_digest,
+                "error_code": failure_code,
+            }
+            if verified_failure
+            else None
+        )
         async with self._database.session() as session, session.begin():
             attempt_record, attempt, node = await self._locked_attempt_scope(
                 session,
@@ -1142,7 +1166,13 @@ class CapabilityExecutionRuntime:
                 ).all()
             )
             prior_failure_results = bool(existing_node_results) and all(
-                item.result_kind == CapabilityResultKind.COMMAND_PROFILE.value
+                item.result_kind
+                in {
+                    CapabilityResultKind.WORKSPACE_CHECK.value,
+                    CapabilityResultKind.PYTHON_TEST.value,
+                    CapabilityResultKind.NODE_TEST.value,
+                    CapabilityResultKind.COMMAND_PROFILE.value,
+                }
                 and item.output_manifest.get("status") != "passed"
                 for item in existing_node_results
             )
@@ -1157,20 +1187,26 @@ class CapabilityExecutionRuntime:
 
             updated = self._replace_attempt(
                 attempt,
-                status="failed" if command_failure else "verified",
+                status="failed" if verified_failure else "verified",
                 revision=attempt.revision + 1,
                 claim_expires_at=None,
                 verification_manifest=verified.model_dump(mode="json"),
                 verification_digest=verified.verification_digest,
                 verified_at=now,
-                error_code=("WORKSPACE_COMMAND_STEP_FAILED" if command_failure else None),
+                receipt_manifest=failure_receipt,
+                receipt_digest=(
+                    sha256_digest(failure_receipt)
+                    if failure_receipt is not None
+                    else None
+                ),
+                error_code=failure_code,
                 error_digest=(
                     self._error_digest_values(
                         attempt.attempt_id,
                         attempt.context_digest,
-                        "WORKSPACE_COMMAND_STEP_FAILED",
+                        failure_code or "CAPABILITY_CHECK_FAILED",
                     )
-                    if command_failure
+                    if verified_failure
                     else None
                 ),
                 updated_at=now,
@@ -1178,7 +1214,7 @@ class CapabilityExecutionRuntime:
             self._apply_attempt(attempt_record, updated)
             node.status = (
                 ExecutionNodeStatus.FAILED.value
-                if command_failure
+                if verified_failure
                 else ExecutionNodeStatus.VERIFIED.value
             )
             node.claim_owner_id = None
@@ -1188,7 +1224,7 @@ class CapabilityExecutionRuntime:
             node.revision += 1
             node.updated_at = now
             await session.flush()
-            if not command_failure:
+            if not verified_failure:
                 await self._unlock_verified_successors(
                     session,
                     work.execution,
@@ -1203,9 +1239,9 @@ class CapabilityExecutionRuntime:
             node_id=work.plan_node.node_id,
             attempt_id=work.attempt_id,
             attempt=work.attempt,
-            status="failed" if command_failure else "verified",
+            status="failed" if verified_failure else "verified",
             result_ref=result_ref,
-            error_code=("WORKSPACE_COMMAND_STEP_FAILED" if command_failure else None),
+            error_code=failure_code,
         )
 
     async def _settle_execution_error(
@@ -1801,7 +1837,12 @@ class CapabilityExecutionRuntime:
             if historical_attempt.status == "failed":
                 if (
                     historical_result.result_kind
-                    != CapabilityResultKind.COMMAND_PROFILE.value
+                    not in {
+                        CapabilityResultKind.WORKSPACE_CHECK.value,
+                        CapabilityResultKind.PYTHON_TEST.value,
+                        CapabilityResultKind.NODE_TEST.value,
+                        CapabilityResultKind.COMMAND_PROFILE.value,
+                    }
                     or historical_result.output_manifest.get("status") == "passed"
                 ):
                     raise CapabilityExecutionRuntimeProofRejectedError(

@@ -571,7 +571,8 @@ class TurnPlanBindingRecord(Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint(
-            "status IN ('bound', 'multi_step_deferred', 'not_applicable')",
+            "status IN ('bound', 'multi_step_deferred', 'task_loop_deferred', "
+            "'not_applicable')",
             name="ck_turn_plan_binding_status",
         ),
         CheckConstraint(
@@ -580,6 +581,10 @@ class TurnPlanBindingRecord(Base):
             "plan_generation IS NOT NULL AND plan_manifest_digest IS NOT NULL AND "
             "contract_id IS NOT NULL AND contract_version IS NOT NULL AND "
             "contract_digest IS NOT NULL) OR "
+            "(status = 'task_loop_deferred' AND offer_id IS NOT NULL AND "
+            "offer_digest IS NOT NULL AND plan_id IS NULL AND plan_generation IS NULL "
+            "AND plan_manifest_digest IS NULL AND contract_id IS NULL AND "
+            "contract_version IS NULL AND contract_digest IS NULL) OR "
             "(status IN ('multi_step_deferred', 'not_applicable') AND offer_id IS NULL "
             "AND offer_digest IS NULL "
             "AND plan_id IS NULL AND plan_generation IS NULL AND "
@@ -1425,6 +1430,42 @@ class TaskLoopVerifiedResultRecord(Base):
     verification_digest: Mapped[str] = mapped_column(String(64))
     result_ref_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
     result_ref_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WorkspaceCodingDeliveryRecord(Base):
+    """Immutable evidence delivery for one verified workspace coding loop."""
+
+    __tablename__ = "workspace_coding_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "changed_file_count = 2 AND test_run_count BETWEEN 1 AND 2 "
+            "AND failure_count BETWEEN 0 AND 1",
+            name="ck_workspace_coding_delivery_counts",
+        ),
+        UniqueConstraint("execution_id", name="uq_workspace_coding_delivery_execution"),
+        UniqueConstraint("delivery_digest", name="uq_workspace_coding_delivery_digest"),
+        Index("ix_workspace_coding_deliveries_task", "task_id", "created_at"),
+    )
+
+    delivery_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="CASCADE")
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="RESTRICT")
+    )
+    plan_id: Mapped[str] = mapped_column(String(68))
+    plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    changed_file_count: Mapped[int] = mapped_column(Integer)
+    test_run_count: Mapped[int] = mapped_column(Integer)
+    failure_count: Mapped[int] = mapped_column(Integer)
+    rollback_available: Mapped[bool] = mapped_column(Boolean)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    delivery_digest: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
