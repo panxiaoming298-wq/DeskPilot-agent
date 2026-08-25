@@ -183,6 +183,8 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 > 第一检查点（2026-08-26）：同一持久 TaskLoop 已走通两个独立 Reader 并行调查、双 verified ResultRef join、精确双文件 Patch 确认、服务器固定 Test、一次已知失败 Repair、final acceptance 和结构化 Delivery 证据持久化。重启恢复不重跑已验证 Reader，失败 ResultRef 不解锁后继。尚未闭合同会话 amendment 的旧 generation/lease fencing、真实版本化 Patch Planner Model Handoff 和用户可见 Delivery 投影，因此 116B 仍为进行中。详见[第一检查点文档](116B-持久并行编码循环第一检查点.md)。
 
+> 第二检查点（2026-08-26）：两个真实持久 Patch Planner Model Turn/Handoff 已接入 Reader 与 Patch Capability 之间，只有与服务器封存变更完全一致的 `PATCH_PROPOSAL` ResultRef 才能进入写入 join；同会话新指令会先 cancel/fence 旧 Run、封存 TaskLoop 终止事件，再由 `0059` 把源 Contract/Plan/Execution 绑定到后继 Task/用户消息；成功 Delivery 已通过既有 Workbench/API 返回脱敏 diff、测试、风险和回滚点。Dynamic Coordinator 模型图提案和更真实的有界仓库任务仍待后续，因此 116B 继续标记为进行中。详见[第二检查点文档](116B-持久并行编码循环第二检查点.md)。
+
 - Turn Planner、Dynamic Coordinator、Explorer/Reader、Patch Planner、Test Runner 与独立 Verifier 通过版本化 Contract/Handoff 协作；至少证明两个独立 Child 并行调查和一个依赖 verified ResultRef 的 join。
 - 同一会话的新用户消息可以补充约束、纠正方向或要求停止；服务器封存旧 generation/lease，生成新的不可变计划代，不把迟到结果绑定到新计划。
 - 执行循环覆盖 `Inspect → Plan → Delegate → Patch → Test → Repair → Verify → Deliver`，测试失败只能在总预算、最大计划代和 no-progress 约束内继续。

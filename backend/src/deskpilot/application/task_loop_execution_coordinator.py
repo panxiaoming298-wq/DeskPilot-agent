@@ -60,6 +60,9 @@ from deskpilot.domain.task_loop_execution import (
     TaskLoopVerifiedResult,
 )
 from deskpilot.domain.task_plans import DraftNodeKind, PlanNodeBudget
+from deskpilot.domain.workspace_coding_amendments import (
+    WorkspaceCodingAmendmentBinding,
+)
 from deskpilot.domain.workspace_files import (
     WorkspaceFileRead,
     WorkspaceNodeTestRead,
@@ -128,6 +131,26 @@ class TaskLoopExecutionCoordinator:
         self._artifacts = artifacts
         self._turn_planner = turn_planner
         self._reducer = reducer or TaskLoopReducer()
+
+    async def cancel_for_amendment(
+        self,
+        task_id: str,
+    ) -> TaskLoopExecutionRead | None:
+        """Seal one recoverable TaskLoop before a same-conversation replacement."""
+
+        return await self._activation.cancel_for_amendment(task_id)
+
+    async def bind_conversation_amendment(
+        self,
+        source_task_id: str,
+        successor_task_id: str,
+    ) -> WorkspaceCodingAmendmentBinding:
+        """Persist the exact old-generation to successor-turn lineage."""
+
+        return await self._activation.bind_conversation_amendment(
+            source_task_id,
+            successor_task_id,
+        )
 
     async def advance(self, task_id: str, owner_id: str) -> TaskLoopAdvanceResult:
         """Revalidate, decide, and execute one bounded command."""
@@ -288,8 +311,23 @@ class TaskLoopExecutionCoordinator:
             )
         if source.route_id == "research_to_html":
             await self._agents.run_research(source)
-        elif source.route_id in {"workspace_file_read", "workspace_coding_loop"}:
+        elif source.route_id == "workspace_file_read":
             await self._agents.run_workspace_file_candidate(source)
+        elif source.route_id == "workspace_coding_loop":
+            if source.binding.mapping.source_local_key in {
+                "inspect_primary",
+                "inspect_secondary",
+            }:
+                await self._agents.run_workspace_file_candidate(source)
+            elif source.binding.mapping.source_local_key in {
+                "plan_primary_patch",
+                "plan_secondary_patch",
+            }:
+                await self._agents.run_patch_planner_candidate(source)
+            else:
+                raise TaskLoopExecutionCoordinatorProofRejectedError(
+                    "Coding Agent node is not registered by the fixed DAG"
+                )
         else:  # pragma: no cover - registry and dataclass Literals are closed.
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Agent adapter returned an unsupported source Route"
@@ -654,7 +692,7 @@ class TaskLoopExecutionCoordinator:
         )
         if not coding_bindings:
             return
-        if len(coding_bindings) != 4 or len(coding_bindings) != len(bindings):
+        if len(coding_bindings) != 6 or len(coding_bindings) != len(bindings):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery has an incomplete Route binding set"
             )
@@ -707,6 +745,11 @@ class TaskLoopExecutionCoordinator:
             for item in results
             if item.result_kind == CapabilityResultKind.PATCH_RECEIPT.value
         )
+        proposal_results = tuple(
+            item
+            for item in results
+            if item.result_kind == CapabilityResultKind.PATCH_PROPOSAL.value
+        )
         test_results = tuple(
             item
             for item in results
@@ -716,9 +759,12 @@ class TaskLoopExecutionCoordinator:
                 CapabilityResultKind.NODE_TEST.value,
             }
         )
-        if len(reader_results) != 2 or len(patch_results) != 1 or not 1 <= len(
-            test_results
-        ) <= 2:
+        if (
+            len(reader_results) != 2
+            or len(proposal_results) != 2
+            or len(patch_results) != 1
+            or not 1 <= len(test_results) <= 2
+        ):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery evidence cardinality changed"
             )
@@ -754,11 +800,68 @@ class TaskLoopExecutionCoordinator:
             item.relative_path: item for item in patch_output.receipt.change_receipts
         }
         changed_paths = {item.path for item in changes}
+        proposal_evidence: list[dict[str, Any]] = []
+        proposal_changes: dict[str, tuple[str, str]] = {}
+        for proposal_result in proposal_results:
+            proposal_attempt = attempts[proposal_result.attempt_id]
+            raw_changes = proposal_result.output_manifest.get("changes")
+            verification = proposal_result.verification_manifest
+            if (
+                proposal_attempt.status != "verified"
+                or not isinstance(raw_changes, list)
+                or len(raw_changes) != 1
+                or not isinstance(raw_changes[0], dict)
+                or not all(
+                    isinstance(raw_changes[0].get(name), str)
+                    for name in ("path", "old_text", "new_text", "rationale")
+                )
+                or not isinstance(verification.get("model_turn_id"), str)
+                or not isinstance(verification.get("decision_id"), str)
+                or not isinstance(verification.get("decision_digest"), str)
+            ):
+                raise TaskLoopExecutionCoordinatorProofRejectedError(
+                    "Workspace coding delivery Patch Planner proof changed"
+                )
+            proposed = raw_changes[0]
+            path = str(proposed["path"])
+            if path in proposal_changes:
+                raise TaskLoopExecutionCoordinatorProofRejectedError(
+                    "Workspace coding delivery repeats a Patch Planner path"
+                )
+            proposal_changes[path] = (
+                str(proposed["old_text"]),
+                str(proposed["new_text"]),
+            )
+            proposal_evidence.append(
+                {
+                    "path": path,
+                    "agent_id": "builtin.workspace_patch_planner",
+                    "agent_version": (
+                        proposal_result.agent_binding_manifest or {}
+                    ).get("version"),
+                    "model_turn_id": verification["model_turn_id"],
+                    "decision_id": verification["decision_id"],
+                    "decision_digest": verification["decision_digest"],
+                    "result_ref_digest": proposal_result.result_ref_digest,
+                    "verification_digest": proposal_result.verification_digest,
+                }
+            )
+        expected_proposals = {
+            item.path: (item.old_text, item.new_text) for item in changes
+        }
+        consumed_proposal_refs = {
+            item.result_ref_digest
+            for item in bound_patch.dependency_result_refs
+            if item.result_kind is CapabilityResultKind.PATCH_PROPOSAL
+        }
         if (
             len(changes) != 2
             or len(change_receipts) != 2
             or set(change_receipts) != changed_paths
             or {item.relative_path for item in readers} != changed_paths
+            or proposal_changes != expected_proposals
+            or consumed_proposal_refs
+            != {item.result_ref_digest for item in proposal_results}
         ):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery Patch differs from Reader scope"
@@ -858,6 +961,10 @@ class TaskLoopExecutionCoordinator:
             "plan_generation": execution.plan_generation,
             "plan_manifest_digest": execution.plan_manifest_digest,
             "reader_evidence": reader_evidence,
+            "patch_planner_evidence": sorted(
+                proposal_evidence,
+                key=lambda item: str(item["path"]),
+            ),
             "structured_diff": structured_diff,
             "diff_digest": sha256_digest({"changes": structured_diff}),
             "patch_result_ref_digest": patch_result.result_ref_digest,

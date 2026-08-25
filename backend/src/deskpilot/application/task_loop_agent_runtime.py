@@ -14,6 +14,7 @@ ResultRef contains only their result/schema/verification digests.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -23,11 +24,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
+from deskpilot.application.agent_model_loop import AgentModelLoopRuntime
+from deskpilot.application.agent_model_requests import build_patch_planner_model_request
 from deskpilot.application.agent_verified_result_bridge import (
     AgentVerifiedResultBridge,
     AgentVerifiedResultBridgeError,
     AgentVerifiedResultPlanProof,
     ResearchAgentVerificationProof,
+    WorkspacePatchPlannerVerificationProof,
     WorkspaceReaderVerificationProof,
 )
 from deskpilot.application.research_runtime import ResearchRuntime
@@ -39,6 +43,10 @@ from deskpilot.application.verified_edges import mark_verified_and_unlock
 from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import BoundAgentRef
+from deskpilot.domain.agent_loop import (
+    WorkspacePatchLoopDecision,
+    WorkspacePatchSubmitProposalDecision,
+)
 from deskpilot.domain.agent_runtime import (
     AgentInvocationRead,
     AgentOutputResult,
@@ -49,6 +57,7 @@ from deskpilot.domain.agent_runtime import (
     InvocationVerificationStatus,
 )
 from deskpilot.domain.capability_execution import VerifiedCapabilityResultRef
+from deskpilot.domain.model_contracts import PrivacyMode
 from deskpilot.domain.research import SearchRequest
 from deskpilot.domain.task_loop import ModelPlannerStepBinding
 from deskpilot.domain.task_loop_execution import (
@@ -61,8 +70,10 @@ from deskpilot.domain.task_plans import ExecutablePlan, TaskContract
 from deskpilot.domain.workspace_files import WorkspaceFileRead
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
+    AgentDecisionRecord,
     AgentHandoffRecord,
     AgentInvocationRecord,
+    AgentModelTurnRecord,
     AgentResultRecord,
     ClaimVerdictRecord,
     ModelPlannerNodeBindingRecord,
@@ -78,6 +89,7 @@ from deskpilot.infrastructure.models import (
     TaskLoopNodeAttemptRecord,
     TaskLoopVerifiedResultRecord,
     TaskPlanGenerationRecord,
+    TaskRecord,
     VerificationEvidenceSnapshotRecord,
     VerificationRunRecord,
     WorkspaceAgentResultRecord,
@@ -181,6 +193,20 @@ _PROFILES: dict[tuple[AgentSourceRoute, str], _AgentProfile] = {
         agent_id="builtin.workspace_reader",
         capability_id="workspace.file.read.v1",
     ),
+    ("workspace_coding_loop", "plan_primary_patch"): _AgentProfile(
+        route_id="workspace_coding_loop",
+        source_local_key="plan_primary_patch",
+        parameter_name="primary_path",
+        agent_id="builtin.workspace_patch_planner",
+        capability_id="workspace.patch.propose.v1",
+    ),
+    ("workspace_coding_loop", "plan_secondary_patch"): _AgentProfile(
+        route_id="workspace_coding_loop",
+        source_local_key="plan_secondary_patch",
+        parameter_name="secondary_path",
+        agent_id="builtin.workspace_patch_planner",
+        capability_id="workspace.patch.propose.v1",
+    ),
 }
 
 
@@ -195,12 +221,14 @@ class TaskLoopAgentRuntime:
         *,
         research: ResearchRuntime | None = None,
         workspace: WorkspaceFileRuntime | None = None,
+        model_loop: AgentModelLoopRuntime | None = None,
     ) -> None:
         self._database = database
         self._execution = execution
         self._adapters = adapters
         self._research = research
         self._workspace = workspace
+        self._model_loop = model_loop
 
     async def claim_next(
         self,
@@ -477,6 +505,391 @@ class TaskLoopAgentRuntime:
         await self._record_agent_candidate(source, result)
         return result
 
+    async def run_patch_planner_candidate(
+        self,
+        source: SourceBoundAgentClaim,
+    ) -> AgentOutputResult:
+        """Run one persisted LOCAL-only Patch Planner turn without write authority."""
+
+        profile = self._profile(source.binding)
+        if (
+            profile.route_id != "workspace_coding_loop"
+            or profile.source_local_key
+            not in {"plan_primary_patch", "plan_secondary_patch"}
+            or profile.agent_id != "builtin.workspace_patch_planner"
+        ):
+            raise TaskLoopAgentConflictError(
+                "Source-bound claim is not a coding Patch Planner node"
+            )
+        if self._model_loop is None:
+            raise TaskLoopAgentRuntimeUnavailableError(
+                "Patch Planner Model Turn runtime is unavailable"
+            )
+        task, workspace, upstream_result_ref, expected_change = (
+            await self._patch_planner_context(source)
+        )
+        await self._mark_attempt_running(source)
+        await self._execution.start_invocation(
+            source.claimed.invocation.invocation_id,
+            source.claimed.claim_owner_id,
+            source.claimed.claim_fencing_token,
+        )
+        observation_digest = sha256_digest(
+            {
+                "result_ref_digest": upstream_result_ref["result_ref_digest"],
+                "workspace_result_digest": workspace.result_digest,
+            }
+        )
+        route_binding_material = {
+            "node_binding_digest": source.binding.binding_digest,
+            "path": source.parameter_value,
+            "observation_digest": observation_digest,
+        }
+        route_binding_id = f"rbn_{sha256_digest(route_binding_material)}"
+        patch_binding_material = {
+            "node_binding_digest": source.binding.binding_digest,
+            "bound_input_digest": source.binding.bound_input_digest,
+            "path": source.parameter_value,
+            "expected_change": expected_change,
+        }
+        patch_binding_id = f"ptb_{sha256_digest(patch_binding_material)}"
+        request = build_patch_planner_model_request(
+            request_id=(
+                "task-loop-patch-"
+                f"{source.claimed.invocation.invocation_id[-20:]}"
+            ),
+            task_id=source.binding.task_id,
+            privacy_mode=cast(PrivacyMode, task.privacy_mode),
+            budget=source.claimed.handoff.budget_allocation,
+            phase="propose_patch",
+            path=source.parameter_value,
+            project_path=str(source.binding.bound_input_manifest["project_path"]),
+            test_path=str(source.binding.bound_input_manifest["test_path"]),
+            test_kind=cast(
+                Literal["python", "node"],
+                source.binding.bound_input_manifest["test_kind"],
+            ),
+            objective=(
+                "Propose exactly the single server-offered replacement and no other change: "
+                f"{json.dumps(expected_change, ensure_ascii=False, separators=(',', ':'))}"
+            ),
+            route_binding_id=route_binding_id,
+            patch_binding_id=patch_binding_id,
+            route_id="workspace_coding_loop",
+            upstream_data=[
+                {
+                    "result_ref": upstream_result_ref,
+                    "external_untrusted_result": workspace.model_dump(mode="json"),
+                }
+            ],
+            observation_digest=observation_digest,
+            source_text=workspace.content,
+        )
+        dispatched = await self._model_loop.dispatch(
+            source.claimed,
+            turn_no=1,
+            request=request,
+            decision_model=WorkspacePatchLoopDecision,
+        )
+        proposal = cast(WorkspacePatchLoopDecision, dispatched.decision).root
+        if (
+            not isinstance(proposal, WorkspacePatchSubmitProposalDecision)
+            or proposal.patch_binding_id != patch_binding_id
+            or proposal.observation_digest != observation_digest
+            or len(proposal.changes) != 1
+            or proposal.changes[0].path != expected_change["path"]
+            or proposal.changes[0].old_text != expected_change["old_text"]
+            or proposal.changes[0].new_text != expected_change["new_text"]
+        ):
+            await self._model_loop.fail(
+                source.claimed,
+                dispatched.turn_id,
+                "TASK_LOOP_PATCH_PROPOSAL_REJECTED",
+                sha256_digest(proposal),
+            )
+            raise TaskLoopAgentProofRejectedError(
+                "Patch Planner changed the exact server-offered replacement"
+            )
+        decision_id = await self._model_loop.accept(
+            source.claimed,
+            dispatched,
+            proposal,
+            binding_id=patch_binding_id,
+        )
+        result = self._patch_planner_agent_result(
+            source,
+            proposal,
+            decision_id=decision_id,
+            decision_digest=sha256_digest(
+                {
+                    "turn_id": dispatched.turn_id,
+                    "invocation_id": source.claimed.invocation.invocation_id,
+                    "decision": proposal.model_dump(mode="json"),
+                    "response_digest": sha256_digest(dispatched.response),
+                }
+            ),
+            request_digest=dispatched.request_digest,
+            response_digest=sha256_digest(dispatched.response),
+        )
+        await self._execution.submit_result(
+            result,
+            owner_id=source.claimed.claim_owner_id,
+            fencing_token=source.claimed.claim_fencing_token,
+        )
+        await self._verify_patch_planner_result(source, result, expected_change)
+        await self._record_agent_candidate(source, result)
+        return result
+
+    async def _patch_planner_context(
+        self,
+        source: SourceBoundAgentClaim,
+    ) -> tuple[
+        TaskRecord,
+        WorkspaceFileRead,
+        dict[str, object],
+        dict[str, str],
+    ]:
+        async with self._database.session() as session:
+            task = await session.get(TaskRecord, source.binding.task_id)
+            node = await session.get(
+                TaskExecutionNodeRecord,
+                source.binding.composite_node_id,
+            )
+            if task is None or node is None or len(node.depends_on) != 1:
+                raise TaskLoopAgentProofRejectedError(
+                    "Patch Planner lost its Task or unique Reader dependency"
+                )
+            dependency_id = node.depends_on[0]
+            records = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopVerifiedResultRecord).where(
+                            TaskLoopVerifiedResultRecord.execution_id
+                            == source.execution_id,
+                            TaskLoopVerifiedResultRecord.node_id == dependency_id,
+                            TaskLoopVerifiedResultRecord.result_kind == "workspace_file",
+                        )
+                    )
+                ).all()
+            )
+            if len(records) != 1:
+                raise TaskLoopAgentProofRejectedError(
+                    "Patch Planner has no unique verified Reader ResultRef"
+                )
+            record = records[0]
+            try:
+                workspace = WorkspaceFileRead.model_validate(record.output_manifest)
+                result_ref = VerifiedCapabilityResultRef.model_validate(
+                    record.result_ref_manifest
+                )
+            except ValidationError as error:
+                raise TaskLoopAgentProofRejectedError(
+                    "Patch Planner Reader proof Schema was rejected"
+                ) from error
+            if (
+                workspace.relative_path != source.parameter_value
+                or workspace.result_digest != record.output_digest
+                or result_ref.result_ref_digest != record.result_ref_digest
+                or result_ref.result_kind.value != "workspace_file"
+                or result_ref.producer_node_id != dependency_id
+                or result_ref.task_id != source.binding.task_id
+                or result_ref.run_id != source.claimed.handoff.run_id
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Patch Planner Reader ResultRef crossed its exact dependency"
+                )
+            expected_change = self._expected_patch_change(
+                source.binding,
+                source.parameter_value,
+            )
+            return (
+                task,
+                workspace,
+                result_ref.model_dump(mode="json"),
+                expected_change,
+            )
+
+    async def _verify_patch_planner_result(
+        self,
+        source: SourceBoundAgentClaim,
+        result: AgentOutputResult,
+        expected_change: dict[str, str],
+    ) -> None:
+        """Verify the persisted ModelTurn/Decision without unlocking successors."""
+
+        async with self._database.session() as session, session.begin():
+            invocation = await session.scalar(
+                select(AgentInvocationRecord)
+                .where(AgentInvocationRecord.invocation_id == result.invocation_id)
+                .with_for_update()
+            )
+            node = await session.scalar(
+                select(TaskExecutionNodeRecord)
+                .where(
+                    TaskExecutionNodeRecord.node_id
+                    == source.binding.composite_node_id
+                )
+                .with_for_update()
+            )
+            persisted_result = await session.get(AgentResultRecord, result.result_id)
+            turns = tuple(
+                (
+                    await session.scalars(
+                        select(AgentModelTurnRecord).where(
+                            AgentModelTurnRecord.invocation_id == result.invocation_id
+                        )
+                    )
+                ).all()
+            )
+            decisions = tuple(
+                (
+                    await session.scalars(
+                        select(AgentDecisionRecord).where(
+                            AgentDecisionRecord.invocation_id == result.invocation_id
+                        )
+                    )
+                ).all()
+            )
+            if (
+                invocation is None
+                or node is None
+                or persisted_result is None
+                or len(turns) != 1
+                or len(decisions) != 1
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Patch Planner candidate persistence is incomplete"
+                )
+            turn = turns[0]
+            decision = decisions[0]
+            try:
+                proposal = WorkspacePatchSubmitProposalDecision.model_validate(
+                    decision.manifest
+                )
+            except ValidationError as error:
+                raise TaskLoopAgentProofRejectedError(
+                    "Patch Planner decision Schema was rejected"
+                ) from error
+            change = proposal.changes[0] if len(proposal.changes) == 1 else None
+            decision_material = {
+                "turn_id": turn.turn_id,
+                "invocation_id": invocation.invocation_id,
+                "decision": decision.manifest,
+                "response_digest": turn.response_digest,
+            }
+            if (
+                invocation.run_id != source.claimed.handoff.run_id
+                or invocation.node_id != source.binding.composite_node_id
+                or invocation.attempt != source.claimed.invocation.attempt
+                or invocation.result_id != result.result_id
+                or invocation.execution_status != "result_submitted"
+                or invocation.verification_status not in {"pending", "verified"}
+                or node.status != "awaiting_verification"
+                or persisted_result.invocation_id != invocation.invocation_id
+                or persisted_result.manifest != result.model_dump(mode="json")
+                or persisted_result.result_digest != result.result_digest
+                or turn.turn_no != 1
+                or turn.status != "succeeded"
+                or turn.response_digest is None
+                or decision.turn_id != turn.turn_id
+                or decision.kind != "submit_result"
+                or decision.binding_id != proposal.patch_binding_id
+                or decision.decision_digest != sha256_digest(decision_material)
+                or change is None
+                or change.path != expected_change["path"]
+                or change.old_text != expected_change["old_text"]
+                or change.new_text != expected_change["new_text"]
+                or result.input_digest != turn.request_digest
+                or result.model_response_digest != turn.response_digest
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Patch Planner candidate crossed its ModelTurn or Offer binding"
+                )
+            if invocation.verification_status == "pending":
+                invocation.verification_status = "verified"
+                invocation.revision += 1
+
+    @staticmethod
+    def _patch_planner_agent_result(
+        source: SourceBoundAgentClaim,
+        proposal: WorkspacePatchSubmitProposalDecision,
+        *,
+        decision_id: str,
+        decision_digest: str,
+        request_digest: str,
+        response_digest: str,
+    ) -> AgentOutputResult:
+        output = {
+            "patch_binding_id": proposal.patch_binding_id,
+            "observation_digest": proposal.observation_digest,
+            "changes": [item.model_dump(mode="json") for item in proposal.changes],
+            "decision_digest": decision_digest,
+        }
+        identity = {
+            "invocation_id": source.claimed.invocation.invocation_id,
+            "attempt": source.claimed.invocation.attempt,
+            "decision_digest": decision_digest,
+        }
+        material = {
+            "schema_version": "deskpilot.agent-output-result.v1",
+            "result_id": f"res_{sha256_digest(identity)}",
+            "invocation_id": source.claimed.invocation.invocation_id,
+            "disposition": "candidate",
+            "output": output,
+            "evidence_refs": (f"agent-decision:{decision_id}",),
+            "limitation_codes": (),
+            "input_digest": request_digest,
+            "model_response_digest": response_digest,
+            "output_schema_digest": sha256_digest(
+                WorkspacePatchSubmitProposalDecision.model_json_schema()
+            ),
+        }
+        return AgentOutputResult.model_validate(
+            {**material, "result_digest": sha256_digest(material)}
+        )
+
+    @staticmethod
+    def _expected_patch_change(
+        binding: ModelPlannerNodeBinding,
+        path: str,
+    ) -> dict[str, str]:
+        raw = binding.bound_input_manifest.get("changes_json")
+        if not isinstance(raw, str):
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Patch Planner has no sealed change Offer"
+            )
+        try:
+            changes = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Patch Planner change Offer is invalid JSON"
+            ) from error
+        if not isinstance(changes, list) or len(changes) != 2:
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Patch Planner requires exactly two offered changes"
+            )
+        matches: list[dict[str, str]] = []
+        for item in changes:
+            if not isinstance(item, dict) or set(item) != {
+                "path",
+                "old_text",
+                "new_text",
+            }:
+                raise TaskLoopAgentProofRejectedError(
+                    "Coding Patch Planner change Offer shape changed"
+                )
+            if not all(isinstance(item[name], str) for name in item):
+                raise TaskLoopAgentProofRejectedError(
+                    "Coding Patch Planner change values must be strings"
+                )
+            if item["path"] == path:
+                matches.append(cast(dict[str, str], item))
+        if len(matches) != 1:
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Patch Planner path has no unique offered change"
+            )
+        return dict(matches[0])
+
     async def persist_verified_result(
         self,
         source: SourceBoundAgentClaim,
@@ -581,6 +994,38 @@ class TaskLoopAgentRuntime:
                         "evidence_snapshot_digest": (
                             verification_proof.evidence_snapshot.snapshot_digest
                         ),
+                    }
+                elif profile.agent_id == "builtin.workspace_patch_planner":
+                    expected_change = self._expected_patch_change(
+                        binding,
+                        source.parameter_value,
+                    )
+                    patch_proof = await self._patch_planner_proof(
+                        session,
+                        invocation,
+                    )
+                    result_ref = AgentVerifiedResultBridge.workspace_patch_planner(
+                        plan_proof,
+                        patch_proof,
+                        expected_source_local_key=profile.source_local_key,
+                        source_parameter_name=profile.parameter_name,
+                        expected_change=expected_change,
+                        allow_pending_node_transition=True,
+                    )
+                    parsed_result = AgentOutputResult.model_validate(result.manifest)
+                    output_manifest = {
+                        **parsed_result.output,
+                        "result_digest": result.result_digest,
+                    }
+                    verification_manifest = {
+                        "schema_version": (
+                            "deskpilot.agent-result-verification-reference.v1"
+                        ),
+                        "model_turn_id": patch_proof.model_turn.turn_id,
+                        "decision_id": patch_proof.decision.decision_id,
+                        "decision_digest": patch_proof.decision.decision_digest,
+                        "verification_digest": result_ref.verification_digest,
+                        "agent_result_digest": result.result_digest,
                     }
                 else:
                     workspace_proof = await self._workspace_proof(session, invocation)
@@ -1445,6 +1890,40 @@ class TaskLoopAgentRuntime:
             )
         return WorkspaceReaderVerificationProof(workspace_result=record)
 
+    @staticmethod
+    async def _patch_planner_proof(
+        session: AsyncSession,
+        invocation: AgentInvocationRecord,
+    ) -> WorkspacePatchPlannerVerificationProof:
+        turns = tuple(
+            (
+                await session.scalars(
+                    select(AgentModelTurnRecord).where(
+                        AgentModelTurnRecord.invocation_id
+                        == invocation.invocation_id
+                    )
+                )
+            ).all()
+        )
+        decisions = tuple(
+            (
+                await session.scalars(
+                    select(AgentDecisionRecord).where(
+                        AgentDecisionRecord.invocation_id
+                        == invocation.invocation_id
+                    )
+                )
+            ).all()
+        )
+        if len(turns) != 1 or len(decisions) != 1:
+            raise TaskLoopAgentProofRejectedError(
+                "Patch Planner has no unique persisted ModelTurn decision"
+            )
+        return WorkspacePatchPlannerVerificationProof(
+            model_turn=turns[0],
+            decision=decisions[0],
+        )
+
     @classmethod
     def _assert_source_plan_proof(
         cls,
@@ -1674,14 +2153,14 @@ class TaskLoopAgentRuntime:
 
     @staticmethod
     def _is_workspace_file_source(source: SourceBoundAgentClaim) -> bool:
-        return source.route_id in {
-            "workspace_file_read",
-            "workspace_coding_loop",
-        } and source.parameter_name in {
-            "path",
-            "primary_path",
-            "secondary_path",
-        }
+        return (
+            source.route_id == "workspace_file_read"
+            and source.binding.mapping.source_local_key == "workspace_file_read"
+        ) or (
+            source.route_id == "workspace_coding_loop"
+            and source.binding.mapping.source_local_key
+            in {"inspect_primary", "inspect_secondary"}
+        )
 
     @staticmethod
     def _execution_from_record(record: TaskLoopExecutionRecord) -> TaskLoopExecution:

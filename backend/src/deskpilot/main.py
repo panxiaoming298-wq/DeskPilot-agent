@@ -518,6 +518,7 @@ def create_app(
             task_loop_agent_adapters,
             research=research_runtime,
             workspace=workspace_file_runtime,
+            model_loop=agent_model_loop_runtime,
         )
         task_loop_execution_runtime = TaskLoopExecutionCoordinator(
             database,

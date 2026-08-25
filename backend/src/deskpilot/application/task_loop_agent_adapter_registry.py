@@ -157,6 +157,24 @@ def create_task_loop_agent_adapter_registry(
                     capability_id="workspace.file.read.v1",
                     parameter_name="secondary_path",
                 ),
+                TaskLoopAgentAdapterManifest.build(
+                    adapter_id="builtin.task-loop.workspace-coding-patch-primary.v1",
+                    route_id="workspace_coding_loop",
+                    source_local_key="plan_primary_patch",
+                    agent_id="builtin.workspace_patch_planner",
+                    agent_versions=("1.0.0",),
+                    capability_id="workspace.patch.propose.v1",
+                    parameter_name="primary_path",
+                ),
+                TaskLoopAgentAdapterManifest.build(
+                    adapter_id="builtin.task-loop.workspace-coding-patch-secondary.v1",
+                    route_id="workspace_coding_loop",
+                    source_local_key="plan_secondary_patch",
+                    agent_id="builtin.workspace_patch_planner",
+                    agent_versions=("1.0.0",),
+                    capability_id="workspace.patch.propose.v1",
+                    parameter_name="secondary_path",
+                ),
             )
         )
     return TaskLoopAgentAdapterRegistry(tuple(manifests))

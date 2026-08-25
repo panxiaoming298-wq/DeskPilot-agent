@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
+from deskpilot.application.agent_model_loop import AgentModelLoopRuntime
 from deskpilot.application.builtin_capability_executors import (
     create_builtin_capability_executor_registry,
 )
@@ -20,11 +21,17 @@ from deskpilot.application.capability_input_binding_catalog import (
 )
 from deskpilot.application.model_planner_node_binder import ModelPlannerNodeBinder
 from deskpilot.application.route_recipe_catalog import RouteRecipeCatalog, RouteRecipeError
-from deskpilot.application.task_loop_activation_runtime import TaskLoopActivationRuntime
+from deskpilot.application.task_loop_activation_runtime import (
+    TaskLoopActivationProofRejectedError,
+    TaskLoopActivationRuntime,
+)
 from deskpilot.application.task_loop_agent_adapter_registry import (
     create_task_loop_agent_adapter_registry,
 )
-from deskpilot.application.task_loop_agent_runtime import TaskLoopAgentRuntime
+from deskpilot.application.task_loop_agent_runtime import (
+    TaskLoopAgentConflictError,
+    TaskLoopAgentRuntime,
+)
 from deskpilot.application.task_loop_execution_coordinator import (
     TaskLoopExecutionCoordinator,
 )
@@ -37,19 +44,24 @@ from deskpilot.domain.workspace_files import (
 )
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
+    AgentModelTurnRecord,
+    ConversationMessageRecord,
     TaskLoopCapabilityApprovalRecord,
     TaskLoopNodeAttemptRecord,
     TaskLoopVerifiedResultRecord,
+    TaskRecord,
+    TurnRouteRecord,
+    WorkspaceCodingAmendmentBindingRecord,
     WorkspaceCodingDeliveryRecord,
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from test_multi_step_plan_runtime import (  # noqa: E402
-    NOW,
     ScriptedTurnPlannerProvider,
     _runtimes,
     _seed_turn,
+    _unsupported_route,
 )
 
 
@@ -103,6 +115,35 @@ def _select_coding_loop(request: Any) -> dict[str, Any]:
             }
         ],
     }
+
+
+def _propose_bound_patch(request: Any) -> dict[str, Any]:
+    path = str(request.metadata["workspace_path"])
+    changes = {
+        "backend/one.py": ("VALUE = 'old-one'", "VALUE = 'new-one'"),
+        "backend/two.py": ("VALUE = 'old-two'", "VALUE = 'new-two'"),
+    }
+    old_text, new_text = changes[path]
+    return {
+        "schema_version": "deskpilot.agent-decision.v1",
+        "kind": "submit_result",
+        "patch_binding_id": request.metadata["workspace_patch_binding_id"],
+        "observation_digest": request.metadata["observation_digest"],
+        "changes": [
+            {
+                "path": path,
+                "old_text": old_text,
+                "new_text": new_text,
+                "rationale": "Apply the exact server-offered replacement.",
+            }
+        ],
+        "decision_summary": "Exact unprivileged patch proposal.",
+    }
+
+
+class _PassThroughContextMemory:
+    async def build_for_turn(self, *args: Any) -> tuple[None, Any]:
+        return None, args[-1]
 
 
 class _ParallelWorkspace(WorkspaceFileRuntime):
@@ -162,7 +203,9 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
         f"sqlite+aiosqlite:///{(tmp_path / 'coding-loop.db').as_posix()}"
     )
     await database.migrate()
-    provider = ScriptedTurnPlannerProvider([_select_coding_loop])
+    provider = ScriptedTurnPlannerProvider(
+        [_select_coding_loop, _propose_bound_patch, _propose_bound_patch]
+    )
     planner, planning, task_loops, _composer = _runtimes(database, provider)
     workspace_root = tmp_path / "workspace"
     backend = workspace_root / "backend"
@@ -190,7 +233,13 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
         planning._compiler,  # noqa: SLF001
         planner._agents,  # noqa: SLF001
         max_parallel=2,
-        clock=lambda: NOW,
+    )
+    model_loop = AgentModelLoopRuntime(
+        database,
+        execution,
+        planner._agents,  # noqa: SLF001
+        planner._gateway,  # noqa: SLF001
+        _PassThroughContextMemory(),  # type: ignore[arg-type]
     )
     adapters = create_task_loop_agent_adapter_registry(
         research_available=False,
@@ -208,20 +257,19 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
             registry,
             adapters,
         ),
-        clock=lambda: NOW,
     )
     capabilities = CapabilityExecutionRuntime(
         database,
         CapabilityInputBindingCatalog(planner._capabilities),  # noqa: SLF001
         registry,
         CapabilityExecutionEngine(registry),
-        clock=lambda: NOW,
     )
     agents = TaskLoopAgentRuntime(
         database,
         execution,
         adapters,
         workspace=workspace,
+        model_loop=model_loop,
     )
     coordinator = TaskLoopExecutionCoordinator(
         database,
@@ -285,6 +333,7 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
             execution,
             adapters,
             workspace=workspace,
+            model_loop=model_loop,
         )
         reader_restart = TaskLoopExecutionCoordinator(
             database,
@@ -297,6 +346,23 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
         second_verified = await reader_restart.advance(task_id, "reader-verifier-2")
         assert first_verified.command.kind == "verify_candidate"
         assert second_verified.command.kind == "verify_candidate"
+
+        planned_patches = await reader_restart.advance(
+            task_id,
+            "patch-planner-workers",
+        )
+        assert planned_patches.command.kind == "execute_agent_batch"
+        assert len(planned_patches.command.node_ids) == 2
+        first_proposal = await reader_restart.advance(
+            task_id,
+            "patch-proposal-verifier-1",
+        )
+        second_proposal = await reader_restart.advance(
+            task_id,
+            "patch-proposal-verifier-2",
+        )
+        assert first_proposal.command.kind == "verify_candidate"
+        assert second_proposal.command.kind == "verify_candidate"
 
         waiting = await reader_restart.advance(task_id, "patch-prepare-worker")
         assert waiting.command.kind == "execute_capability"
@@ -344,6 +410,20 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
         assert delivered.command.kind == "reduce_control_node"
         assert delivered.read.execution is not None
         assert delivered.read.execution.status == "succeeded"
+        assert delivered.read.coding_delivery is not None
+        assert delivered.read.coding_delivery.changed_files == (
+            "backend/one.py",
+            "backend/two.py",
+        )
+        public_delivery = delivered.read.workbench.coding_delivery
+        assert public_delivery is not None
+        public_payload = public_delivery.model_dump(mode="json")
+        assert "backup_relative_path" not in json.dumps(public_payload)
+        assert [item["status"] for item in public_payload["tests"]] == [
+            "failed",
+            "passed",
+        ]
+        assert len(public_payload["patch_planner_evidence"]) == 2
 
         async with database.session() as session:
             attempts = tuple(
@@ -369,6 +449,9 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
             coding_delivery = await session.scalar(
                 select(WorkspaceCodingDeliveryRecord)
             )
+            model_turns = tuple(
+                (await session.scalars(select(AgentModelTurnRecord))).all()
+            )
         assert approval is not None and approval.status == "consumed"
         assert coding_delivery is not None
         assert coding_delivery.changed_file_count == 2
@@ -383,7 +466,11 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
             "local_fake_model_quality_unproven",
             "git_commit_not_created",
         ]
+        assert len(model_turns) == 2
+        assert all(item.status == "succeeded" for item in model_turns)
         assert sorted(item.result_kind for item in results) == [
+            "patch_proposal",
+            "patch_proposal",
             "patch_receipt",
             "python_test",
             "python_test",
@@ -422,9 +509,11 @@ def test_coding_loop_recipe_has_two_parallel_readers_and_verified_patch_join() -
     by_key = {item.local_key: item for item in draft.nodes}
     assert by_key["inspect_primary"].depends_on == ()
     assert by_key["inspect_secondary"].depends_on == ()
+    assert by_key["plan_primary_patch"].depends_on == ("inspect_primary",)
+    assert by_key["plan_secondary_patch"].depends_on == ("inspect_secondary",)
     assert set(by_key["apply_patch"].depends_on) == {
-        "inspect_primary",
-        "inspect_secondary",
+        "plan_primary_patch",
+        "plan_secondary_patch",
     }
     assert by_key["run_fixed_test"].budget.retries == 1
     assert tuple(
@@ -497,3 +586,231 @@ def test_coding_loop_rejects_unread_or_out_of_project_patch_paths() -> None:
     traversal = {**base, "test_path": "../tests/test_one.py"}
     with pytest.raises(RouteRecipeError, match="safe relative path"):
         bind(traversal)
+
+
+@pytest.mark.asyncio
+async def test_coding_loop_amendment_fences_old_claim_and_late_result(
+    tmp_path: Path,
+) -> None:
+    database = Database(
+        f"sqlite+aiosqlite:///{(tmp_path / 'amendment.db').as_posix()}"
+    )
+    await database.migrate()
+    provider = ScriptedTurnPlannerProvider([_select_coding_loop])
+    planner, planning, task_loops, _composer = _runtimes(database, provider)
+    workspace_root = tmp_path / "workspace"
+    (workspace_root / "backend" / "tests").mkdir(parents=True)
+    (workspace_root / "backend" / "one.py").write_text(
+        "VALUE = 'old-one'\n",
+        encoding="utf-8",
+    )
+    (workspace_root / "backend" / "two.py").write_text(
+        "VALUE = 'old-two'\n",
+        encoding="utf-8",
+    )
+    (workspace_root / "backend" / "tests" / "test_one.py").write_text(
+        "def test_one():\n    assert True\n",
+        encoding="utf-8",
+    )
+    workspace = WorkspaceFileRuntime(
+        str(workspace_root),
+        str(tmp_path / "staging"),
+    )
+    registry = create_builtin_capability_executor_registry(
+        planner._capabilities,  # noqa: SLF001
+        workspace=workspace,
+        python_tests=_RepairingPythonRuntime(),
+        workspace_patches=workspace,
+    )
+    execution = AgentExecutionRuntime(
+        database,
+        planning._compiler,  # noqa: SLF001
+        planner._agents,  # noqa: SLF001
+        max_parallel=2,
+    )
+    adapters = create_task_loop_agent_adapter_registry(
+        research_available=False,
+        workspace_file_available=True,
+        workspace_coding_loop_available=True,
+    )
+    activation = TaskLoopActivationRuntime(
+        database,
+        task_loops,
+        planner,
+        planning,
+        execution,
+        ModelPlannerNodeBinder(
+            planner._agents,  # noqa: SLF001
+            registry,
+            adapters,
+        ),
+    )
+    agents = TaskLoopAgentRuntime(
+        database,
+        execution,
+        adapters,
+        workspace=workspace,
+    )
+    coordinator = TaskLoopExecutionCoordinator(
+        database,
+        activation,
+        agents=agents,
+        turn_planner=planner,
+    )
+    try:
+        task_id, fallback = await _seed_turn(
+            database,
+            suffix="a",
+            message=(
+                "inspect backend/one.py and backend/two.py apply "
+                "[{\"path\":\"backend/one.py\",\"old_text\":\"VALUE = 'old-one'\","
+                "\"new_text\":\"VALUE = 'new-one'\"},{\"path\":\"backend/two.py\","
+                "\"old_text\":\"VALUE = 'old-two'\",\"new_text\":"
+                "\"VALUE = 'new-two'\"}] in backend then test tests/test_one.py"
+            ),
+        )
+        await planner.prepare(
+            task_id,
+            fallback.user_message_id,
+            fallback,
+            frozenset({"workspace_coding_loop:python"}),
+        )
+        await planner.interpret(task_id)
+        await task_loops.plan(task_id)
+        activated = await activation.activate(task_id)
+        active_read = await activation.get(task_id)
+        assert active_read is not None
+        primary = next(
+            item
+            for item in active_read.nodes
+            if item.local_key.endswith("inspect_primary")
+        )
+        stale = await agents.claim_next(
+            activated.execution_id,
+            "old-generation-worker",
+            node_id=primary.node_id,
+        )
+        assert stale is not None
+
+        sealed = await coordinator.cancel_for_amendment(task_id)
+        assert sealed is not None and sealed.execution is not None
+        assert sealed.execution.status == "cancelled"
+        assert sealed.recoverable is False
+        run = await execution.get(activated.run_id)
+        assert run.status.value == "cancelled"
+        cancelled_node = next(
+            item for item in run.nodes if item.node_id == primary.node_id
+        )
+        assert cancelled_node.status.value == "cancelled"
+        assert cancelled_node.claim_fencing_token > stale.claimed.claim_fencing_token
+        with pytest.raises(TaskLoopAgentConflictError):
+            await agents.run_workspace_file_candidate(stale)
+
+        successor_task_id = f"tsk_{'b' * 32}"
+        successor_message_id = f"msg_{'b' * 32}"
+        successor_message = "revise the same workspace coding task"
+        successor_material = {
+            "message_id": successor_message_id,
+            "conversation_id": fallback.conversation_id,
+            "task_id": successor_task_id,
+            "role": "user",
+            "content": successor_message,
+            "content_ref": None,
+            "classification": "internal",
+            "created_at": fallback.created_at,
+        }
+        successor_message_digest = sha256_digest(successor_material)
+        successor_route = _unsupported_route(
+            task_id=successor_task_id,
+            conversation_id=fallback.conversation_id,
+            message_id=successor_message_id,
+            message_digest=successor_message_digest,
+        )
+        async with database.session() as session, session.begin():
+            session.add(
+                TaskRecord(
+                    task_id=successor_task_id,
+                    conversation_id=fallback.conversation_id,
+                    goal=successor_message,
+                    status="ready",
+                    mode="fake",
+                    privacy_mode="local_only",
+                    constraints=[],
+                    last_event_seq=0,
+                    created_at=fallback.created_at,
+                    updated_at=fallback.updated_at,
+                )
+            )
+            await session.flush()
+            session.add(
+                ConversationMessageRecord(
+                    **successor_material,
+                    status="active",
+                    message_digest=successor_message_digest,
+                    deleted_at=None,
+                )
+            )
+            await session.flush()
+            session.add(
+                TurnRouteRecord(
+                    task_id=successor_task_id,
+                    conversation_id=fallback.conversation_id,
+                    user_message_id=successor_message_id,
+                    decision=successor_route.decision.value,
+                    route_id=None,
+                    route_version=None,
+                    route_manifest_digest=None,
+                    candidate_digest=successor_route.candidate_digest,
+                    parameters={},
+                    parameter_digest=successor_route.parameter_digest,
+                    resolved_from_task_id=None,
+                    resolution_rule=None,
+                    resolution_digest=None,
+                    turn_planning_adjudication_id=None,
+                    turn_plan_binding_id=None,
+                    turn_plan_binding_digest=None,
+                    turn_planning_provenance_digest=None,
+                    reason_code=successor_route.reason_code,
+                    status=successor_route.status.value,
+                    result_manifest=None,
+                    result_digest=None,
+                    error_code=None,
+                    revision=1,
+                    created_at=fallback.created_at,
+                    updated_at=fallback.updated_at,
+                )
+            )
+        binding = await coordinator.bind_conversation_amendment(
+            task_id,
+            successor_task_id,
+        )
+        assert binding == await coordinator.bind_conversation_amendment(
+            task_id,
+            successor_task_id,
+        )
+        assert binding.source_execution_id == activated.execution_id
+        assert binding.source_execution_event_digest == sealed.execution.latest_event_digest
+        assert binding.successor_user_message_digest == successor_message_digest
+        async with database.session() as session:
+            record = await session.scalar(
+                select(WorkspaceCodingAmendmentBindingRecord).where(
+                    WorkspaceCodingAmendmentBindingRecord.source_execution_id
+                    == activated.execution_id
+                )
+            )
+            assert record is not None
+            assert record.amendment_digest == binding.amendment_digest
+        async with database.session() as session, session.begin():
+            message_record = await session.get(
+                ConversationMessageRecord,
+                successor_message_id,
+            )
+            assert message_record is not None
+            message_record.message_digest = "f" * 64
+        with pytest.raises(TaskLoopActivationProofRejectedError):
+            await coordinator.bind_conversation_amendment(
+                task_id,
+                successor_task_id,
+            )
+    finally:
+        await database.dispose()

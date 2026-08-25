@@ -1450,13 +1450,14 @@ def workspace_coding_loop_contract(
 
     The two file inputs and the complete Patch bundle are message-bound before
     execution.  The model cannot turn either Reader result into new authority;
-    both verified ResultRefs are nevertheless mandatory dependencies of the
-    Patch node and therefore form the fixed verified join for this checkpoint.
+    each Reader must feed one verified, unprivileged Patch Planner proposal and
+    both proposals form the fixed verified join before the Patch capability.
     """
 
     suffix = task_id.removeprefix("tsk_")
     capability_ids = (
         "workspace.file.read.v1",
+        "workspace.patch.propose.v1",
         "workspace.patch.bundle.v1",
         (
             "workspace.python.test.v1"
@@ -1478,16 +1479,17 @@ def workspace_coding_loop_contract(
         version=1,
         goal_ref=f"artifact://task-input/{task_id}",
         normalized_objective=(
-            "由两个独立本地 Reader 并行读取服务器绑定文件；仅在两个结果分别验证后，"
-            "执行经用户精确确认的多文件 Patch，再运行服务器固定测试并独立验收交付"
+            "由两个独立本地 Reader 并行读取服务器绑定文件；两个无执行权 Patch Planner"
+            "只能提议服务器封存的精确替换；全部结果分别验证后执行经用户确认的多文件"
+            "Patch，再运行服务器固定测试并独立验收交付"
         ),
         acceptance_criteria=(
             AcceptanceCriterion(
                 criterion_id="ac_workspace_coding_loop",
                 kind=AcceptanceKind.OUTPUT_REQUIREMENT,
                 description=(
-                    "结果必须绑定两个 Reader ResultRef、内容寻址 Patch 回执、固定测试"
-                    "结果、失败/Repair 历史和最终确定性验收。"
+                    "结果必须绑定两个 Reader ResultRef、两个 Patch Proposal ResultRef、"
+                    "内容寻址 Patch 回执、固定测试结果、失败/Repair 历史和最终确定性验收。"
                 ),
                 verification_requirement=VerificationRequirement.DETERMINISTIC,
                 origin="trusted_template",
@@ -1496,7 +1498,8 @@ def workspace_coding_loop_contract(
         constraints=(
             "local_only_coding_loop_v1",
             "two_independent_read_only_children_v1",
-            "verified_result_join_before_patch_v1",
+            "verified_result_join_before_patch_planner_v1",
+            "unprivileged_patch_planner_model_turn_v1",
             "exact_multi_file_patch_confirmation_v1",
             "server_bound_fixed_test_v1",
             "single_bounded_test_repair_v1",
@@ -1518,11 +1521,11 @@ def workspace_coding_loop_contract(
             max_tool_calls=4,
             max_input_tokens=40_000,
             max_output_tokens=4_000,
-            max_wall_seconds=450,
+            max_wall_seconds=600,
             max_retries=1,
             max_cost_micros=200_000,
             max_handoffs=0,
-            max_plan_nodes=6,
+            max_plan_nodes=8,
         ),
         output_contract=OutputContract(media_type="application/json", language="zh-CN"),
         capabilities=refs,
@@ -1537,13 +1540,23 @@ def workspace_coding_loop_draft(
     contract_version: int = 1,
 ) -> DraftPlan:
     reader_budget = PlanNodeBudget(
-        model_calls=2,
+        model_calls=1,
         tool_calls=1,
-        input_tokens=20_000,
-        output_tokens=2_000,
+        input_tokens=1,
+        output_tokens=1,
         wall_seconds=60,
         retries=0,
-        cost_micros=100_000,
+        cost_micros=0,
+        handoffs=0,
+    )
+    planner_budget = PlanNodeBudget(
+        model_calls=1,
+        tool_calls=0,
+        input_tokens=12_000,
+        output_tokens=1_500,
+        wall_seconds=60,
+        retries=0,
+        cost_micros=50_000,
         handoffs=0,
     )
     patch_budget = PlanNodeBudget(
@@ -1608,11 +1621,40 @@ def workspace_coding_loop_draft(
                 budget=reader_budget,
             ),
             DraftPlanNode(
+                local_key="plan_primary_patch",
+                kind=DraftNodeKind.AGENT,
+                objective=(
+                    "基于已验证的主要文件证据提议服务器 Offer 中唯一允许的精确替换；"
+                    "提议本身不授予写权限。"
+                ),
+                agent_selector="builtin.workspace_patch_planner",
+                capability_requirements=("workspace.patch.propose.v1",),
+                depends_on=("inspect_primary",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=planner_budget,
+            ),
+            DraftPlanNode(
+                local_key="plan_secondary_patch",
+                kind=DraftNodeKind.AGENT,
+                objective=(
+                    "基于已验证的次要文件证据提议服务器 Offer 中唯一允许的精确替换；"
+                    "提议本身不授予写权限。"
+                ),
+                agent_selector="builtin.workspace_patch_planner",
+                capability_requirements=("workspace.patch.propose.v1",),
+                depends_on=("inspect_secondary",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=planner_budget,
+            ),
+            DraftPlanNode(
                 local_key="apply_patch",
                 kind=DraftNodeKind.CAPABILITY,
-                objective="只在两个 Reader ResultRef 均已验证后准备并提交精确多文件 Patch。",
+                objective=(
+                    "只在两个 Reader 及两个无执行权 Patch Planner 提议均已验证后，"
+                    "准备并提交精确多文件 Patch。"
+                ),
                 capability_selector="workspace.patch.bundle.v1",
-                depends_on=("inspect_primary", "inspect_secondary"),
+                depends_on=("plan_primary_patch", "plan_secondary_patch"),
                 verification_profile=VerificationProfile.DETERMINISTIC,
                 budget=patch_budget,
             ),

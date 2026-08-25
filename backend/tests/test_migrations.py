@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0058_workspace_coding_deliveries"
+CURRENT_REVISION = "0059_workspace_coding_amendments"
 
 
 def _sync_url(path: Path) -> str:
@@ -161,6 +161,7 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
             "task_loop_cycle_events",
                 "workspace_command_plan_bindings",
                 "workspace_coding_deliveries",
+                "workspace_coding_amendment_bindings",
         }.issubset(inspector.get_table_names())
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
@@ -845,6 +846,7 @@ def test_stage_116b_workspace_coding_delivery_migration_is_guarded(
 
     command.upgrade(config, "head")
     command.check(config)
+    command.downgrade(config, "0058_workspace_coding_deliveries")
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
         inspector = inspect(connection)
@@ -877,7 +879,7 @@ def test_stage_116b_workspace_coding_delivery_migration_is_guarded(
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0058_workspace_coding_deliveries",
         target_revision="0057_task_loop_deferred_binding",
         insert_statement="""
             INSERT INTO workspace_coding_deliveries (
@@ -916,6 +918,111 @@ def test_stage_116b_workspace_coding_delivery_migration_is_guarded(
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
         assert "workspace_coding_deliveries" not in inspect(
+            connection
+        ).get_table_names()
+    engine.dispose()
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_116b_workspace_coding_amendment_migration_is_guarded(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-116b-workspace-coding-amendment.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        columns = {
+            item["name"]
+            for item in inspector.get_columns(
+                "workspace_coding_amendment_bindings"
+            )
+        }
+        constraints = {
+            item["name"]
+            for item in inspector.get_check_constraints(
+                "workspace_coding_amendment_bindings"
+            )
+        }
+    engine.dispose()
+    assert {
+        "amendment_id",
+        "conversation_id",
+        "source_task_id",
+        "source_execution_id",
+        "source_contract_version",
+        "source_contract_digest",
+        "source_plan_generation",
+        "source_plan_digest",
+        "source_execution_digest",
+        "source_execution_event_digest",
+        "successor_task_id",
+        "successor_user_message_id",
+        "successor_user_message_digest",
+        "manifest",
+        "amendment_digest",
+        "created_at",
+    } == columns
+    assert constraints == {"ck_workspace_coding_amendment_scope"}
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0058_workspace_coding_deliveries",
+        insert_statement="""
+            INSERT INTO workspace_coding_amendment_bindings (
+                amendment_id, conversation_id, source_task_id,
+                source_execution_id, source_contract_version,
+                source_contract_digest, source_plan_generation,
+                source_plan_digest, source_execution_digest,
+                source_execution_event_digest, successor_task_id,
+                successor_user_message_id, successor_user_message_digest,
+                manifest, amendment_digest, created_at
+            ) VALUES (
+                :amendment_id, :conversation_id, :source_task_id,
+                :source_execution_id, 1, :source_contract_digest, 1,
+                :source_plan_digest, :source_execution_digest,
+                :source_event_digest, :successor_task_id,
+                :successor_message_id, :successor_message_digest,
+                :empty_object, :amendment_digest, :created_at
+            )
+        """,
+        parameters={
+            "amendment_id": "wca_" + "1" * 64,
+            "conversation_id": "cnv_" + "2" * 32,
+            "source_task_id": "tsk_" + "3" * 32,
+            "source_execution_id": "tlx_" + "4" * 64,
+            "source_contract_digest": "5" * 64,
+            "source_plan_digest": "6" * 64,
+            "source_execution_digest": "7" * 64,
+            "source_event_digest": "8" * 64,
+            "successor_task_id": "tsk_" + "9" * 32,
+            "successor_message_id": "msg_" + "a" * 32,
+            "successor_message_digest": "b" * 64,
+            "empty_object": "{}",
+            "amendment_digest": "c" * 64,
+            "created_at": "2026-08-26 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT amendment_id, source_execution_id, amendment_digest
+            FROM workspace_coding_amendment_bindings
+            WHERE amendment_id = :amendment_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM workspace_coding_amendment_bindings "
+            "WHERE amendment_id = :amendment_id"
+        ),
+    )
+
+    command.downgrade(config, "0058_workspace_coding_deliveries")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert "workspace_coding_amendment_bindings" not in inspect(
             connection
         ).get_table_names()
     engine.dispose()

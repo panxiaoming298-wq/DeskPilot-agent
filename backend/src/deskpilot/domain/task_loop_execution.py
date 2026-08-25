@@ -685,6 +685,114 @@ class TaskLoopExecutionNodeRead(BaseModel):
         return cls(**material, state_digest=sha256_digest(material))
 
 
+class WorkspaceCodingChangeRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str = Field(min_length=1, max_length=500)
+    old_text: str = Field(max_length=200_000)
+    new_text: str = Field(max_length=200_000)
+
+
+class WorkspaceCodingPlannerEvidenceRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str = Field(min_length=1, max_length=500)
+    agent_id: Literal["builtin.workspace_patch_planner"]
+    agent_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
+    decision_digest: str = Field(pattern=DIGEST_PATTERN)
+    verification_digest: str = Field(pattern=DIGEST_PATTERN)
+
+
+class WorkspaceCodingTestRunRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["python_test", "node_test"]
+    attempt: int = Field(ge=1, le=2)
+    project_path: str = Field(min_length=1, max_length=500)
+    test_path: str = Field(min_length=1, max_length=500)
+    status: Literal["passed", "failed", "error"]
+    exit_code: int
+
+
+class WorkspaceCodingFailureRepairRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt: int = Field(ge=1, le=2)
+    status: Literal["failed", "error"]
+    failure_receipt_digest: str = Field(pattern=DIGEST_PATTERN)
+
+
+class WorkspaceCodingRollbackPointRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str = Field(min_length=1, max_length=500)
+    available: bool
+    previous_version_digest: str = Field(pattern=DIGEST_PATTERN)
+    version_digest: str = Field(pattern=DIGEST_PATTERN)
+
+
+class WorkspaceCodingDeliveryWorkbenchRead(BaseModel):
+    """User-visible coding delivery without internal paths or authority manifests."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-coding-delivery-workbench.v1"] = (
+        "deskpilot.workspace-coding-delivery-workbench.v1"
+    )
+    delivery_id: str = Field(pattern=r"^wcd_[0-9a-f]{64}$")
+    changed_files: tuple[str, ...] = Field(min_length=2, max_length=2)
+    changes: tuple[WorkspaceCodingChangeRead, ...] = Field(min_length=2, max_length=2)
+    patch_planner_evidence: tuple[WorkspaceCodingPlannerEvidenceRead, ...] = Field(
+        min_length=2,
+        max_length=2,
+    )
+    tests: tuple[WorkspaceCodingTestRunRead, ...] = Field(min_length=1, max_length=2)
+    failure_repair_history: tuple[WorkspaceCodingFailureRepairRead, ...] = Field(
+        default=(),
+        max_length=1,
+    )
+    remaining_risks: tuple[str, ...] = Field(default=(), max_length=10)
+    rollback_points: tuple[WorkspaceCodingRollbackPointRead, ...] = Field(
+        min_length=2,
+        max_length=2,
+    )
+    rollback_available: bool
+    evidence_digest: str = Field(pattern=DIGEST_PATTERN)
+    created_at: datetime
+    projection_digest: str = Field(pattern=DIGEST_PATTERN)
+
+    @model_validator(mode="after")
+    def scope_and_digest_match(self) -> Self:
+        paths = tuple(item.path for item in self.changes)
+        planner_paths = tuple(item.path for item in self.patch_planner_evidence)
+        rollback_paths = tuple(item.path for item in self.rollback_points)
+        if (
+            self.changed_files != tuple(sorted(set(self.changed_files)))
+            or paths != self.changed_files
+            or planner_paths != self.changed_files
+            or rollback_paths != self.changed_files
+            or sum(item.status == "passed" for item in self.tests) != 1
+            or len(self.failure_repair_history)
+            != sum(item.status != "passed" for item in self.tests)
+            or self.rollback_available
+            is not all(item.available for item in self.rollback_points)
+            or self.created_at.tzinfo is None
+        ):
+            raise ValueError("Workspace coding delivery projection is inconsistent")
+        material = self.model_dump(mode="json", exclude={"projection_digest"})
+        if self.projection_digest != sha256_digest(material):
+            raise ValueError("Workspace coding delivery projection digest changed")
+        return self
+
+    @classmethod
+    def build(cls, **values: Any) -> Self:
+        material = {
+            "schema_version": "deskpilot.workspace-coding-delivery-workbench.v1",
+            **values,
+        }
+        return cls(**material, projection_digest=sha256_digest(material))
+
+
 class TaskLoopExecutionRead(BaseModel):
     """Internal, proof-checked read across Observe through terminal execution."""
 
@@ -703,6 +811,7 @@ class TaskLoopExecutionRead(BaseModel):
     execution: TaskLoopExecution | None = None
     cycle: TaskLoopCycleRead | None = None
     workspace_patch: WorkspacePatchPreview | WorkspacePatchReceipt | None = None
+    coding_delivery: WorkspaceCodingDeliveryWorkbenchRead | None = None
     nodes: tuple[TaskLoopExecutionNodeRead, ...] = Field(default=(), max_length=18)
     recoverable: bool
     created_at: datetime
@@ -732,6 +841,8 @@ class TaskLoopExecutionRead(BaseModel):
                 raise ValueError("Pre-execution Task Loop cannot expose cycle state")
             if self.workspace_patch is not None:
                 raise ValueError("Pre-execution Task Loop cannot expose an approval")
+            if self.coding_delivery is not None:
+                raise ValueError("Pre-execution Task Loop cannot expose a coding delivery")
         else:
             if (
                 self.loop_status != "planned"
@@ -750,6 +861,8 @@ class TaskLoopExecutionRead(BaseModel):
                 raise ValueError("Execution recovery state is invalid")
             if self.cycle is None:
                 raise ValueError("Execution read has no persistent cycle summary")
+            if self.coding_delivery is not None and self.execution.status != "succeeded":
+                raise ValueError("Coding delivery requires a succeeded execution")
         material = self.model_dump(mode="json", exclude={"read_digest"})
         if self.read_digest != sha256_digest(material):
             raise ValueError("Task-loop execution read digest does not match")
@@ -763,6 +876,7 @@ class TaskLoopExecutionRead(BaseModel):
         }
         material.setdefault("cycle", None)
         material.setdefault("workspace_patch", None)
+        material.setdefault("coding_delivery", None)
         if material.get("execution") is not None and material.get("cycle") is None:
             material["cycle"] = TaskLoopCycleRead.build(
                 no_progress_count=0,
@@ -825,8 +939,11 @@ class TaskLoopExecutionWorkbenchNodeRead(BaseModel):
             item is not None for item in command_fields
         ):
             raise ValueError("Task-loop Workbench command summary is incomplete")
-        if self.verified_failure_result_count and self.command_plan_id is None:
-            raise ValueError("Only command nodes may expose verified failure receipts")
+        if (
+            self.verified_failure_result_count
+            and self.kind is not DraftNodeKind.CAPABILITY
+        ):
+            raise ValueError("Only capability nodes may expose verified failure receipts")
         material = self.model_dump(mode="json", exclude={"summary_digest"})
         if self.summary_digest != sha256_digest(material):
             raise ValueError("Task-loop Workbench node digest does not match")
@@ -889,6 +1006,7 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
     maximum_plan_generations: Literal[3] = 3
     budget_exhausted: bool
     nodes: tuple[TaskLoopExecutionWorkbenchNodeRead, ...] = Field(default=(), max_length=18)
+    coding_delivery: WorkspaceCodingDeliveryWorkbenchRead | None = None
     recoverable: bool
     created_at: datetime
     updated_at: datetime
@@ -927,6 +1045,8 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
             or self.budget_exhausted
         ):
             raise ValueError("Pre-execution Workbench read has cycle state")
+        if self.coding_delivery is not None and self.execution_status != "succeeded":
+            raise ValueError("Workbench coding delivery requires succeeded execution")
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("Task-loop Workbench timestamps must be timezone-aware")
         material = self.model_dump(mode="json", exclude={"projection_digest"})
@@ -974,6 +1094,7 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
                 read.cycle.budget_exhausted if read.cycle is not None else False
             ),
             "nodes": nodes,
+            "coding_delivery": read.coding_delivery,
             "recoverable": read.recoverable,
             "created_at": read.created_at,
             "updated_at": read.updated_at,

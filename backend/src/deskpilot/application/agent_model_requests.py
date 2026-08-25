@@ -63,7 +63,11 @@ def build_patch_planner_model_request(
     objective: str,
     route_binding_id: str,
     patch_binding_id: str,
-    route_id: Literal["workspace_agent_patch_test", "workspace_dynamic_patch_test"],
+    route_id: Literal[
+        "workspace_agent_patch_test",
+        "workspace_dynamic_patch_test",
+        "workspace_coding_loop",
+    ],
     upstream_data: list[dict[str, object]],
     observation_digest: str | None = None,
     source_text: str | None = None,

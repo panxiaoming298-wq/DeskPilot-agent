@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from deskpilot.application.artifact_delivery_runtime import POLICY_DIGEST, POLICY_ID
 from deskpilot.core.canonical_json import sha256_digest
+from deskpilot.domain.agent_loop import WorkspacePatchSubmitProposalDecision
 from deskpilot.domain.agent_runtime import AgentOutputResult, AgentResult
 from deskpilot.domain.artifact_runtime import ClaimVerdictRead
 from deskpilot.domain.capability_execution import (
@@ -37,7 +38,9 @@ from deskpilot.domain.task_plans import (
 )
 from deskpilot.domain.workspace_files import WorkspaceFileRead
 from deskpilot.infrastructure.models import (
+    AgentDecisionRecord,
     AgentInvocationRecord,
+    AgentModelTurnRecord,
     AgentResultRecord,
     ClaimVerdictRecord,
     ResearchCitationRecord,
@@ -99,6 +102,14 @@ class WorkspaceReaderVerificationProof:
     """Existing deterministic Workspace Reader result proof."""
 
     workspace_result: WorkspaceAgentResultRecord
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspacePatchPlannerVerificationProof:
+    """Persisted one-turn Patch Planner decision with no execution authority."""
+
+    model_turn: AgentModelTurnRecord
+    decision: AgentDecisionRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +269,111 @@ class AgentVerifiedResultBridge:
             result_kind=CapabilityResultKind.WORKSPACE_FILE,
             result_schema_digest=sha256_digest(WorkspaceFileRead.model_json_schema()),
             result_digest=workspace.result_digest,
+            verification_digest=verification_digest,
+        )
+
+    @classmethod
+    def workspace_patch_planner(
+        cls,
+        plan_proof: AgentVerifiedResultPlanProof,
+        verification_proof: WorkspacePatchPlannerVerificationProof,
+        *,
+        expected_source_local_key: str,
+        source_parameter_name: str,
+        expected_change: dict[str, str],
+        allow_pending_node_transition: bool = False,
+    ) -> VerifiedCapabilityResultRef:
+        """Bridge one exact server-bounded model proposal into a read-only ResultRef."""
+
+        resolved = cls._resolve_plan_proof(
+            plan_proof,
+            expected_route_id="workspace_coding_loop",
+            expected_source_local_key=expected_source_local_key,
+            expected_agent_id="builtin.workspace_patch_planner",
+            expected_capability_id="workspace.patch.propose.v1",
+            allow_pending_node_transition=allow_pending_node_transition,
+        )
+        try:
+            result = AgentOutputResult.model_validate(plan_proof.result.manifest)
+            proposal = WorkspacePatchSubmitProposalDecision.model_validate(
+                verification_proof.decision.manifest
+            )
+        except ValidationError as error:
+            raise AgentVerifiedResultProofRejectedError(
+                "Workspace Patch Planner result Schema was rejected"
+            ) from error
+        cls._assert_agent_result_record(plan_proof, result)
+        turn = verification_proof.model_turn
+        decision = verification_proof.decision
+        bound_path = cls._parameter(plan_proof.step_binding, source_parameter_name)
+        change = proposal.changes[0] if len(proposal.changes) == 1 else None
+        decision_material = {
+            "turn_id": turn.turn_id,
+            "invocation_id": plan_proof.invocation.invocation_id,
+            "decision": decision.manifest,
+            "response_digest": turn.response_digest,
+        }
+        expected_output = {
+            "patch_binding_id": proposal.patch_binding_id,
+            "observation_digest": proposal.observation_digest,
+            "changes": [item.model_dump(mode="json") for item in proposal.changes],
+            "decision_digest": decision.decision_digest,
+        }
+        if (
+            turn.invocation_id != plan_proof.invocation.invocation_id
+            or turn.turn_no != 1
+            or turn.status != "succeeded"
+            or turn.response_digest is None
+            or decision.turn_id != turn.turn_id
+            or decision.invocation_id != plan_proof.invocation.invocation_id
+            or decision.kind != "submit_result"
+            or decision.binding_id != proposal.patch_binding_id
+            or decision.decision_digest != sha256_digest(decision_material)
+            or change is None
+            or change.path != bound_path
+            or change.path != expected_change.get("path")
+            or change.old_text != expected_change.get("old_text")
+            or change.new_text != expected_change.get("new_text")
+            or result.output != expected_output
+            or result.evidence_refs
+            != (f"agent-decision:{decision.decision_id}",)
+            or result.limitation_codes
+            or result.input_digest != turn.request_digest
+            or result.model_response_digest != turn.response_digest
+            or result.output_schema_digest
+            != sha256_digest(WorkspacePatchSubmitProposalDecision.model_json_schema())
+        ):
+            raise AgentVerifiedResultProofRejectedError(
+                "Workspace Patch Planner decision or server Offer binding changed"
+            )
+        verification_digest = sha256_digest(
+            {
+                "schema_version": "deskpilot.workspace-patch-planner-verification-proof.v1",
+                "step_binding_digest": plan_proof.step_binding.step_binding_digest,
+                "plan_manifest_digest": plan_proof.composite_plan.plan_manifest_digest,
+                "node_spec_digest": plan_proof.node.node_spec_digest,
+                "invocation_id": plan_proof.invocation.invocation_id,
+                "invocation_attempt": plan_proof.invocation.attempt,
+                "turn_id": turn.turn_id,
+                "request_digest": turn.request_digest,
+                "response_digest": turn.response_digest,
+                "decision_digest": decision.decision_digest,
+                "agent_result_digest": result.result_digest,
+                "bound_change_digest": sha256_digest(expected_change),
+            }
+        )
+        return VerifiedCapabilityResultRef.build(
+            task_id=plan_proof.run.task_id,
+            run_id=plan_proof.run.run_id,
+            plan_generation=plan_proof.run.plan_generation,
+            producer_node_id=plan_proof.node.node_id,
+            producer_attempt=plan_proof.invocation.attempt,
+            capability=resolved.capability,
+            result_kind=CapabilityResultKind.PATCH_PROPOSAL,
+            result_schema_digest=sha256_digest(
+                WorkspacePatchSubmitProposalDecision.model_json_schema()
+            ),
+            result_digest=result.result_digest,
             verification_digest=verification_digest,
         )
 

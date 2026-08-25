@@ -49,14 +49,28 @@ from deskpilot.domain.task_loop_execution import (
     TaskLoopExecutionRead,
     TaskLoopNodeAttempt,
     TaskLoopVerifiedResult,
+    WorkspaceCodingChangeRead,
+    WorkspaceCodingDeliveryWorkbenchRead,
+    WorkspaceCodingFailureRepairRead,
+    WorkspaceCodingPlannerEvidenceRead,
+    WorkspaceCodingRollbackPointRead,
+    WorkspaceCodingTestRunRead,
 )
-from deskpilot.domain.task_plans import DraftNodeKind, ExecutablePlan
+from deskpilot.domain.task_plans import DraftNodeKind, ExecutablePlan, TaskContract
+from deskpilot.domain.workspace_coding_amendments import (
+    WorkspaceCodingAmendmentBinding,
+)
 from deskpilot.domain.workspace_command_plans import WorkspaceCommandPlanBinding
 from deskpilot.domain.workspace_files import WorkspacePatchPreview, WorkspacePatchReceipt
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
+    AgentInvocationRecord,
+    AgentModelTurnRecord,
+    ConversationMessageRecord,
+    ModelDispatchAttemptRecord,
     ModelPlannerDraftRecord,
     ModelPlannerNodeBindingRecord,
+    TaskContractVersionRecord,
     TaskExecutionEdgeRecord,
     TaskExecutionNodeRecord,
     TaskExecutionRunRecord,
@@ -69,6 +83,10 @@ from deskpilot.infrastructure.models import (
     TaskLoopVerifiedResultRecord,
     TaskPlanGenerationRecord,
     TaskPlanningStateRecord,
+    TaskRecord,
+    TurnRouteRecord,
+    WorkspaceCodingAmendmentBindingRecord,
+    WorkspaceCodingDeliveryRecord,
 )
 
 
@@ -250,6 +268,391 @@ class TaskLoopActivationRuntime:
         except (PlanningError, AgentRuntimeError) as error:
             raise TaskLoopActivationProofRejectedError(
                 "Atomic Plan or Run activation was rejected"
+            ) from error
+
+    async def cancel_for_amendment(self, task_id: str) -> TaskLoopExecutionRead | None:
+        """Fence the old Run first, then seal its TaskLoop execution as cancelled."""
+
+        current = await self.get(task_id)
+        if current is None or current.execution is None:
+            return current
+        execution = current.execution
+        if execution.status in {"failed", "succeeded", "cancelled"}:
+            return current
+        # This is deliberately first: once the Run is cancelled every stale
+        # worker mutation fails its Run/node/fencing checks, even if the process
+        # stops before the TaskLoop event is appended.
+        await self._execution.cancel(execution.run_id)
+        async with self._database.session() as session, session.begin():
+            record = await session.scalar(
+                select(TaskLoopExecutionRecord)
+                .where(
+                    TaskLoopExecutionRecord.execution_id
+                    == execution.execution_id
+                )
+                .with_for_update()
+            )
+            if record is None:
+                raise TaskLoopActivationNotFoundError(
+                    "Task Loop execution disappeared during amendment"
+                )
+            persisted = TaskLoopExecution.model_validate(record.manifest)
+            if persisted.status != "cancelled":
+                if (
+                    persisted.execution_digest != execution.execution_digest
+                    or persisted.status in {"failed", "succeeded"}
+                ):
+                    raise TaskLoopActivationConflictError(
+                        "Task Loop execution changed during amendment fencing"
+                    )
+                now = self._now()
+                invocations = tuple(
+                    (
+                        await session.scalars(
+                            select(AgentInvocationRecord).where(
+                                AgentInvocationRecord.run_id == execution.run_id
+                            )
+                        )
+                    ).all()
+                )
+                invocation_ids = tuple(item.invocation_id for item in invocations)
+                unknown_turns: tuple[AgentModelTurnRecord, ...] = ()
+                if invocation_ids:
+                    unknown_turns = tuple(
+                        (
+                            await session.scalars(
+                                select(AgentModelTurnRecord)
+                                .where(
+                                    AgentModelTurnRecord.invocation_id.in_(
+                                        invocation_ids
+                                    ),
+                                    AgentModelTurnRecord.status == "dispatching",
+                                )
+                                .with_for_update()
+                            )
+                        ).all()
+                    )
+                unknown_invocations = {
+                    item.invocation_id for item in unknown_turns
+                }
+                for turn in unknown_turns:
+                    turn.status = "outcome_unknown"
+                    turn.stable_error_code = (
+                        "CONTRACT_AMENDMENT_DURING_DISPATCH"
+                    )
+                    turn.updated_at = now
+                    dispatch = await session.scalar(
+                        select(ModelDispatchAttemptRecord)
+                        .where(
+                            ModelDispatchAttemptRecord.turn_id == turn.turn_id,
+                            ModelDispatchAttemptRecord.status == "dispatching",
+                        )
+                        .with_for_update()
+                    )
+                    if dispatch is not None:
+                        dispatch.status = "outcome_unknown"
+                        dispatch.stable_error_code = (
+                            "CONTRACT_AMENDMENT_DURING_DISPATCH"
+                        )
+                        dispatch.updated_at = now
+                attempts = tuple(
+                    (
+                        await session.scalars(
+                            select(TaskLoopNodeAttemptRecord)
+                            .where(
+                                TaskLoopNodeAttemptRecord.execution_id
+                                == execution.execution_id,
+                                TaskLoopNodeAttemptRecord.status.in_(
+                                    (
+                                        "prepared",
+                                        "claimed",
+                                        "running",
+                                        "awaiting_verification",
+                                    )
+                                ),
+                            )
+                            .with_for_update()
+                        )
+                    ).all()
+                )
+                invocation_by_attempt = {
+                    (item.node_id, item.attempt): item for item in invocations
+                }
+                for attempt_record in attempts:
+                    attempt = self._attempt_from_record(attempt_record)
+                    invocation = invocation_by_attempt.get(
+                        (attempt.node_id, attempt.attempt)
+                    )
+                    outcome_unknown = bool(
+                        invocation is not None
+                        and invocation.invocation_id in unknown_invocations
+                    )
+                    error_code = (
+                        "CONTRACT_AMENDMENT_OUTCOME_UNKNOWN"
+                        if outcome_unknown
+                        else "CONTRACT_AMENDMENT_CANCELLED"
+                    )
+                    material = attempt.model_dump(
+                        mode="python",
+                        exclude={"attempt_digest"},
+                    )
+                    material.update(
+                        {
+                            "status": (
+                                "outcome_unknown"
+                                if outcome_unknown
+                                else "cancelled"
+                            ),
+                            "revision": attempt.revision + 1,
+                            "claim_owner_id": None,
+                            "claim_acquired_at": None,
+                            "claim_expires_at": None,
+                            "error_code": error_code,
+                            "error_digest": sha256_digest(
+                                {
+                                    "attempt_id": attempt.attempt_id,
+                                    "error_code": error_code,
+                                }
+                            ),
+                            "updated_at": now,
+                        }
+                    )
+                    amended = TaskLoopNodeAttempt.model_validate(
+                        {
+                            **material,
+                            "attempt_digest": sha256_digest(material),
+                        }
+                    )
+                    self._apply_attempt_record(attempt_record, amended)
+                cancelled, event = persisted.transition(
+                    status="cancelled",
+                    kind="cancelled",
+                    updated_at=now,
+                )
+                self._apply_execution_record(record, cancelled)
+                session.add(self._event_record(event))
+        return await self.get(task_id)
+
+    async def bind_conversation_amendment(
+        self,
+        source_task_id: str,
+        successor_task_id: str,
+    ) -> WorkspaceCodingAmendmentBinding:
+        """Bind an already fenced generation to one same-conversation user turn."""
+
+        current = await self.get(source_task_id)
+        if (
+            current is None
+            or current.execution is None
+            or current.execution.status != "cancelled"
+        ):
+            raise TaskLoopActivationNotEligibleError(
+                "Workspace coding amendment source is not terminal cancelled"
+            )
+        execution = current.execution
+        try:
+            async with self._database.session() as session, session.begin():
+                source_execution = await session.scalar(
+                    select(TaskLoopExecutionRecord)
+                    .where(
+                        TaskLoopExecutionRecord.execution_id
+                        == execution.execution_id
+                    )
+                    .with_for_update()
+                )
+                if source_execution is None:
+                    raise TaskLoopActivationNotFoundError(
+                        "Workspace coding amendment source execution is missing"
+                    )
+                persisted_execution = TaskLoopExecution.model_validate(
+                    source_execution.manifest
+                )
+                if (
+                    persisted_execution != execution
+                    or persisted_execution.status != "cancelled"
+                ):
+                    raise TaskLoopActivationConflictError(
+                        "Workspace coding amendment source execution changed"
+                    )
+                existing = await session.scalar(
+                    select(WorkspaceCodingAmendmentBindingRecord)
+                    .where(
+                        WorkspaceCodingAmendmentBindingRecord.source_execution_id
+                        == execution.execution_id
+                    )
+                    .with_for_update()
+                )
+                existing_binding: WorkspaceCodingAmendmentBinding | None = None
+                if existing is not None:
+                    existing_binding = self._amendment_from_record(existing)
+                    if (
+                        existing_binding.source_task_id != source_task_id
+                        or existing_binding.successor_task_id != successor_task_id
+                    ):
+                        raise TaskLoopActivationConflictError(
+                            "Workspace coding generation already has another successor"
+                        )
+
+                source_task = await session.get(TaskRecord, source_task_id)
+                successor_task = await session.get(TaskRecord, successor_task_id)
+                planning_state = await session.get(
+                    TaskPlanningStateRecord,
+                    source_task_id,
+                )
+                if (
+                    source_task is None
+                    or successor_task is None
+                    or planning_state is None
+                    or source_task.conversation_id is None
+                    or successor_task.conversation_id != source_task.conversation_id
+                    or source_task_id == successor_task_id
+                ):
+                    raise TaskLoopActivationProofRejectedError(
+                        "Workspace coding amendment is not in one conversation"
+                    )
+                contract_record = await session.get(
+                    TaskContractVersionRecord,
+                    (source_task_id, planning_state.active_contract_version),
+                )
+                plan_record = await session.get(
+                    TaskPlanGenerationRecord,
+                    (source_task_id, planning_state.active_plan_generation),
+                )
+                if (
+                    contract_record is None
+                    or plan_record is None
+                    or plan_record.status != "active"
+                    or contract_record.contract_digest
+                    != planning_state.active_contract_digest
+                    or plan_record.plan_manifest_digest
+                    != planning_state.active_plan_digest
+                    or execution.plan_generation != plan_record.generation
+                    or execution.plan_id != plan_record.plan_id
+                    or execution.plan_manifest_digest
+                    != plan_record.plan_manifest_digest
+                    or plan_record.contract_version != contract_record.version
+                    or plan_record.contract_digest != contract_record.contract_digest
+                ):
+                    raise TaskLoopActivationProofRejectedError(
+                        "Workspace coding amendment planning lineage changed"
+                    )
+                contract = TaskContract.model_validate(contract_record.manifest)
+                if (
+                    contract.task_id != source_task_id
+                    or contract.version != contract_record.version
+                    or contract.contract_id != contract_record.contract_id
+                    or contract.previous_contract_digest
+                    != contract_record.previous_contract_digest
+                    or contract.digest != contract_record.contract_digest
+                ):
+                    raise TaskLoopActivationProofRejectedError(
+                        "Workspace coding amendment Contract proof changed"
+                    )
+                plan = ExecutablePlan.model_validate(plan_record.manifest)
+                if (
+                    plan.plan_manifest_digest != plan_record.plan_manifest_digest
+                    or plan.task_id != source_task_id
+                    or plan.task_contract.version != contract_record.version
+                    or plan.task_contract.digest != contract_record.contract_digest
+                ):
+                    raise TaskLoopActivationProofRejectedError(
+                        "Workspace coding amendment Plan proof changed"
+                    )
+                terminal_event_record = await session.get(
+                    TaskLoopExecutionEventRecord,
+                    execution.latest_event_id,
+                )
+                if terminal_event_record is None:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Workspace coding amendment terminal event is missing"
+                    )
+                terminal_event = self._event_from_record(terminal_event_record)
+                if (
+                    terminal_event.execution_id != execution.execution_id
+                    or terminal_event.kind != "cancelled"
+                    or terminal_event.event_digest != execution.latest_event_digest
+                ):
+                    raise TaskLoopActivationProofRejectedError(
+                        "Workspace coding amendment terminal event changed"
+                    )
+                successor_route = await session.get(TurnRouteRecord, successor_task_id)
+                if (
+                    successor_route is None
+                    or successor_route.conversation_id != source_task.conversation_id
+                ):
+                    raise TaskLoopActivationProofRejectedError(
+                        "Workspace coding amendment successor route is missing"
+                    )
+                successor_message = await session.get(
+                    ConversationMessageRecord,
+                    successor_route.user_message_id,
+                )
+                if successor_message is None:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Workspace coding amendment successor message is missing"
+                    )
+                message_material = {
+                    "message_id": successor_message.message_id,
+                    "conversation_id": successor_message.conversation_id,
+                    "task_id": successor_message.task_id,
+                    "role": successor_message.role,
+                    "content": successor_message.content,
+                    "content_ref": successor_message.content_ref,
+                    "classification": successor_message.classification,
+                    "created_at": self._aware(successor_message.created_at),
+                }
+                if (
+                    successor_message.conversation_id
+                    != source_task.conversation_id
+                    or successor_message.task_id != successor_task_id
+                    or successor_message.role != "user"
+                    or successor_message.status != "active"
+                    or successor_message.content is None
+                    or successor_message.content_ref is not None
+                    or successor_task.goal != successor_message.content
+                    or successor_message.message_digest
+                    != sha256_digest(message_material)
+                ):
+                    raise TaskLoopActivationProofRejectedError(
+                        "Workspace coding amendment successor message changed"
+                    )
+                binding = WorkspaceCodingAmendmentBinding.build(
+                    conversation_id=source_task.conversation_id,
+                    source_task_id=source_task_id,
+                    source_execution_id=execution.execution_id,
+                    source_contract_version=contract_record.version,
+                    source_contract_digest=contract_record.contract_digest,
+                    source_plan_generation=plan_record.generation,
+                    source_plan_digest=plan_record.plan_manifest_digest,
+                    source_execution_digest=execution.execution_digest,
+                    source_execution_event_digest=terminal_event.event_digest,
+                    successor_task_id=successor_task_id,
+                    successor_user_message_id=successor_message.message_id,
+                    successor_user_message_digest=successor_message.message_digest,
+                    created_at=(
+                        existing_binding.created_at
+                        if existing_binding is not None
+                        else self._now()
+                    ),
+                )
+                if existing_binding is not None:
+                    if binding != existing_binding:
+                        raise TaskLoopActivationProofRejectedError(
+                            "Workspace coding amendment referent proof changed"
+                        )
+                    return existing_binding
+                session.add(self._amendment_record(binding))
+                await session.flush()
+                return binding
+        except IntegrityError as error:
+            raise TaskLoopActivationConflictError(
+                "Workspace coding amendment was bound concurrently"
+            ) from error
+        except TaskLoopActivationError:
+            raise
+        except (ValidationError, ValueError) as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Workspace coding amendment proof was rejected"
             ) from error
 
     def _assert_current_command_plans(
@@ -840,6 +1243,26 @@ class TaskLoopActivationRuntime:
                     raise TaskLoopActivationProofRejectedError(
                         "Consumed patch approval receipt proof changed"
                     ) from error
+        delivery_record = await session.scalar(
+            select(WorkspaceCodingDeliveryRecord).where(
+                WorkspaceCodingDeliveryRecord.execution_id
+                == execution.execution_id
+            )
+        )
+        coding_delivery = (
+            self._coding_delivery_read(delivery_record, execution)
+            if delivery_record is not None
+            else None
+        )
+        is_coding_loop = any(
+            item.recipe.route_id == "workspace_coding_loop" for item in bindings
+        )
+        if execution.status == "succeeded" and is_coding_loop and coding_delivery is None:
+            raise TaskLoopActivationProofRejectedError(
+                "Succeeded workspace coding loop has no delivery evidence"
+            )
+        if delivery_record is not None:
+            updated_at = max(updated_at, self._aware(delivery_record.created_at))
         return TaskLoopExecutionRead.build(
             task_id=execution.task_id,
             loop_id=execution.loop_id,
@@ -851,10 +1274,137 @@ class TaskLoopActivationRuntime:
             execution=execution,
             cycle=cycle,
             workspace_patch=workspace_patch,
+            coding_delivery=coding_delivery,
             nodes=tuple(node_reads),
             recoverable=execution.status in {"active", "paused", "awaiting_user", "repairing"},
             created_at=loop.created_at,
             updated_at=updated_at,
+        )
+
+    @classmethod
+    def _coding_delivery_read(
+        cls,
+        record: WorkspaceCodingDeliveryRecord,
+        execution: TaskLoopExecution,
+    ) -> WorkspaceCodingDeliveryWorkbenchRead:
+        manifest = record.manifest
+        if (
+            record.execution_id != execution.execution_id
+            or record.task_id != execution.task_id
+            or record.run_id != execution.run_id
+            or record.plan_id != execution.plan_id
+            or record.plan_manifest_digest != execution.plan_manifest_digest
+            or manifest.get("schema_version")
+            != "deskpilot.workspace-coding-delivery.v1"
+            or manifest.get("delivery_id") != record.delivery_id
+            or record.delivery_digest != sha256_digest(manifest)
+        ):
+            raise TaskLoopActivationProofRejectedError(
+                "Workspace coding delivery scope or digest changed"
+            )
+        try:
+            raw_changes = manifest["structured_diff"]
+            raw_planners = manifest["patch_planner_evidence"]
+            raw_tests = manifest["test_runs"]
+            raw_failures = manifest["failure_repair_history"]
+            raw_rollbacks = manifest["rollback_points"]
+            changed_files = tuple(str(item) for item in manifest["changed_files"])
+            risks = tuple(str(item) for item in manifest["remaining_risks"])
+            if not all(
+                isinstance(items, list)
+                for items in (
+                    raw_changes,
+                    raw_planners,
+                    raw_tests,
+                    raw_failures,
+                    raw_rollbacks,
+                )
+            ):
+                raise ValueError("Coding delivery collections must be arrays")
+            changes = tuple(
+                WorkspaceCodingChangeRead.model_validate(item)
+                for item in raw_changes
+            )
+            planners = tuple(
+                WorkspaceCodingPlannerEvidenceRead.model_validate(
+                    {
+                        "path": item["path"],
+                        "agent_id": item["agent_id"],
+                        "agent_version": item["agent_version"],
+                        "decision_digest": item["decision_digest"],
+                        "verification_digest": item["verification_digest"],
+                    }
+                )
+                for item in raw_planners
+                if isinstance(item, dict)
+            )
+            tests = tuple(
+                WorkspaceCodingTestRunRead.model_validate(
+                    {
+                        "kind": item["result_kind"],
+                        "attempt": item["attempt"],
+                        "project_path": item["project_path"],
+                        "test_path": item["test_path"],
+                        "status": item["status"],
+                        "exit_code": item["exit_code"],
+                    }
+                )
+                for item in raw_tests
+                if isinstance(item, dict)
+            )
+            failures = tuple(
+                WorkspaceCodingFailureRepairRead.model_validate(
+                    {
+                        "attempt": item["attempt"],
+                        "status": item["status"],
+                        "failure_receipt_digest": item[
+                            "failure_receipt_digest"
+                        ],
+                    }
+                )
+                for item in raw_failures
+                if isinstance(item, dict)
+            )
+            rollbacks = tuple(
+                WorkspaceCodingRollbackPointRead(
+                    path=str(item["path"]),
+                    available=item.get("backup_relative_path") is not None,
+                    previous_version_digest=str(item["previous_version_digest"]),
+                    version_digest=str(item["version_digest"]),
+                )
+                for item in raw_rollbacks
+                if isinstance(item, dict)
+            )
+        except (KeyError, TypeError, ValueError, ValidationError) as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Workspace coding delivery projection Schema was rejected"
+            ) from error
+        if (
+            len(changes) != record.changed_file_count
+            or len(tests) != record.test_run_count
+            or len(failures) != record.failure_count
+            or bool(manifest.get("rollback_available"))
+            is not record.rollback_available
+        ):
+            raise TaskLoopActivationProofRejectedError(
+                "Workspace coding delivery projection counts changed"
+            )
+        return WorkspaceCodingDeliveryWorkbenchRead.build(
+            delivery_id=record.delivery_id,
+            changed_files=changed_files,
+            changes=tuple(sorted(changes, key=lambda item: item.path)),
+            patch_planner_evidence=tuple(
+                sorted(planners, key=lambda item: item.path)
+            ),
+            tests=tuple(sorted(tests, key=lambda item: item.attempt)),
+            failure_repair_history=tuple(
+                sorted(failures, key=lambda item: item.attempt)
+            ),
+            remaining_risks=risks,
+            rollback_points=tuple(sorted(rollbacks, key=lambda item: item.path)),
+            rollback_available=record.rollback_available,
+            evidence_digest=record.delivery_digest,
+            created_at=cls._aware(record.created_at),
         )
 
     @staticmethod
@@ -1282,6 +1832,61 @@ class TaskLoopActivationRuntime:
         )
 
     @staticmethod
+    def _apply_execution_record(
+        record: TaskLoopExecutionRecord,
+        execution: TaskLoopExecution,
+    ) -> None:
+        for field in (
+            "status",
+            "revision",
+            "event_count",
+            "latest_event_id",
+            "latest_event_digest",
+            "manifest",
+            "execution_digest",
+            "updated_at",
+        ):
+            value = (
+                execution.model_dump(mode="json")
+                if field == "manifest"
+                else getattr(execution, field)
+            )
+            setattr(record, field, value)
+
+    @staticmethod
+    def _apply_attempt_record(
+        record: TaskLoopNodeAttemptRecord,
+        attempt: TaskLoopNodeAttempt,
+    ) -> None:
+        for field in (
+            "status",
+            "revision",
+            "claim_owner_id",
+            "claim_fencing_token",
+            "claim_acquired_at",
+            "claim_expires_at",
+            "input_manifest",
+            "input_digest",
+            "context_manifest",
+            "context_digest",
+            "candidate_manifest",
+            "candidate_digest",
+            "candidate_recorded_at",
+            "verification_manifest",
+            "verification_digest",
+            "verified_at",
+            "receipt_manifest",
+            "receipt_digest",
+            "error_code",
+            "error_digest",
+            "created_at",
+            "updated_at",
+            "attempt_digest",
+        ):
+            setattr(record, field, getattr(attempt, field))
+        record.manifest = attempt.model_dump(mode="json")
+
+    @staticmethod
     def _event_record(event: TaskLoopExecutionEvent) -> TaskLoopExecutionEventRecord:
         return TaskLoopExecutionEventRecord(
             event_id=event.event_id,
@@ -1297,6 +1902,71 @@ class TaskLoopActivationRuntime:
             event_digest=event.event_digest,
             created_at=event.created_at,
         )
+
+    @staticmethod
+    def _amendment_record(
+        binding: WorkspaceCodingAmendmentBinding,
+    ) -> WorkspaceCodingAmendmentBindingRecord:
+        return WorkspaceCodingAmendmentBindingRecord(
+            amendment_id=binding.amendment_id,
+            conversation_id=binding.conversation_id,
+            source_task_id=binding.source_task_id,
+            source_execution_id=binding.source_execution_id,
+            source_contract_version=binding.source_contract_version,
+            source_contract_digest=binding.source_contract_digest,
+            source_plan_generation=binding.source_plan_generation,
+            source_plan_digest=binding.source_plan_digest,
+            source_execution_digest=binding.source_execution_digest,
+            source_execution_event_digest=(
+                binding.source_execution_event_digest
+            ),
+            successor_task_id=binding.successor_task_id,
+            successor_user_message_id=binding.successor_user_message_id,
+            successor_user_message_digest=(
+                binding.successor_user_message_digest
+            ),
+            manifest=binding.model_dump(mode="json"),
+            amendment_digest=binding.amendment_digest,
+            created_at=binding.created_at,
+        )
+
+    @staticmethod
+    def _amendment_from_record(
+        record: WorkspaceCodingAmendmentBindingRecord,
+    ) -> WorkspaceCodingAmendmentBinding:
+        try:
+            binding = WorkspaceCodingAmendmentBinding.model_validate(record.manifest)
+        except ValidationError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Persisted workspace coding amendment is invalid"
+            ) from error
+        expected = TaskLoopActivationRuntime._amendment_record(binding)
+        for field in (
+            "amendment_id",
+            "conversation_id",
+            "source_task_id",
+            "source_execution_id",
+            "source_contract_version",
+            "source_contract_digest",
+            "source_plan_generation",
+            "source_plan_digest",
+            "source_execution_digest",
+            "source_execution_event_digest",
+            "successor_task_id",
+            "successor_user_message_id",
+            "successor_user_message_digest",
+            "manifest",
+            "amendment_digest",
+        ):
+            if getattr(record, field) != getattr(expected, field):
+                raise TaskLoopActivationProofRejectedError(
+                    "Workspace coding amendment columns diverge from its manifest"
+                )
+        if TaskLoopActivationRuntime._aware(record.created_at) != binding.created_at:
+            raise TaskLoopActivationProofRejectedError(
+                "Workspace coding amendment timestamp changed"
+            )
+        return binding
 
     @staticmethod
     def _binding_record(

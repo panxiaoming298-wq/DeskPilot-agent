@@ -369,10 +369,38 @@ class TaskWorkbenchService:
         resolves_agent_input = bool(
             resolution is not None and resolution.rule == "agent_workspace_file_path"
         )
+        task_loop_amended = bool(
+            isinstance(previous.task_loop, TaskLoopExecutionWorkbenchRead)
+            and previous.task_loop.execution_status
+            not in {None, "failed", "succeeded", "cancelled"}
+            and previous.task_loop.recoverable
+        )
+        if task_loop_amended:
+            if self._task_loop_execution is None:
+                raise TaskWorkbenchConflictError(
+                    "Task Loop amendment runtime is unavailable"
+                )
+            if self._auto_advance is not None:
+                await self._auto_advance.cancel(previous.task.task_id)
+            sealed = await self._task_loop_execution.cancel_for_amendment(task_id)
+            if (
+                sealed is None
+                or sealed.execution is None
+                or sealed.execution.status != "cancelled"
+            ):
+                raise TaskWorkbenchConflictError(
+                    "Old Task Loop generation was not sealed"
+                )
+            await self._add_assistant_message(
+                previous.task.task_id,
+                "收到新的任务要求。旧 TaskLoop generation 与全部未完成租约已封存；"
+                "迟到结果不能进入新任务，接下来按新指令重新规划。",
+            )
         if (
             run is not None
             and run.status.value in {"active", "awaiting_verification", "paused"}
             and not resolves_agent_input
+            and not task_loop_amended
         ):
             if self._auto_advance is not None:
                 await self._auto_advance.cancel(previous.task.task_id)
@@ -389,6 +417,12 @@ class TaskWorkbenchService:
             candidate=candidate,
             resolution=resolution,
         )
+        if task_loop_amended:
+            assert self._task_loop_execution is not None
+            await self._task_loop_execution.bind_conversation_amendment(
+                task_id,
+                replacement.task.task_id,
+            )
         if resolves_agent_input:
             if run is None or self._workspace_agents is None:
                 raise TaskWorkbenchConflictError("Workspace Agent input runtime is unavailable")

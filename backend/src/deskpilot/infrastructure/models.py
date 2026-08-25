@@ -1469,6 +1469,86 @@ class WorkspaceCodingDeliveryRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class WorkspaceCodingAmendmentBindingRecord(Base):
+    """Immutable source-generation to successor-turn amendment lineage."""
+
+    __tablename__ = "workspace_coding_amendment_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "source_contract_version >= 1 AND source_plan_generation >= 1 "
+            "AND source_task_id <> successor_task_id",
+            name="ck_workspace_coding_amendment_scope",
+        ),
+        UniqueConstraint(
+            "source_execution_id",
+            name="uq_workspace_coding_amendment_source_execution",
+        ),
+        UniqueConstraint(
+            "successor_task_id",
+            name="uq_workspace_coding_amendment_successor_task",
+        ),
+        UniqueConstraint(
+            "successor_user_message_id",
+            name="uq_workspace_coding_amendment_successor_message",
+        ),
+        UniqueConstraint(
+            "amendment_digest",
+            name="uq_workspace_coding_amendment_digest",
+        ),
+        ForeignKeyConstraint(
+            ["source_task_id", "source_contract_version"],
+            ["task_contract_versions.task_id", "task_contract_versions.version"],
+            name="fk_workspace_coding_amendment_contract",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_task_id", "source_plan_generation"],
+            ["task_plan_generations.task_id", "task_plan_generations.generation"],
+            name="fk_workspace_coding_amendment_plan",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_execution_id", "source_execution_event_digest"],
+            [
+                "task_loop_execution_events.execution_id",
+                "task_loop_execution_events.event_digest",
+            ],
+            name="fk_workspace_coding_amendment_terminal_event",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_workspace_coding_amendments_conversation",
+            "conversation_id",
+            "created_at",
+        ),
+    )
+
+    amendment_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.conversation_id", ondelete="RESTRICT")
+    )
+    source_task_id: Mapped[str] = mapped_column(String(40))
+    source_execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loop_executions.execution_id", ondelete="RESTRICT")
+    )
+    source_contract_version: Mapped[int] = mapped_column(Integer)
+    source_contract_digest: Mapped[str] = mapped_column(String(64))
+    source_plan_generation: Mapped[int] = mapped_column(Integer)
+    source_plan_digest: Mapped[str] = mapped_column(String(64))
+    source_execution_digest: Mapped[str] = mapped_column(String(64))
+    source_execution_event_digest: Mapped[str] = mapped_column(String(64))
+    successor_task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="RESTRICT")
+    )
+    successor_user_message_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="RESTRICT")
+    )
+    successor_user_message_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    amendment_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class TaskLoopCapabilityApprovalRecord(Base):
     """Exact Task/revision-bound authority for one capability side effect."""
 
