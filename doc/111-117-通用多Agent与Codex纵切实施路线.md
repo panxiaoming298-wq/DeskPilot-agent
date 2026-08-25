@@ -1,16 +1,19 @@
 # 阶段 111～117：通用多 Agent、Codex 纵切与 Edge / 记事本实施路线
 
-## 1. 固定执行顺序
+## 1. 分离式执行顺序
 
-本路线在阶段 77～110 全量门禁与 `codex/stage-110` checkpoint 通过后执行，顺序固定为：
+本路线在阶段 77～110 全量门禁与 `codex/stage-110` checkpoint 通过后执行。阶段 115A 完成后，依据 [ADR-016](ADR-016-115B生产门与116开发纵切解耦.md) 将生产 cloud 授权门与本地长循环开发门解耦：
 
 ```text
 111 通用任务提案
   → 112 通用持久任务循环
   → 113 Codex 类安全编码工具
   → 114 并行任务与窗口后台运行
-  → 115 真实 Cloud Agent / Calibration v3 / Production Admission
-  → 116 Codex 类真实仓库长循环
+  → 115A Cloud Release / Calibration / Admission 代码底座
+  → 116A 受控编码工具面
+  → 116B 持久多 Agent 编码循环
+  → 115B 真实 Cloud capture / 真人评审 / Production Admission
+  → 116C 真实模型黄金任务与生产质量验收
   → 117 Edge + Windows 记事本安全纵切
 ```
 
@@ -130,9 +133,9 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 ## 6. 阶段 115：真实 Cloud Agent 与 Calibration v3
 
-> 实施状态（2026-08-25）：115A 与 115B 的授权/工件准备已在 `codex/stage-115` 形成内部 checkpoint；Release hash chain、cloud-only 三角色 2.0.0、闭合 companion、Calibration v3、exact 三角色 Admission builder 与 Task privacy-compatible binding 已通过 783 项默认后端总门禁及专项自动化。真实 Provider/Judge-human capture、Production Admission 和 activation 尚未获得授权，因此阶段 115 未完成，阶段 116 仍受门禁阻塞。详见[阶段 115：真实 Cloud Agent 与 Calibration v3](115-真实Cloud-Agent与Calibration-v3.md)。
+> 实施状态（2026-08-25）：115A 与 115B 的授权/工件准备已在 `codex/stage-115` 形成内部 checkpoint；Release hash chain、cloud-only 三角色 2.0.0、闭合 companion、Calibration v3、exact 三角色 Admission builder 与 Task privacy-compatible binding 已通过 783 项默认后端总门禁及专项自动化。真实 Provider/Judge-human capture、Production Admission 和 activation 尚未获得授权，因此阶段 115 未完成；但该外部生产门不再阻塞 116A/116B 的 LOCAL-only 开发，详见 [ADR-016](ADR-016-115B生产门与116开发纵切解耦.md)。
 
-阶段 115 不再以“生命周期和合成证据已经实现”作为完成条件。它必须把至少一个真实三角色 cohort 安全激活到生产运行时，证明后续 Codex 纵切使用的不是 Fake、recorded 或未校准候选。
+阶段 115 不再以“生命周期和合成证据已经实现”作为完成条件。它必须把至少一个真实三角色 cohort 安全激活到生产运行时，才能支持 116C 的真实模型质量声明。116A/116B 可以先证明本地运行时、工具和安全语义，但不得以 Fake、recorded 或未校准候选冒充生产质量。
 
 ### 115A：Release lifecycle 与三角色身份
 
@@ -154,6 +157,8 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 没有 Admission 时所有候选保持 disabled，本地稳定版本仍是 preferred。若真实 Provider、费用或真人评审尚未获得授权，可以完成 115A 并形成内部 checkpoint，但**不得把阶段 115 标记为完成，也不得宣称 cloud Agent 已达到生产质量**。不得提交凭据、原始敏感样本或 Fake 生产证据。
 
+缺少上述授权时允许创建 `codex/stage-116-dev` 并实施 116A/116B；开发路径只能使用 LOCAL-only Agent 和离线/固定测试 Provider，不能生成 Production Admission、不能设置 production activation 开关，也不能进入 116C 的真实模型验收。
+
 阶段 115 的发布门禁除既有 Phase75 零容忍项外，必须证明真实 cohort 没有 unauthorized effect、identity drift、未授权数据出站或 Judge 替代人工授权。
 
 ## 7. 阶段 116：Codex 类真实仓库长循环
@@ -161,6 +166,8 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 阶段 116 的唯一目标是闭合一个用户可感知的 Codex 纵向切片：用户在同一会话持续提出、补充和修订编码目标，系统在真实 Python/Node 仓库中完成调查、计划、多 Agent 协作、修改、测试、失败修复和证据交付。
 
 ### 116A：受控编码工具面
+
+> 实施授权：不依赖 115B 外部授权，立即在 `codex/stage-116-dev` 推进；cloud-only 2.0.0 cohort 继续 disabled。
 
 - 保留项目根、symlink/reparse、预算、Policy 与 Approval 边界，把搜索/批读、精确 Patch、固定测试扩展为同一隔离 Workspace 内的多文件编辑闭环。
 - 新增服务器编译的 `WorkspaceCommandPlan`。模型只能选择注册操作和结构化目标，不能提供 executable、任意 argv、cwd、环境变量或 shell 字符串。
@@ -170,6 +177,8 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 ### 116B：持久多 Agent 编码循环
 
+> 实施授权：不依赖 115B 外部授权。自动化可以使用 LOCAL-only/Fake Provider 证明持久化、并行、fencing、审批和恢复语义，但不能证明真实模型质量。
+
 - Turn Planner、Dynamic Coordinator、Explorer/Reader、Patch Planner、Test Runner 与独立 Verifier 通过版本化 Contract/Handoff 协作；至少证明两个独立 Child 并行调查和一个依赖 verified ResultRef 的 join。
 - 同一会话的新用户消息可以补充约束、纠正方向或要求停止；服务器封存旧 generation/lease，生成新的不可变计划代，不把迟到结果绑定到新计划。
 - 执行循环覆盖 `Inspect → Plan → Delegate → Patch → Test → Repair → Verify → Deliver`，测试失败只能在总预算、最大计划代和 no-progress 约束内继续。
@@ -177,6 +186,8 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 - 最终交付必须包含 diff、变更文件清单、执行过的测试、失败/修复历史、剩余风险和可回滚点；模型总结不能替代这些证据。
 
 ### 116C：真实仓库黄金任务与验收
+
+> 生产质量门：涉及真实 Candidate/Judge、真实模型成功率、Production Admission 和 cloud activation 的部分必须等待 115B 五项外部授权闭合。115B 前可以先冻结任务、harness、阈值和离线安全预检，但不得发布真实模型通过结论。
 
 - 建立至少 20 个版本化真实仓库任务，覆盖 Python/Node、单/多文件修改、测试失败修复、用户中途改意、重启恢复和多 Agent 并行调查。
 - capture 前冻结模型、Agent identity、Prompt、工具版本、任务输入、重复次数和成功阈值；默认质量门槛为端到端任务成功率不低于 80%。
@@ -210,3 +221,4 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 - 每阶段同步 README、`项目进度.md` 与阶段文档。
 - 112、113、115、116、117 可以按内部里程碑做中文提交，但阶段结束仍需一次全量门禁。
 - 不自动 push。真实 cloud capture 只能在明确的 Provider、数据出站、费用和真人评审授权后执行；模型输出、UI 点击或 Judge 结果都不能视为权限或任务正确性的证明。
+- 115B 缺少外部授权不阻塞 116A/116B 的 LOCAL-only 开发；它仍严格阻塞 production cloud activation 与 116C 的真实模型质量结论。

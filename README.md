@@ -4,9 +4,9 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 77～110 checkpoint 与阶段 111～114 均已通过；当前停在 `codex/stage-114` checkpoint。** 阶段 111 保留 15 条确定性 Route 的旧 digest/行为，并在无法路由时增加 LOCAL-only Turn Planner 与服务器预编译 Capability Offer；阶段 112 建立可重启的通用 TaskLoop；阶段 113 接入项目根限定的搜索/批读、Git 只读和六个固定 Python/Node Command Profile；阶段 114 又闭合三任务并行、exact Task/revision 控制、托盘、重启恢复与受监督冻结 sidecar。当前没有真实模型/Judge/真人 production admission，既有 Agent 仍保持 LOCAL-only。按用户指令，本次不执行阶段 115～117。详细进度见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint 已完成；当前在 `codex/stage-116-dev` 推进 116A/116B。** 阶段 115 已具备 Release、Calibration v3 和 Production Admission 代码底座，但真实 115B 仍缺 Candidate/Judge、代码出站、费用、真人评审和激活授权。依据 [ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)，这些外部事实继续阻塞 cloud 生产激活与 116C 真实模型质量结论，但不再阻塞 LOCAL-only 的受控编码工具面和持久多 Agent 长循环开发。所有 cloud-only 候选继续默认 disabled。详细进度见[项目进度](项目进度.md)。
 
-产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物。路线把真实 Cloud cohort、Production Admission 和 Codex 类真实仓库长循环纳入正式分母后，阶段 114 完成时内部扩展计划约完成 84%～88%；相对 Codex 类编码 Agent 的能力覆盖粗估约 66%～75%，相对 Marvis 类桌面 Agent 约 37%～46%。通用规划、持久执行/验证/修复循环、首版安全代码工具面和三任务桌面后台已经闭合；当前最大缺口是真实模型生产闭环、真实仓库长循环，以及后续登录态浏览器和 Computer/App Agent。后续路线仍为 **Codex 优先、Marvis 后置**，但本次不继续执行。
+产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物。通用规划、持久执行/验证/修复循环、首版安全代码工具面和三任务桌面后台已经闭合；当前最大缺口是真实仓库长循环和真实模型生产闭环。后续路线保持 **Codex 优先、Marvis 后置**：先完成 116A/116B 的用户可感知纵切，再补齐 115B/116C 的真实模型质量门，最后进入桌面 Operator。
 
 ## 一句话架构
 
@@ -263,13 +263,13 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-25 校准）
 
-阶段 77～114 已完成。阶段 115A 与 115B 授权准备已实现 Release Manifest/activation channel、cloud-only 三角色 cohort、Calibration v3 和 exact 三角色 Admission builder；没有用户明确给出的真实 Provider/Judge、数据出站、费用和真人评审授权时，候选仍默认 disabled，阶段 115 不能标记完成，也不进入阶段 116。完整边界见[项目进度](项目进度.md)、[阶段 115 实现文档](doc/115-真实Cloud-Agent与Calibration-v3.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+阶段 77～114 与 115A 已完成。阶段 115B 的真实 Provider/Judge、数据出站、费用、真人评审和激活授权仍缺失，候选继续默认 disabled，阶段 115 不能标记完成。当前优先实施 116A 受控编码工具面和 116B 持久多 Agent 编码循环；115B 完成后再执行 116C 真实模型黄金任务与生产质量验收。完整边界见[项目进度](项目进度.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)、[阶段 115 实现文档](doc/115-真实Cloud-Agent与Calibration-v3.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
 
 阶段 114 最终门禁：默认后端 775 项，`763 passed + 12 skipped`；Ruff、严格 mypy 283 个生产源码、Alembic/SQLite、Evaluation/Phase75 v16、17 份 immutable baseline 和 wheel Prompt 24/24 通过。前端 24 个文件 / 165 项、type-check/build、Rust `fmt/clippy/test`、冻结 sidecar 健康烟测、Tauri/NSIS 实构建、PostgreSQL 11/11 与 RabbitMQ 1/1 全部通过；环境已恢复且未改 baseline。
 
-阶段 115A 内部 checkpoint：默认后端 783 项，`771 passed + 12 skipped`；Ruff、严格 mypy 287 个生产源码、Release/Calibration v3/Admission 专项、前端 24 个文件 / 165 项、type-check/build、frozen lock、`pip check`、wheel Prompt 29/29 通过。Phase75 追加链式 v17 后仍为 11/11、false-success=0、unauthorized-effect=0；Windows Evaluation 追加 v2 延迟基线并保留旧 v1。该 checkpoint 没有真实 cloud capture、费用、生产 Admission 或 activation，阶段 115 尚未完成，阶段 116 仍未开始。
+阶段 115A 内部 checkpoint：默认后端 783 项，`771 passed + 12 skipped`；Ruff、严格 mypy 287 个生产源码、Release/Calibration v3/Admission 专项、前端 24 个文件 / 165 项、type-check/build、frozen lock、`pip check`、wheel Prompt 29/29 通过。Phase75 追加链式 v17 后仍为 11/11、false-success=0、unauthorized-effect=0；Windows Evaluation 追加 v2 延迟基线并保留旧 v1。该 checkpoint 没有真实 cloud capture、费用、生产 Admission 或 activation；116A/116B 只沿 LOCAL-only 开发门继续，不改变这一事实。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 

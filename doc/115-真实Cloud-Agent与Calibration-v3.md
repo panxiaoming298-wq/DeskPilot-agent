@@ -4,7 +4,7 @@
 
 阶段 115 已完成 115A 代码与 115B 的不可绕过授权/工件准备，但尚未完成真实 Provider capture、独立真人评审和生产激活，因此当前只能形成内部 checkpoint，不能标记为阶段完成，也不能宣称 cloud Agent 已达到生产质量。
 
-本 checkpoint 没有访问模型网络、没有消费费用、没有写入凭据，也没有用 Fake/recorded 证据生成生产 Admission。阶段 116 仍受阶段 115 的真实门禁阻塞。
+本 checkpoint 没有访问模型网络、没有消费费用、没有写入凭据，也没有用 Fake/recorded 证据生成生产 Admission。依据 [ADR-016](ADR-016-115B生产门与116开发纵切解耦.md)，115B 继续阻塞 production cloud activation 和 116C 的真实模型质量结论，但不再阻塞 116A/116B 的 LOCAL-only 运行时开发。
 
 ## 2. Release Manifest 与 activation channel
 
@@ -69,4 +69,4 @@ Calibration v3 使用 `deskpilot.phase115-calibration-run.v3`，并保持 v1/v2 
 4. 两名真人主审及必要仲裁人的安排；
 5. Admission/Release 有效期和生产 activation actor。
 
-在这些授权缺失时，正确状态是所有 cloud 候选 disabled、本地稳定版本 preferred，并停在 115A checkpoint。
+在这些授权缺失时，正确生产状态仍是所有 cloud 候选 disabled、本地稳定版本 preferred，并停在 115A checkpoint；开发状态则转入 `codex/stage-116-dev`，仅推进 116A/116B，不执行 live capture、Production Admission、cloud activation 或 116C 真实模型质量签发。
