@@ -728,7 +728,7 @@ class WorkspaceCodingCoordinatorEvidenceRead(BaseModel):
         )
         bounded_graph = (
             self.agent_id == "builtin.workspace_bounded_coordinator"
-            and self.agent_version == "1.0.0"
+            and self.agent_version in {"1.0.0", "1.1.0"}
             and self.output_node_key == "commit_git"
             and self.node_count in range(9, 20, 2)
         )

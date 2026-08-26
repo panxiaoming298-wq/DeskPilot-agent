@@ -325,6 +325,18 @@ def test_builtin_registry_is_frozen_redacted_and_supervisor_is_not_an_agent() ->
     assert patch_planner.contract.provides == ("workspace.patch.propose.v1",)
     assert patch_planner.contract.tool_policy.grants == ()
     assert patch_planner.contract.model_policy.allowed_locations == (ModelLocation.LOCAL,)
+    legacy_bounded_coordinator = registry.resolve_exact(
+        "builtin.workspace_bounded_coordinator",
+        "1.0.0",
+    )
+    bounded_coordinator = registry.resolve_preferred(
+        "builtin.workspace_bounded_coordinator"
+    )
+    assert (
+        legacy_bounded_coordinator.contract.budget_policy.max_output_tokens == 2_000
+    )
+    assert bounded_coordinator.contract.version == "1.1.0"
+    assert bounded_coordinator.contract.budget_policy.max_output_tokens == 3_000
     with pytest.raises(AgentRegistryFrozenError):
         computer = registry.resolve_exact("builtin.computer_observer", "1.0.0")
         registry.register(_registration(computer.prompt_package))

@@ -430,6 +430,66 @@ async def test_workspace_agent_bridge_is_source_bound_verified_and_restart_safe(
 
 
 @pytest.mark.asyncio
+async def test_model_route_rejection_settles_task_loop_claim(
+    tmp_path: Path,
+) -> None:
+    database = Database(
+        f"sqlite+aiosqlite:///{(tmp_path / 'route-rejected-agent.db').as_posix()}"
+    )
+    await database.migrate()
+    provider = ScriptedTurnPlannerProvider([_select_workspace_then_knowledge])
+    try:
+        active, execution, _revalidated, _fallback = await _activate(
+            database,
+            provider,
+            suffix="d",
+            variants=frozenset({"workspace_file_read", "knowledge_lookup"}),
+            message="cats.md stats",
+        )
+        runtime = TaskLoopAgentRuntime(
+            database,
+            execution,
+            create_task_loop_agent_adapter_registry(
+                research_available=True,
+                workspace_file_available=True,
+            ),
+            workspace=WorkspaceFileRuntime(str(tmp_path)),
+        )
+        claimed = await runtime.claim_next(active.execution_id, "route-worker")
+        assert claimed is not None
+        await runtime._mark_attempt_running(claimed)  # noqa: SLF001
+        await execution.start_invocation(
+            claimed.claimed.invocation.invocation_id,
+            claimed.claimed.claim_owner_id,
+            claimed.claimed.claim_fencing_token,
+        )
+
+        await runtime.settle_model_route_rejected(claimed)
+
+        async with database.session() as session:
+            attempt = await session.get(
+                TaskLoopNodeAttemptRecord,
+                claimed.attempt.attempt_id,
+            )
+            invocation = await session.get(
+                AgentInvocationRecord,
+                claimed.claimed.invocation.invocation_id,
+            )
+            node = await session.get(
+                TaskExecutionNodeRecord,
+                claimed.binding.composite_node_id,
+            )
+        assert attempt is not None and attempt.status == "failed"
+        assert attempt.error_code == "AGENT_MODEL_ROUTE_REJECTED"
+        assert invocation is not None
+        assert invocation.execution_status == "failed_terminal"
+        assert invocation.verification_status == "not_requested"
+        assert node is not None and node.status == "failed"
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_research_claim_uses_namespaced_source_goal_and_rejects_binding_drift(
     tmp_path: Path,
 ) -> None:

@@ -9,6 +9,8 @@ from deskpilot.application.tool_registry import ToolRegistry
 from deskpilot.application.workspace_coding_graph import (
     WORKSPACE_CODING_MAX_FILES,
     WORKSPACE_CODING_MIN_FILES,
+    workspace_coding_coordinator_output_tokens,
+    workspace_coding_max_output_tokens,
     workspace_coding_path_parameter,
     workspace_coding_planner_key,
     workspace_coding_planner_keys,
@@ -1566,9 +1568,7 @@ def workspace_coding_loop_contract(
             max_input_tokens=(
                 56_000 if file_count == 2 else 12_000 + (12_001 * file_count)
             ),
-            max_output_tokens=(
-                6_000 if file_count == 2 else 2_000 + (1_501 * file_count)
-            ),
+            max_output_tokens=workspace_coding_max_output_tokens(file_count),
             max_wall_seconds=(780 if file_count == 2 else 510 + (120 * file_count)),
             max_retries=1,
             max_cost_micros=(
@@ -1596,7 +1596,7 @@ def workspace_coding_loop_draft(
         model_calls=1,
         tool_calls=0,
         input_tokens=12_000,
-        output_tokens=2_000,
+        output_tokens=workspace_coding_coordinator_output_tokens(file_count),
         wall_seconds=60,
         retries=0,
         cost_micros=100_000,

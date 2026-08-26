@@ -121,7 +121,7 @@ class TaskLoopAgentAdapterRegistry:
                 route_id="workspace_coding_loop",
                 source_local_key=source_local_key,
                 agent_id="builtin.workspace_bounded_coordinator",
-                agent_versions=("1.0.0",),
+                agent_versions=("1.0.0", "1.1.0"),
                 capability_id="workspace.dynamic.coordinate.v1",
                 parameter_name="project_path",
             )

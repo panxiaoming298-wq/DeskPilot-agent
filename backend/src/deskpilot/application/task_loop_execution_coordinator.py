@@ -18,6 +18,10 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deskpilot.application.agent_model_loop import (
+    AgentModelLoopOutcomeUnknownError,
+    AgentModelLoopRouteRejectedError,
+)
 from deskpilot.application.artifact_delivery_runtime import (
     ArtifactDeliveryError,
     ArtifactDeliveryRuntime,
@@ -295,7 +299,11 @@ class TaskLoopExecutionCoordinator:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Agent runtime did not claim the reducer-selected node"
             )
-        await self._run_agent_candidate(source)
+        try:
+            await self._run_agent_candidate(source)
+        except (AgentModelLoopOutcomeUnknownError, AgentModelLoopRouteRejectedError) as error:
+            await self._settle_agent_error(source, error)
+            raise
 
     async def _execute_agent_batch(
         self,
@@ -330,9 +338,19 @@ class TaskLoopExecutionCoordinator:
             owner_id,
             command.node_ids,
         )
-        await asyncio.gather(
-            *(self._run_agent_candidate(source) for source in claims)
+        outcomes = await asyncio.gather(
+            *(self._run_agent_candidate(source) for source in claims),
+            return_exceptions=True,
         )
+        for source, outcome in zip(claims, outcomes, strict=True):
+            if isinstance(
+                outcome,
+                (AgentModelLoopOutcomeUnknownError, AgentModelLoopRouteRejectedError),
+            ):
+                await self._settle_agent_error(source, outcome)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
 
     async def _run_agent_candidate(self, source: SourceBoundAgentClaim) -> None:
         if self._agents is None:
@@ -365,6 +383,20 @@ class TaskLoopExecutionCoordinator:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Agent adapter returned an unsupported source Route"
             )
+
+    async def _settle_agent_error(
+        self,
+        source: SourceBoundAgentClaim,
+        error: AgentModelLoopOutcomeUnknownError | AgentModelLoopRouteRejectedError,
+    ) -> None:
+        if self._agents is None:  # pragma: no cover - checked before every claim.
+            raise TaskLoopExecutionCoordinatorUnavailableError(
+                "Agent Task Loop runtime is unavailable"
+            )
+        if isinstance(error, AgentModelLoopOutcomeUnknownError):
+            await self._agents.settle_model_outcome_unknown(source)
+        else:
+            await self._agents.settle_model_route_rejected(source)
 
     async def _verify_candidate(
         self,
@@ -849,6 +881,11 @@ class TaskLoopExecutionCoordinator:
             ),
             None,
         )
+        expected_coordinator_agent = (
+            coordinator_binding.effective_authority_manifest.get("bound_agent")
+            if coordinator_binding is not None
+            else None
+        )
         reader_bindings = tuple(
             item
             for item in coding_bindings
@@ -888,18 +925,8 @@ class TaskLoopExecutionCoordinator:
             )
             or coordination_verification.get("graph_digest") != graph_digest
             or not isinstance(coordination_verification.get("decision_digest"), str)
-            or coordinator_agent.get("agent_id")
-            != (
-                "builtin.workspace_coordinator"
-                if file_count == WORKSPACE_CODING_MIN_FILES
-                else "builtin.workspace_bounded_coordinator"
-            )
-            or coordinator_agent.get("version")
-            != (
-                "1.1.0"
-                if file_count == WORKSPACE_CODING_MIN_FILES
-                else "1.0.0"
-            )
+            or not isinstance(expected_coordinator_agent, dict)
+            or coordinator_agent != expected_coordinator_agent
         ):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding Coordinator graph proof changed"

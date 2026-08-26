@@ -1803,6 +1803,7 @@ class TaskLoopAgentRuntime:
         source: SourceBoundAgentClaim,
         *,
         error_code: str,
+        verification_status: Literal["not_requested", "rejected"] = "rejected",
     ) -> None:
         """Fail one bounded model node after a usable but unauthorized decision."""
 
@@ -1875,7 +1876,108 @@ class TaskLoopAgentRuntime:
             )
             self._apply_attempt_record(record, self._build_attempt(material))
             invocation.execution_status = "failed_terminal"
-            invocation.verification_status = "rejected"
+            invocation.verification_status = verification_status
+            invocation.finished_at = now
+            invocation.revision += 1
+            node.status = "failed"
+            node.revision += 1
+            node.claim_owner_id = None
+            node.claim_acquired_at = None
+            node.claim_heartbeat_at = None
+            node.claim_expires_at = None
+            node.updated_at = now
+            run.status = "failed"
+            run.revision += 1
+            run.updated_at = now
+
+    async def settle_model_route_rejected(
+        self,
+        source: SourceBoundAgentClaim,
+    ) -> None:
+        """Fail one bounded node when no authorized model route can dispatch."""
+
+        await self._settle_model_rejected(
+            source,
+            error_code="AGENT_MODEL_ROUTE_REJECTED",
+            verification_status="not_requested",
+        )
+
+    async def settle_model_outcome_unknown(
+        self,
+        source: SourceBoundAgentClaim,
+    ) -> None:
+        """Seal one dispatched model attempt whose usable outcome is unknowable."""
+
+        error_code = "AGENT_MODEL_OUTCOME_UNKNOWN"
+        async with self._database.session() as session, session.begin():
+            record = await session.scalar(
+                select(TaskLoopNodeAttemptRecord)
+                .where(
+                    TaskLoopNodeAttemptRecord.attempt_id
+                    == source.attempt.attempt_id
+                )
+                .with_for_update()
+            )
+            node = await session.scalar(
+                select(TaskExecutionNodeRecord)
+                .where(
+                    TaskExecutionNodeRecord.node_id
+                    == source.binding.composite_node_id
+                )
+                .with_for_update()
+            )
+            run = await session.scalar(
+                select(TaskExecutionRunRecord)
+                .where(TaskExecutionRunRecord.run_id == source.attempt.run_id)
+                .with_for_update()
+            )
+            invocation = await session.scalar(
+                select(AgentInvocationRecord)
+                .where(
+                    AgentInvocationRecord.invocation_id
+                    == source.claimed.invocation.invocation_id
+                )
+                .with_for_update()
+            )
+            if record is None or node is None or run is None or invocation is None:
+                raise TaskLoopAgentNotFoundError(
+                    "Unknown model attempt, Invocation, node, or Run disappeared"
+                )
+            previous = self._attempt_from_record(record)
+            if (
+                previous.execution_id != source.execution_id
+                or previous.node_binding_id != source.binding.node_binding_id
+                or previous.status != "running"
+                or node.status != "running"
+                or invocation.execution_status != "running"
+                or invocation.verification_status != "not_requested"
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Unknown model outcome crossed its running attempt"
+                )
+            now = utc_now()
+            error_digest = sha256_digest(
+                {
+                    "attempt_id": previous.attempt_id,
+                    "invocation_id": invocation.invocation_id,
+                    "error_code": error_code,
+                }
+            )
+            material = previous.model_dump(mode="python", exclude={"attempt_digest"})
+            material.update(
+                {
+                    "status": "outcome_unknown",
+                    "revision": previous.revision + 1,
+                    "claim_owner_id": None,
+                    "claim_acquired_at": None,
+                    "claim_expires_at": None,
+                    "error_code": error_code,
+                    "error_digest": error_digest,
+                    "updated_at": now,
+                }
+            )
+            self._apply_attempt_record(record, self._build_attempt(material))
+            invocation.execution_status = "failed_terminal"
             invocation.finished_at = now
             invocation.revision += 1
             node.status = "failed"

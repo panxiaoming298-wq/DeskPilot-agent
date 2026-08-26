@@ -886,9 +886,11 @@ def test_coding_loop_recipe_seals_the_eight_file_upper_bound() -> None:
     assert len(draft.nodes) == 22
     assert contract.budget.max_plan_nodes == 22
     assert contract.budget.max_model_calls == 17
+    assert contract.budget.max_output_tokens == 15_008
     assert by_key["coordinate_bounded_coding"].agent_selector == (
         "builtin.workspace_bounded_coordinator"
     )
+    assert by_key["coordinate_bounded_coding"].budget.output_tokens == 3_000
     assert len(planner_keys) == 8
     assert set(by_key["apply_patch"].depends_on) == set(planner_keys)
     assert by_key["inspect_file_08"].depends_on == (

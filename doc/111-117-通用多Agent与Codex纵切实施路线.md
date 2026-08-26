@@ -189,6 +189,8 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 > 第五检查点（2026-08-26）：原双文件图已推广为 Python/Node 各 2～8 文件的服务器预编译变体。N>2 使用独立 bounded Coordinator v2，Reader/Planner 分批并行上限仍为 2，exact path/节点/提案/Git 摘要形成同一证明链；Delivery v3 与 `0060_workspace_coding_bounded_files` 保存 3～8 文件语义，原双文件合同/摘要/Delivery v2 保持不变。当前仍缺 Node/八文件端到端对称证明和受控探索到新文件集计划代的收窄边界，因此 116B 继续标记为进行中。详见[第五检查点文档](116B-持久并行编码循环第五检查点.md)。
 
+> 第六检查点（2026-08-26）：Node 八文件已走通完整 Coordinator→分批 Reader/Planner→Patch/Test→Git→Delivery 链，并在每个并行波次后从持久状态重建 Coordinator；pending binding 篡改在 Attempt 前拒绝，后期 Planner 波次的失败与 outcome unknown 全部持久终结且不启动 Patch。bounded Coordinator 1.1 补足上限输出预算，历史 1.0 按 exact binding 保持可读。当前下一缺口是“受控探索→候选文件集→用户确认→新不可变计划代”，因此 116B 仍为进行中。详见[第六检查点文档](116B-持久并行编码循环第六检查点.md)。
+
 - Turn Planner、Dynamic Coordinator、Explorer/Reader、Patch Planner、Test Runner 与独立 Verifier 通过版本化 Contract/Handoff 协作；至少证明两个独立 Child 并行调查和一个依赖 verified ResultRef 的 join。
 - 同一会话的新用户消息可以补充约束、纠正方向或要求停止；服务器封存旧 generation/lease，生成新的不可变计划代，不把迟到结果绑定到新计划。
 - 执行循环覆盖 `Inspect → Plan → Delegate → Patch → Test → Repair → Verify → Deliver`，测试失败只能在总预算、最大计划代和 no-progress 约束内继续。

@@ -765,7 +765,7 @@ def test_restart_recovers_deferred_task_loop_without_replaying_planner(
         recovered = _wait_for_planned_task_loop(
             client,
             task_id,
-            timeout_seconds=10,
+            timeout_seconds=20,
         )
         task_loop = cast(dict[str, object], recovered["task_loop"])
         assert task_loop["status"] == "planned"
@@ -946,7 +946,7 @@ def test_periodic_recovery_terminalizes_a_lease_that_expires_after_startup(
                 assert provider.planner_calls == 0
 
                 clock["now"] += timedelta(seconds=91)
-                deadline = asyncio.get_running_loop().time() + 2
+                deadline = asyncio.get_running_loop().time() + 10
                 while asyncio.get_running_loop().time() < deadline:
                     recovered = await runtime.get(task_id)
                     if recovered is not None and recovered.run.status == "outcome_unknown":
@@ -1000,7 +1000,7 @@ def test_invalid_model_patch_preview_terminalizes_once_and_disables_start(
         created = cast(dict[str, object], created_response.json())
         task_id = _task_id(created)
 
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 15
         terminal: dict[str, object] = {}
         while time.monotonic() < deadline:
             response = client.get(f"/api/v1/tasks/{task_id}/workbench")

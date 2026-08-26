@@ -8,6 +8,26 @@ WORKSPACE_CODING_MIN_FILES = 2
 WORKSPACE_CODING_MAX_FILES = 8
 
 
+def workspace_coding_coordinator_output_tokens(file_count: int) -> int:
+    """Return enough sealed output budget for the exact Coordinator graph."""
+
+    _validate_file_count(file_count)
+    if file_count == WORKSPACE_CODING_MIN_FILES:
+        return 2_000
+    return 2_200 + (100 * file_count)
+
+
+def workspace_coding_max_output_tokens(file_count: int) -> int:
+    """Return the Contract output ceiling for Coordinator and Patch Planners."""
+
+    _validate_file_count(file_count)
+    if file_count == WORKSPACE_CODING_MIN_FILES:
+        return 6_000
+    return workspace_coding_coordinator_output_tokens(file_count) + (
+        1_501 * file_count
+    )
+
+
 def workspace_coding_file_count(parameters: Mapping[str, object]) -> int:
     """Recover the server-fixed file count while preserving legacy two-file Offers."""
 
@@ -124,6 +144,8 @@ __all__ = [
     "workspace_coding_file_count",
     "workspace_coding_fixed_parameters",
     "workspace_coding_graph_keys",
+    "workspace_coding_coordinator_output_tokens",
+    "workspace_coding_max_output_tokens",
     "workspace_coding_parameter_for_key",
     "workspace_coding_path_parameter",
     "workspace_coding_planner_key",

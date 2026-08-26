@@ -337,7 +337,7 @@ GET /api/v1/agents/{agent_id}/versions/{version}
 
 阶段 112 最终验证：后端 745 项，`733 passed + 12 skipped`；Ruff 全仓、严格 mypy 275 个生产源码、frozen `uv` 与 `pip check` 通过。Phase75 v16 仍为 11/11、false-success=0、unauthorized-effect=0，17 份 baseline SHA-256 前后不变；wheel Prompt 24/24。前端 22 文件 / 157 项、type-check/build 通过；Alembic 唯一 head `0054_task_loop_cycle_events`，SQLite current/upgrade/check、integrity/foreign-key 通过。专用测试库 PostgreSQL 11/11（含容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复。
 
-当前实现方向为阶段 116B Codex 类持久多 Agent 编码纵切。116A 已闭合服务器固定 `WorkspaceCommandPlan`。116B 第五检查点已把原双文件链推广为 Python/Node 各 2～8 文件的服务器预编译图，N>2 由独立 bounded Coordinator v2 确认，Reader/Planner 按最多两个分批并行，并沿用 Patch/Test/Repair、两次 exact approval、hook/signing/push-disabled commit、receipt 对账与 Delivery v3。下一步先补齐 Node 多文件和八文件上限恢复/篡改对称证明，再实现受控探索到新文件集计划代的收窄边界；自由 Shell、依赖安装和自动 push 继续禁止，真实 cloud 115B/116C 仍受外部授权阻塞。详见根目录 [`项目进度.md`](../项目进度.md)、[`doc/116B-持久并行编码循环第五检查点.md`](../doc/116B-持久并行编码循环第五检查点.md)与 [`doc/111-117-通用多Agent与Codex纵切实施路线.md`](../doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+当前实现方向为阶段 116B Codex 类持久多 Agent 编码纵切。116A 已闭合服务器固定 `WorkspaceCommandPlan`。116B 第六检查点已在 Python/Node 各 2～8 文件预编译图上完成 Node 八文件完整执行、逐 Reader/Planner batch 重启恢复、pending binding 篡改拒绝，以及失败、模型路由拒绝和 outcome unknown 的持久终态收敛；bounded Coordinator 1.1 补足上限图输出预算，历史 1.0 仍按 exact binding 可读。下一步实现受控探索到新文件集计划代的收窄边界；自由 Shell、依赖安装和自动 push 继续禁止，真实 cloud 115B/116C 仍受外部授权阻塞。详见根目录 [`项目进度.md`](../项目进度.md)、[`doc/116B-持久并行编码循环第六检查点.md`](../doc/116B-持久并行编码循环第六检查点.md)与 [`doc/111-117-通用多Agent与Codex纵切实施路线.md`](../doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 ## 测试
 

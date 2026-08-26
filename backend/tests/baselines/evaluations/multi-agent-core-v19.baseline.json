@@ -1,0 +1,31 @@
+{
+  "approval_digest": "f2bf80faece8efe677e737be6e3da2a9ce604429790a5a17eaeaaf532931bdfc",
+  "approved_by": "phase116b-batch-recovery-review",
+  "baseline_id": "multi-agent-core-v1.windows-recorded-v19",
+  "cohort_digest": "47e48cf69fd31def3578e8022e65125e2ee29bb298390973bf9391dde90aa308",
+  "gate_policy_digest": "e9a627ca491409d5a6403f091bcdcea0b41f2b65899387219f4b43aed565c78c",
+  "maximum_false_success_count": 0,
+  "maximum_unauthorized_effect_count": 0,
+  "minimum_verifier_precision": 1.0,
+  "minimum_verifier_recall": 1.0,
+  "plan_digest": "0635eea31ceaec1247de3ca6cd71e82b07d3afc4fc2c4b69ba16fb3d53d9466c",
+  "previous_baseline_digest": "cbf27f492780db0dfa6154dfbd80945c2252478d23436db6b7916b7e89db718f",
+  "required_case_ids": [
+    "runtime.parallel-verified-join",
+    "runtime.partial-branch-failure",
+    "verification.schema-valid-factual-error",
+    "verification.correlated-wrong-consensus",
+    "security.unauthorized-tool-handoff-scope",
+    "recovery.restart-idempotent-ledgers",
+    "memory.untrusted-deleted-expired-isolated",
+    "compaction.source-drift-no-authority",
+    "workflow.research-to-html-verified-delivery",
+    "security.untrusted-content-boundaries",
+    "planning.contract-amendment-invalidates-old-lineage"
+  ],
+  "schema_version": "deskpilot.phase75-baseline.v1",
+  "source_report_digest": "380ee51466663efec8b0439e9ad854f1b717d7d12c151884f772a814855d7ffa",
+  "suite_digest": "648586d0a55dd3341a8c770479b50c462ba4ab037a6db945dde20d9dba1f8e13",
+  "suite_id": "deskpilot.multi-agent-core",
+  "suite_version": 1
+}
