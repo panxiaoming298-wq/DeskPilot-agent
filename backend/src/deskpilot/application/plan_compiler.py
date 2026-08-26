@@ -1824,6 +1824,163 @@ def workspace_coding_loop_draft(
     )
 
 
+def workspace_coding_file_set_contract(
+    task_id: str,
+    capabilities: CapabilityCatalog,
+    *,
+    file_count: int,
+) -> TaskContract:
+    """Read-only successor Contract for one user-confirmed candidate file set."""
+
+    if not WORKSPACE_CODING_MIN_FILES <= file_count <= WORKSPACE_CODING_MAX_FILES:
+        raise ValueError("Confirmed workspace file count is outside 2..8")
+    suffix = task_id.removeprefix("tsk_")
+    pack = capabilities.resolve_preferred("workspace.file.read.v1")
+    return TaskContract(
+        contract_id=f"tc_{suffix}",
+        task_id=task_id,
+        version=1,
+        goal_ref=f"artifact://task-input/{task_id}",
+        normalized_objective=(
+            f"并行调查用户确认的 {file_count} 个精确项目文件，生成可恢复的只读证据；"
+            "本计划不授予 Patch、测试、Git 或 Shell 权限。"
+        ),
+        acceptance_criteria=(
+            AcceptanceCriterion(
+                criterion_id="ac_workspace_confirmed_file_set",
+                kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+                description=(
+                    f"恰好 {file_count} 个服务器绑定 Reader 都必须返回确定性版本证明。"
+                ),
+                verification_requirement=VerificationRequirement.DETERMINISTIC,
+                origin="trusted_template",
+            ),
+        ),
+        constraints=(
+            "workspace_exploration_confirmation_v1",
+            "server_bound_exact_file_set_v1",
+            "two_to_eight_parallel_read_only_children_v1",
+            "no_patch_authority",
+            "no_test_authority",
+            "no_git_authority",
+            "no_shell",
+            "no_dynamic_code",
+            "no_dependency_install",
+            "no_automatic_push",
+        ),
+        privacy_policy=PrivacyPolicy(
+            classification="internal",
+            allowed_provider_locations=(ModelLocation.LOCAL,),
+            allowed_privacy_modes=("local_only", "local_preferred", "balanced"),
+            external_egress_allowed=False,
+        ),
+        max_risk_level=ToolRiskLevel.R0,
+        budget=TaskBudget(
+            max_model_calls=file_count,
+            max_tool_calls=file_count,
+            max_input_tokens=file_count,
+            max_output_tokens=file_count,
+            max_wall_seconds=60 * file_count + 30,
+            max_retries=0,
+            max_cost_micros=0,
+            max_handoffs=0,
+            max_plan_nodes=file_count + 2,
+        ),
+        output_contract=OutputContract(
+            media_type="application/json",
+            language="zh-CN",
+        ),
+        capabilities=(
+            CapabilityRef(
+                capability_id=pack.capability_id,
+                version=pack.version,
+                digest=pack.digest,
+            ),
+        ),
+        created_by="trusted_template",
+    )
+
+
+def workspace_coding_file_set_draft(
+    task_id: str,
+    *,
+    file_count: int,
+    contract_version: int = 1,
+) -> DraftPlan:
+    """Compile N independent exact Reader slots after explicit file-set confirmation."""
+
+    if not WORKSPACE_CODING_MIN_FILES <= file_count <= WORKSPACE_CODING_MAX_FILES:
+        raise ValueError("Confirmed workspace file count is outside 2..8")
+    reader_budget = PlanNodeBudget(
+        model_calls=1,
+        tool_calls=1,
+        input_tokens=1,
+        output_tokens=1,
+        wall_seconds=60,
+        retries=0,
+        cost_micros=0,
+        handoffs=0,
+    )
+    zero = PlanNodeBudget(
+        model_calls=0,
+        tool_calls=0,
+        input_tokens=0,
+        output_tokens=0,
+        wall_seconds=15,
+        retries=0,
+        cost_micros=0,
+        handoffs=0,
+    )
+    reader_keys = tuple(
+        f"inspect_candidate_{index:02d}" for index in range(1, file_count + 1)
+    )
+    return DraftPlan(
+        task_id=task_id,
+        contract_version=contract_version,
+        producer=PlanProducer(
+            kind="trusted_template",
+            producer_ref="workspace_coding_confirmed_file_set.v1",
+        ),
+        nodes=(
+            *(
+                DraftPlanNode(
+                    local_key=key,
+                    kind=DraftNodeKind.AGENT,
+                    objective=(
+                        f"读取用户确认文件集中的第 {index} 个服务器绑定路径；只返回"
+                        "内容和版本证明，不得选择其他路径或请求写权限。"
+                    ),
+                    agent_selector="builtin.workspace_reader",
+                    capability_requirements=("workspace.file.read.v1",),
+                    acceptance_refs=("ac_workspace_confirmed_file_set",),
+                    verification_profile=VerificationProfile.DETERMINISTIC,
+                    budget=reader_budget,
+                )
+                for index, key in enumerate(reader_keys, start=1)
+            ),
+            DraftPlanNode(
+                local_key="final_acceptance",
+                kind=DraftNodeKind.FINAL_ACCEPTANCE,
+                objective=(
+                    f"确定性复核 {file_count} 个 exact Reader 证明；任何缺失、路径或"
+                    "版本漂移均失败。"
+                ),
+                depends_on=reader_keys,
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+            DraftPlanNode(
+                local_key="delivery",
+                kind=DraftNodeKind.DELIVERY,
+                objective="只交付已验证的候选文件调查证据，不生成或应用 Patch。",
+                depends_on=("final_acceptance",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+        ),
+    )
+
+
 def _direct_capability_contract(
     task_id: str,
     capabilities: CapabilityCatalog,

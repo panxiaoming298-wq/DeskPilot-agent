@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0060_workspace_coding_bounded_files"
+CURRENT_REVISION = "0061_workspace_coding_explorations"
 
 
 def _sync_url(path: Path) -> str:
@@ -162,6 +162,9 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
                 "workspace_command_plan_bindings",
                 "workspace_coding_deliveries",
                 "workspace_coding_amendment_bindings",
+                "workspace_coding_exploration_snapshots",
+                "workspace_coding_exploration_proposals",
+                "workspace_coding_file_set_plan_bindings",
         }.issubset(inspector.get_table_names())
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
@@ -1049,10 +1052,12 @@ def test_stage_116b_bounded_coding_delivery_migration_is_guarded(
     engine.dispose()
     assert "BETWEEN 2 AND 8" in constraints["ck_workspace_coding_delivery_counts"]
 
+    command.downgrade(config, "0060_workspace_coding_bounded_files")
+
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0060_workspace_coding_bounded_files",
         target_revision="0059_workspace_coding_amendments",
         insert_statement="""
             INSERT INTO workspace_coding_deliveries (
@@ -1100,6 +1105,104 @@ def test_stage_116b_bounded_coding_delivery_migration_is_guarded(
     assert "changed_file_count = 2" in constraints[
         "ck_workspace_coding_delivery_counts"
     ]
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_116b_workspace_coding_exploration_migration_is_guarded(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-116b-workspace-coding-exploration.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        assert {
+            "workspace_coding_exploration_snapshots",
+            "workspace_coding_exploration_proposals",
+            "workspace_coding_file_set_plan_bindings",
+        }.issubset(inspector.get_table_names())
+        snapshot_columns = {
+            item["name"]
+            for item in inspector.get_columns(
+                "workspace_coding_exploration_snapshots"
+            )
+        }
+        binding_constraints = {
+            item["name"]
+            for item in inspector.get_check_constraints(
+                "workspace_coding_file_set_plan_bindings"
+            )
+        }
+    engine.dispose()
+    assert {
+        "snapshot_id",
+        "source_task_id",
+        "source_user_message_id",
+        "source_user_message_digest",
+        "project_path",
+        "ecosystem",
+        "test_path",
+        "file_count",
+        "catalog_digest",
+        "scanned_file_count",
+        "scanned_byte_count",
+        "truncated",
+        "manifest",
+        "snapshot_digest",
+        "created_at",
+    } == snapshot_columns
+    assert binding_constraints == {"ck_workspace_coding_file_set_plan_scope"}
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0060_workspace_coding_bounded_files",
+        insert_statement="""
+            INSERT INTO workspace_coding_exploration_snapshots (
+                snapshot_id, source_task_id, source_user_message_id,
+                source_user_message_digest, project_path, ecosystem,
+                test_path, file_count, catalog_digest, scanned_file_count,
+                scanned_byte_count, truncated, manifest, snapshot_digest,
+                created_at
+            ) VALUES (
+                :snapshot_id, :task_id, :message_id, :message_digest,
+                '.', 'python', 'tests/test_app.py', 2, :catalog_digest,
+                2, 10, 0, :empty_object, :snapshot_digest, :created_at
+            )
+        """,
+        parameters={
+            "snapshot_id": "wxs_" + "1" * 64,
+            "task_id": "tsk_" + "2" * 32,
+            "message_id": "msg_" + "3" * 32,
+            "message_digest": "4" * 64,
+            "catalog_digest": "5" * 64,
+            "snapshot_digest": "6" * 64,
+            "empty_object": "{}",
+            "created_at": "2026-08-26 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT snapshot_id, snapshot_digest
+            FROM workspace_coding_exploration_snapshots
+            WHERE snapshot_id = :snapshot_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM workspace_coding_exploration_snapshots "
+            "WHERE snapshot_id = :snapshot_id"
+        ),
+    )
+
+    command.downgrade(config, "0060_workspace_coding_bounded_files")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        assert "workspace_coding_exploration_snapshots" not in inspect(
+            connection
+        ).get_table_names()
+    engine.dispose()
     command.upgrade(config, "head")
     command.check(config)
 

@@ -1549,6 +1549,158 @@ class WorkspaceCodingAmendmentBindingRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class WorkspaceCodingExplorationSnapshotRecord(Base):
+    """Immutable server-owned catalog prepared before an Explorer model call."""
+
+    __tablename__ = "workspace_coding_exploration_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "ecosystem IN ('python', 'node') AND file_count BETWEEN 2 AND 256 "
+            "AND scanned_file_count BETWEEN 2 AND 2000 AND scanned_byte_count >= 0",
+            name="ck_workspace_coding_exploration_snapshot_scope",
+        ),
+        UniqueConstraint(
+            "source_task_id",
+            name="uq_workspace_coding_exploration_snapshot_task",
+        ),
+        UniqueConstraint(
+            "snapshot_digest",
+            name="uq_workspace_coding_exploration_snapshot_digest",
+        ),
+        Index(
+            "ix_workspace_coding_exploration_snapshots_project",
+            "project_path",
+            "created_at",
+        ),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    source_task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.task_id", ondelete="RESTRICT")
+    )
+    source_user_message_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="RESTRICT")
+    )
+    source_user_message_digest: Mapped[str] = mapped_column(String(64))
+    project_path: Mapped[str] = mapped_column(Text)
+    ecosystem: Mapped[str] = mapped_column(String(16))
+    test_path: Mapped[str] = mapped_column(Text)
+    file_count: Mapped[int] = mapped_column(Integer)
+    catalog_digest: Mapped[str] = mapped_column(String(64))
+    scanned_file_count: Mapped[int] = mapped_column(Integer)
+    scanned_byte_count: Mapped[int] = mapped_column(Integer)
+    truncated: Mapped[bool] = mapped_column(Boolean)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    snapshot_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WorkspaceCodingExplorationProposalRecord(Base):
+    """One verified but unprivileged Explorer file-set proposal."""
+
+    __tablename__ = "workspace_coding_exploration_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "candidate_count BETWEEN 2 AND 8",
+            name="ck_workspace_coding_exploration_proposal_count",
+        ),
+        UniqueConstraint(
+            "snapshot_id",
+            name="uq_workspace_coding_exploration_proposal_snapshot",
+        ),
+        UniqueConstraint(
+            "proposal_digest",
+            name="uq_workspace_coding_exploration_proposal_digest",
+        ),
+    )
+
+    proposal_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "workspace_coding_exploration_snapshots.snapshot_id",
+            ondelete="RESTRICT",
+        )
+    )
+    snapshot_digest: Mapped[str] = mapped_column(String(64))
+    explorer_agent_id: Mapped[str] = mapped_column(String(128))
+    explorer_agent_version: Mapped[str] = mapped_column(String(32))
+    explorer_agent_contract_digest: Mapped[str] = mapped_column(String(64))
+    explorer_prompt_package_digest: Mapped[str] = mapped_column(String(64))
+    candidate_count: Mapped[int] = mapped_column(Integer)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    proposal_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WorkspaceCodingFileSetPlanBindingRecord(Base):
+    """Atomic explicit confirmation to successor Contract/Plan generation lineage."""
+
+    __tablename__ = "workspace_coding_file_set_plan_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "contract_version = 1 AND plan_generation = 1 "
+            "AND file_count BETWEEN 2 AND 8",
+            name="ck_workspace_coding_file_set_plan_scope",
+        ),
+        UniqueConstraint(
+            "proposal_id",
+            name="uq_workspace_coding_file_set_plan_proposal",
+        ),
+        UniqueConstraint(
+            "successor_task_id",
+            name="uq_workspace_coding_file_set_plan_task",
+        ),
+        UniqueConstraint(
+            "confirmation_message_id",
+            name="uq_workspace_coding_file_set_plan_message",
+        ),
+        UniqueConstraint(
+            "binding_digest",
+            name="uq_workspace_coding_file_set_plan_digest",
+        ),
+        ForeignKeyConstraint(
+            ["successor_task_id", "contract_version"],
+            ["task_contract_versions.task_id", "task_contract_versions.version"],
+            name="fk_workspace_coding_file_set_contract",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["successor_task_id", "plan_generation"],
+            ["task_plan_generations.task_id", "task_plan_generations.generation"],
+            name="fk_workspace_coding_file_set_plan",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_workspace_coding_file_set_plan_created",
+            "created_at",
+        ),
+    )
+
+    binding_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "workspace_coding_exploration_proposals.proposal_id",
+            ondelete="RESTRICT",
+        )
+    )
+    proposal_digest: Mapped[str] = mapped_column(String(64))
+    successor_task_id: Mapped[str] = mapped_column(String(40))
+    confirmation_message_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="RESTRICT")
+    )
+    confirmation_message_digest: Mapped[str] = mapped_column(String(64))
+    contract_version: Mapped[int] = mapped_column(Integer)
+    contract_digest: Mapped[str] = mapped_column(String(64))
+    plan_generation: Mapped[int] = mapped_column(Integer)
+    plan_id: Mapped[str] = mapped_column(String(68))
+    plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    file_count: Mapped[int] = mapped_column(Integer)
+    mappings_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    binding_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class TaskLoopCapabilityApprovalRecord(Base):
     """Exact Task/revision-bound authority for one capability side effect."""
 

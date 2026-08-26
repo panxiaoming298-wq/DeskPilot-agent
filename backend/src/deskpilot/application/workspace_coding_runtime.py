@@ -34,6 +34,10 @@ from deskpilot.domain.command_profiles import (
     WorkspaceCommandFile,
     WorkspaceCommandSnapshot,
 )
+from deskpilot.domain.workspace_coding_explorations import (
+    WorkspaceCodingExplorationFileProof,
+    WorkspaceCodingExplorationSnapshot,
+)
 
 MAX_SEARCH_MATCHES = 200
 MAX_SEARCH_FILES = 2_000
@@ -43,6 +47,7 @@ MAX_SEARCH_DEPTH = 20
 MAX_BATCH_FILES = 32
 MAX_BATCH_BYTES = 2_097_152
 MAX_GIT_OUTPUT_BYTES = 65_536
+MAX_EXPLORATION_FILES = 256
 GIT_TIMEOUT_SECONDS = 15
 CODING_SUFFIXES = {
     ".c",
@@ -228,6 +233,85 @@ class WorkspaceCodingRuntime:
         }
         return ProjectBatchRead.model_validate(
             {**values, "result_digest": sha256_digest(values)}
+        )
+
+    def exploration_snapshot(
+        self,
+        *,
+        task_id: str,
+        user_message_id: str,
+        user_message_digest: str,
+        project_path: str,
+        ecosystem: Literal["python", "node"],
+        test_path: str,
+        objective_digest: str,
+        created_at: datetime,
+    ) -> WorkspaceCodingExplorationSnapshot:
+        """Build a bounded metadata-only catalog for an unprivileged Explorer."""
+
+        project, normalized_project = self._workspace.resolve_project_directory(
+            project_path
+        )
+        safe_test_path = self._safe_relative(test_path)
+        test_target = (project / Path(*safe_test_path.parts)).resolve(strict=True)
+        try:
+            test_target.relative_to(project)
+        except ValueError as error:
+            raise WorkspaceFilePathRejectedError(
+                "Exploration test path escaped its project root"
+            ) from error
+        if not test_target.is_file() or self._is_reparse_point(test_target):
+            raise WorkspaceFilePathRejectedError(
+                "Exploration test path is not a regular project file"
+            )
+        allowed_suffixes = (
+            {".py", ".pyi"}
+            if ecosystem == "python"
+            else {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts"}
+        )
+        paths, _scanned_entries = self._coding_paths(project)
+        files: list[WorkspaceCodingExplorationFileProof] = []
+        scanned_files = 0
+        scanned_bytes = 0
+        truncated = False
+        for path in paths:
+            if path.suffix.casefold() not in allowed_suffixes:
+                continue
+            material = self._workspace.read_project_material(path)
+            scanned_files += 1
+            scanned_bytes += len(material.encoded)
+            if scanned_bytes > MAX_SEARCH_BYTES:
+                truncated = True
+                break
+            if len(files) == MAX_EXPLORATION_FILES:
+                truncated = True
+                continue
+            files.append(
+                WorkspaceCodingExplorationFileProof.build(
+                    relative_path=path.relative_to(project).as_posix(),
+                    content_digest=material.content_digest,
+                    version_digest=material.version_digest,
+                    byte_count=len(material.encoded),
+                )
+            )
+        if len(files) < 2:
+            raise WorkspaceFilePathRejectedError(
+                "Exploration requires at least two supported project files"
+            )
+        files.sort(key=lambda item: item.relative_path.casefold())
+        return WorkspaceCodingExplorationSnapshot.build(
+            task_id=task_id,
+            user_message_id=user_message_id,
+            user_message_digest=user_message_digest,
+            project_path=normalized_project,
+            ecosystem=ecosystem,
+            test_path=safe_test_path.as_posix(),
+            objective_digest=objective_digest,
+            files=tuple(files),
+            scanned_file_count=scanned_files,
+            scanned_byte_count=min(scanned_bytes, MAX_SEARCH_BYTES),
+            truncated=truncated,
+            created_at=created_at,
         )
 
     def prepare_command_snapshot(

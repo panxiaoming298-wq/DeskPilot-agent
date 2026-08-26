@@ -93,6 +93,10 @@ from deskpilot.application.workspace_agent_runtime import (
     WorkspaceAgentRuntime,
     WorkspaceAgentRuntimeError,
 )
+from deskpilot.application.workspace_coding_exploration_binder import (
+    WorkspaceCodingExplorationBinder,
+    WorkspaceCodingExplorationBindingError,
+)
 from deskpilot.application.workspace_coding_graph import (
     WORKSPACE_CODING_MAX_FILES,
     WORKSPACE_CODING_MIN_FILES,
@@ -213,6 +217,7 @@ class TaskWorkbenchService:
         task_loop_activation: TaskLoopActivationRuntime | None = None,
         task_loop_execution: TaskLoopExecutionCoordinator | None = None,
         command_profile_ids: frozenset[CommandProfileId] = frozenset(),
+        workspace_coding_explorations: WorkspaceCodingExplorationBinder | None = None,
     ) -> None:
         self._database = database
         self._tasks = tasks
@@ -231,6 +236,7 @@ class TaskWorkbenchService:
         self._task_loop_activation = task_loop_activation
         self._task_loop_execution = task_loop_execution
         self._command_profile_ids = command_profile_ids
+        self._workspace_coding_explorations = workspace_coding_explorations
         self._auto_advance: WorkbenchAutoAdvancePort | None = None
 
     def bind_auto_advance(self, auto_advance: WorkbenchAutoAdvancePort) -> None:
@@ -1940,6 +1946,16 @@ class TaskWorkbenchService:
         except ArtifactExportError as error:
             raise TaskWorkbenchConflictError("Artifact export proof drifted") from error
         try:
+            workspace_coding_exploration = (
+                await self._workspace_coding_explorations.get_workbench(task_id)
+                if self._workspace_coding_explorations is not None
+                else None
+            )
+        except WorkspaceCodingExplorationBindingError as error:
+            raise TaskWorkbenchConflictError(
+                "Workspace coding exploration proof drifted"
+            ) from error
+        try:
             (
                 knowledge,
                 mcp,
@@ -2037,6 +2053,7 @@ class TaskWorkbenchService:
             "workspace_check": workspace_check,
             "workspace_python_test": workspace_python_test,
             "workspace_node_test": workspace_node_test,
+            "workspace_coding_exploration": workspace_coding_exploration,
             "exports": exports,
         }
         return TaskWorkbenchRead.model_validate(

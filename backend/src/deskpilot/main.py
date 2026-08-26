@@ -131,6 +131,9 @@ from deskpilot.application.workbench_runtime_coordinator import (
 )
 from deskpilot.application.workspace_agent_runtime import WorkspaceAgentRuntime
 from deskpilot.application.workspace_check_runtime import WorkspaceCheckRuntime
+from deskpilot.application.workspace_coding_exploration_binder import (
+    WorkspaceCodingExplorationBinder,
+)
 from deskpilot.application.workspace_coding_runtime import WorkspaceCodingRuntime
 from deskpilot.application.workspace_command_plan_binder import WorkspaceCommandPlanBinder
 from deskpilot.application.workspace_command_plan_compiler import WorkspaceCommandPlanCompiler
@@ -394,6 +397,13 @@ def create_app(
             resolved_settings.artifact_workspace_root,
         )
         workspace_coding_runtime = WorkspaceCodingRuntime(workspace_file_runtime)
+        workspace_coding_explorations = WorkspaceCodingExplorationBinder(
+            database,
+            workspace_coding_runtime,
+            agent_registry,
+            capability_catalog,
+            plan_compilation_service,
+        )
         command_profile_catalog = CommandProfileCatalog()
         workspace_command_plan_binder = WorkspaceCommandPlanBinder(
             WorkspaceCommandPlanCompiler(
@@ -546,6 +556,7 @@ def create_app(
             task_loop_activation_runtime,
             task_loop_execution_runtime,
             command_profile_ids=workspace_command_runtime.enabled_profile_ids,
+            workspace_coding_explorations=workspace_coding_explorations,
         )
         workbench_runtime = (
             WorkbenchRuntimeCoordinator(
@@ -671,6 +682,7 @@ def create_app(
         app.state.task_loop_agent_runtime = task_loop_agent_runtime
         app.state.workspace_file_runtime = workspace_file_runtime
         app.state.workspace_coding_runtime = workspace_coding_runtime
+        app.state.workspace_coding_explorations = workspace_coding_explorations
         app.state.command_profile_catalog = command_profile_catalog
         app.state.workspace_command_runtime = workspace_command_runtime
         app.state.workspace_agent_runtime = workspace_agent_runtime
