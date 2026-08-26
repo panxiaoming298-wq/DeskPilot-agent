@@ -132,8 +132,7 @@ class AgentExecutionRuntime:
             select(TaskPlanGenerationRecord)
             .where(
                 TaskPlanGenerationRecord.task_id == expected_plan.task_id,
-                TaskPlanGenerationRecord.generation
-                == expected_plan.plan_generation,
+                TaskPlanGenerationRecord.generation == expected_plan.plan_generation,
             )
             .with_for_update()
         )
@@ -144,8 +143,7 @@ class AgentExecutionRuntime:
             record.status != "active"
             or plan != expected_plan
             or record.plan_id != expected_plan.plan_id
-            or record.plan_manifest_digest
-            != expected_plan.plan_manifest_digest
+            or record.plan_manifest_digest != expected_plan.plan_manifest_digest
         ):
             raise AgentRuntimeProofRejectedError(
                 "Active Executable Plan differs from the expected manifest"
@@ -157,9 +155,7 @@ class AgentExecutionRuntime:
             and node.runtime_enabled
         ]
         if not runnable:
-            raise AgentRuntimeDisabledError(
-                "Active plan has no enabled Agent or capability node"
-            )
+            raise AgentRuntimeDisabledError("Active plan has no enabled Agent or capability node")
         for node in runnable:
             if node.bound_agent is not None:
                 self._agents.resolve_exact(
@@ -323,9 +319,7 @@ class AgentExecutionRuntime:
                 await session.scalars(
                     select(AgentDelegationRecord).where(
                         AgentDelegationRecord.run_id == run_id,
-                        AgentDelegationRecord.status.in_(
-                            ("waiting_child", "child_verified")
-                        ),
+                        AgentDelegationRecord.status.in_(("waiting_child", "child_verified")),
                     )
                 )
             ).all()
@@ -412,19 +406,14 @@ class AgentExecutionRuntime:
             )
             if int(active_count or 0) >= self._max_parallel:
                 return None
-            node_statement = (
-                select(TaskExecutionNodeRecord)
-                .where(
-                    TaskExecutionNodeRecord.run_id == run_id,
-                    TaskExecutionNodeRecord.status == ExecutionNodeStatus.READY.value,
-                    TaskExecutionNodeRecord.runtime_enabled.is_(True),
-                    TaskExecutionNodeRecord.bound_agent.is_not(None),
-                )
+            node_statement = select(TaskExecutionNodeRecord).where(
+                TaskExecutionNodeRecord.run_id == run_id,
+                TaskExecutionNodeRecord.status == ExecutionNodeStatus.READY.value,
+                TaskExecutionNodeRecord.runtime_enabled.is_(True),
+                TaskExecutionNodeRecord.bound_agent.is_not(None),
             )
             if node_id is not None:
-                node_statement = node_statement.where(
-                    TaskExecutionNodeRecord.node_id == node_id
-                )
+                node_statement = node_statement.where(TaskExecutionNodeRecord.node_id == node_id)
             node = await session.scalar(
                 node_statement.order_by(TaskExecutionNodeRecord.local_key)
                 .limit(1)
@@ -535,9 +524,7 @@ class AgentExecutionRuntime:
         self, invocation_id: str, owner_id: str, fencing_token: int
     ) -> AgentInvocationRead:
         async with self._database.session() as session, session.begin():
-            run, node, invocation = await self._locked_worker_mutation(
-                session, invocation_id
-            )
+            run, node, invocation = await self._locked_worker_mutation(session, invocation_id)
             self._assert_worker_lease(
                 run,
                 node,
@@ -739,9 +726,7 @@ class AgentExecutionRuntime:
                 )
             if delegation is not None:
                 if delegation.parent_node_id != node.handoff_parent_node_id:
-                    raise AgentRuntimeProofRejectedError(
-                        "Optional child delegation parent changed"
-                    )
+                    raise AgentRuntimeProofRejectedError("Optional child delegation parent changed")
                 parent_invocation_id = delegation.parent_invocation_id
                 budget_allocation = delegation.budget_allocation
                 objective_ref = f"plan-node://{node.node_id}/objective"
@@ -765,10 +750,8 @@ class AgentExecutionRuntime:
                     AgentSupervisorRuntime,
                 )
 
-                upstream_result_refs = (
-                    await AgentSupervisorRuntime.verified_upstream_result_refs(
-                        session, graph, graph_node
-                    )
+                upstream_result_refs = await AgentSupervisorRuntime.verified_upstream_result_refs(
+                    session, graph, graph_node
                 )
                 capability_input = AgentSupervisorRuntime.verified_capability_input(
                     graph, graph_node
@@ -917,9 +900,7 @@ class AgentExecutionRuntime:
                     now,
                 )
             node.status = (
-                ExecutionNodeStatus.FAILED.value
-                if exhausted
-                else ExecutionNodeStatus.READY.value
+                ExecutionNodeStatus.FAILED.value if exhausted else ExecutionNodeStatus.READY.value
             )
             node.claim_owner_id = None
             node.claim_acquired_at = None
@@ -1057,9 +1038,7 @@ class AgentExecutionRuntime:
                     select(AgentInvocationRecord)
                     .where(
                         AgentInvocationRecord.run_id == run.run_id,
-                        AgentInvocationRecord.execution_status.in_(
-                            active_invocation_statuses
-                        ),
+                        AgentInvocationRecord.execution_status.in_(active_invocation_statuses),
                     )
                     .with_for_update()
                 )
@@ -1083,9 +1062,7 @@ class AgentExecutionRuntime:
                     await session.scalars(
                         select(AgentInputRequestRecord)
                         .where(
-                            AgentInputRequestRecord.invocation_id.in_(
-                                active_invocation_ids
-                            ),
+                            AgentInputRequestRecord.invocation_id.in_(active_invocation_ids),
                             AgentInputRequestRecord.status == "pending",
                         )
                         .with_for_update()
@@ -1102,9 +1079,7 @@ class AgentExecutionRuntime:
                     select(AgentDelegationRecord)
                     .where(
                         AgentDelegationRecord.run_id == run.run_id,
-                        AgentDelegationRecord.status.in_(
-                            ("waiting_child", "child_verified")
-                        ),
+                        AgentDelegationRecord.status.in_(("waiting_child", "child_verified")),
                     )
                     .with_for_update()
                 )
@@ -1146,9 +1121,7 @@ class AgentExecutionRuntime:
                 sibling_graph_node.updated_at = now
 
         route = await session.scalar(
-            select(TurnRouteRecord)
-            .where(TurnRouteRecord.task_id == run.task_id)
-            .with_for_update()
+            select(TurnRouteRecord).where(TurnRouteRecord.task_id == run.task_id).with_for_update()
         )
         if route is not None and (
             route.status != TurnRouteStatus.FAILED.value
@@ -1481,6 +1454,7 @@ class AgentExecutionRuntime:
                         "builtin.workspace_reader",
                         "builtin.workspace_coordinator",
                         "builtin.workspace_patch_planner",
+                        "builtin.workspace_coding_explorer",
                     }
                 )
             )
@@ -1534,6 +1508,7 @@ class AgentExecutionRuntime:
                         "needs_user_input",
                         "propose_handoff",
                         "propose_task_graph",
+                        "propose_file_set",
                     ],
                     decision.kind,
                 )
@@ -1599,15 +1574,11 @@ class AgentExecutionRuntime:
         child_node = nodes.get(record.child_node_id)
         decision = decisions.get(record.decision_id)
         observation = (
-            observations.get(record.observation_id)
-            if record.observation_id is not None
-            else None
+            observations.get(record.observation_id) if record.observation_id is not None else None
         )
         budget = PlanNodeBudget.model_validate(record.budget_allocation)
         child_budget = (
-            PlanNodeBudget.model_validate(child_node.budget)
-            if child_node is not None
-            else None
+            PlanNodeBudget.model_validate(child_node.budget) if child_node is not None else None
         )
         budget_fields = tuple(PlanNodeBudget.model_fields)
         if (
@@ -1624,10 +1595,7 @@ class AgentExecutionRuntime:
             or decision.manifest != record.proposal_manifest
             or decision.manifest.get("budget_slice") != budget.model_dump(mode="json")
             or child_budget is None
-            or any(
-                getattr(budget, field) > getattr(child_budget, field)
-                for field in budget_fields
-            )
+            or any(getattr(budget, field) > getattr(child_budget, field) for field in budget_fields)
             or parent.parent_invocation_id is not None
             or record.depth != 1
         ):

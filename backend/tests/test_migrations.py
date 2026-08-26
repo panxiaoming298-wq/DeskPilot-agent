@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0061_workspace_coding_explorations"
+CURRENT_REVISION = "0062_workspace_coding_explorer_turns"
 
 
 def _sync_url(path: Path) -> str:
@@ -45,10 +45,7 @@ def _assert_populated_downgrade_refused(
     with engine.begin() as connection:
         connection.execute(text(insert_statement), parameters)
     with engine.connect() as connection:
-        before = [
-            tuple(row)
-            for row in connection.execute(text(snapshot_statement), parameters)
-        ]
+        before = [tuple(row) for row in connection.execute(text(snapshot_statement), parameters)]
     assert before
     engine.dispose()
 
@@ -63,10 +60,7 @@ def _assert_populated_downgrade_refused(
         after_revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-        after = [
-            tuple(row)
-            for row in connection.execute(text(snapshot_statement), parameters)
-        ]
+        after = [tuple(row) for row in connection.execute(text(snapshot_statement), parameters)]
     assert after_revision == revision
     assert after == before
     with engine.begin() as connection:
@@ -159,12 +153,14 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
             "task_loop_verified_results",
             "task_loop_capability_approvals",
             "task_loop_cycle_events",
-                "workspace_command_plan_bindings",
-                "workspace_coding_deliveries",
-                "workspace_coding_amendment_bindings",
-                "workspace_coding_exploration_snapshots",
-                "workspace_coding_exploration_proposals",
-                "workspace_coding_file_set_plan_bindings",
+            "workspace_command_plan_bindings",
+            "workspace_coding_deliveries",
+            "workspace_coding_amendment_bindings",
+            "workspace_coding_exploration_snapshots",
+            "workspace_coding_exploration_proposals",
+            "workspace_coding_file_set_plan_bindings",
+            "workspace_coding_explorer_run_bindings",
+            "workspace_coding_explorer_turn_proofs",
         }.issubset(inspector.get_table_names())
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
@@ -678,18 +674,14 @@ def test_stage_116_workspace_command_plan_binding_migration_is_guarded(
     with engine.connect() as connection:
         inspector = inspect(connection)
         columns = {
-            item["name"]
-            for item in inspector.get_columns("workspace_command_plan_bindings")
+            item["name"] for item in inspector.get_columns("workspace_command_plan_bindings")
         }
         constraints = {
             item["name"]
-            for item in inspector.get_check_constraints(
-                "workspace_command_plan_bindings"
-            )
+            for item in inspector.get_check_constraints("workspace_command_plan_bindings")
         }
         indexes = {
-            item["name"]
-            for item in inspector.get_indexes("workspace_command_plan_bindings")
+            item["name"] for item in inspector.get_indexes("workspace_command_plan_bindings")
         }
     engine.dispose()
     assert {
@@ -753,17 +745,14 @@ def test_stage_116_workspace_command_plan_binding_migration_is_guarded(
             FROM workspace_command_plan_bindings WHERE binding_id = :binding_id
         """,
         cleanup_statement=(
-            "DELETE FROM workspace_command_plan_bindings "
-            "WHERE binding_id = :binding_id"
+            "DELETE FROM workspace_command_plan_bindings WHERE binding_id = :binding_id"
         ),
     )
 
     command.downgrade(config, "0055_planner_only_single_task_loop")
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
-        assert "workspace_command_plan_bindings" not in inspect(
-            connection
-        ).get_table_names()
+        assert "workspace_command_plan_bindings" not in inspect(connection).get_table_names()
     engine.dispose()
     command.upgrade(config, "head")
     command.check(config)
@@ -823,9 +812,7 @@ def test_stage_116b_task_loop_deferred_binding_migration_is_guarded(
             SELECT binding_id, status, binding_digest
             FROM turn_plan_bindings WHERE binding_id = :binding_id
         """,
-        cleanup_statement=(
-            "DELETE FROM turn_plan_bindings WHERE binding_id = :binding_id"
-        ),
+        cleanup_statement=("DELETE FROM turn_plan_bindings WHERE binding_id = :binding_id"),
     )
 
     command.downgrade(config, "0056_workspace_command_plan_bindings")
@@ -853,15 +840,9 @@ def test_stage_116b_workspace_coding_delivery_migration_is_guarded(
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
         inspector = inspect(connection)
-        columns = {
-            item["name"]
-            for item in inspector.get_columns("workspace_coding_deliveries")
-        }
+        columns = {item["name"] for item in inspector.get_columns("workspace_coding_deliveries")}
         constraints = {
-            item["name"]
-            for item in inspector.get_check_constraints(
-                "workspace_coding_deliveries"
-            )
+            item["name"] for item in inspector.get_check_constraints("workspace_coding_deliveries")
         }
     engine.dispose()
     assert {
@@ -912,17 +893,14 @@ def test_stage_116b_workspace_coding_delivery_migration_is_guarded(
             FROM workspace_coding_deliveries WHERE delivery_id = :delivery_id
         """,
         cleanup_statement=(
-            "DELETE FROM workspace_coding_deliveries "
-            "WHERE delivery_id = :delivery_id"
+            "DELETE FROM workspace_coding_deliveries WHERE delivery_id = :delivery_id"
         ),
     )
 
     command.downgrade(config, "0057_task_loop_deferred_binding")
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
-        assert "workspace_coding_deliveries" not in inspect(
-            connection
-        ).get_table_names()
+        assert "workspace_coding_deliveries" not in inspect(connection).get_table_names()
     engine.dispose()
     command.upgrade(config, "head")
     command.check(config)
@@ -940,16 +918,11 @@ def test_stage_116b_workspace_coding_amendment_migration_is_guarded(
     with engine.connect() as connection:
         inspector = inspect(connection)
         columns = {
-            item["name"]
-            for item in inspector.get_columns(
-                "workspace_coding_amendment_bindings"
-            )
+            item["name"] for item in inspector.get_columns("workspace_coding_amendment_bindings")
         }
         constraints = {
             item["name"]
-            for item in inspector.get_check_constraints(
-                "workspace_coding_amendment_bindings"
-            )
+            for item in inspector.get_check_constraints("workspace_coding_amendment_bindings")
         }
     engine.dispose()
     assert {
@@ -1017,17 +990,14 @@ def test_stage_116b_workspace_coding_amendment_migration_is_guarded(
             WHERE amendment_id = :amendment_id
         """,
         cleanup_statement=(
-            "DELETE FROM workspace_coding_amendment_bindings "
-            "WHERE amendment_id = :amendment_id"
+            "DELETE FROM workspace_coding_amendment_bindings WHERE amendment_id = :amendment_id"
         ),
     )
 
     command.downgrade(config, "0058_workspace_coding_deliveries")
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
-        assert "workspace_coding_amendment_bindings" not in inspect(
-            connection
-        ).get_table_names()
+        assert "workspace_coding_amendment_bindings" not in inspect(connection).get_table_names()
     engine.dispose()
     command.upgrade(config, "head")
     command.check(config)
@@ -1045,9 +1015,7 @@ def test_stage_116b_bounded_coding_delivery_migration_is_guarded(
     with engine.connect() as connection:
         constraints = {
             item["name"]: str(item["sqltext"])
-            for item in inspect(connection).get_check_constraints(
-                "workspace_coding_deliveries"
-            )
+            for item in inspect(connection).get_check_constraints("workspace_coding_deliveries")
         }
     engine.dispose()
     assert "BETWEEN 2 AND 8" in constraints["ck_workspace_coding_delivery_counts"]
@@ -1087,8 +1055,7 @@ def test_stage_116b_bounded_coding_delivery_migration_is_guarded(
             FROM workspace_coding_deliveries WHERE delivery_id = :delivery_id
         """,
         cleanup_statement=(
-            "DELETE FROM workspace_coding_deliveries "
-            "WHERE delivery_id = :delivery_id"
+            "DELETE FROM workspace_coding_deliveries WHERE delivery_id = :delivery_id"
         ),
     )
 
@@ -1097,14 +1064,10 @@ def test_stage_116b_bounded_coding_delivery_migration_is_guarded(
     with engine.connect() as connection:
         constraints = {
             item["name"]: str(item["sqltext"])
-            for item in inspect(connection).get_check_constraints(
-                "workspace_coding_deliveries"
-            )
+            for item in inspect(connection).get_check_constraints("workspace_coding_deliveries")
         }
     engine.dispose()
-    assert "changed_file_count = 2" in constraints[
-        "ck_workspace_coding_delivery_counts"
-    ]
+    assert "changed_file_count = 2" in constraints["ck_workspace_coding_delivery_counts"]
     command.upgrade(config, "head")
     command.check(config)
 
@@ -1126,16 +1089,11 @@ def test_stage_116b_workspace_coding_exploration_migration_is_guarded(
             "workspace_coding_file_set_plan_bindings",
         }.issubset(inspector.get_table_names())
         snapshot_columns = {
-            item["name"]
-            for item in inspector.get_columns(
-                "workspace_coding_exploration_snapshots"
-            )
+            item["name"] for item in inspector.get_columns("workspace_coding_exploration_snapshots")
         }
         binding_constraints = {
             item["name"]
-            for item in inspector.get_check_constraints(
-                "workspace_coding_file_set_plan_bindings"
-            )
+            for item in inspector.get_check_constraints("workspace_coding_file_set_plan_bindings")
         }
     engine.dispose()
     assert {
@@ -1160,7 +1118,7 @@ def test_stage_116b_workspace_coding_exploration_migration_is_guarded(
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0061_workspace_coding_explorations",
         target_revision="0060_workspace_coding_bounded_files",
         insert_statement="""
             INSERT INTO workspace_coding_exploration_snapshots (
@@ -1191,18 +1149,125 @@ def test_stage_116b_workspace_coding_exploration_migration_is_guarded(
             WHERE snapshot_id = :snapshot_id
         """,
         cleanup_statement=(
-            "DELETE FROM workspace_coding_exploration_snapshots "
-            "WHERE snapshot_id = :snapshot_id"
+            "DELETE FROM workspace_coding_exploration_snapshots WHERE snapshot_id = :snapshot_id"
         ),
     )
 
     command.downgrade(config, "0060_workspace_coding_bounded_files")
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
-        assert "workspace_coding_exploration_snapshots" not in inspect(
-            connection
-        ).get_table_names()
+        assert "workspace_coding_exploration_snapshots" not in inspect(connection).get_table_names()
     engine.dispose()
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_116b_workspace_coding_explorer_turn_migration_is_guarded(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-116b-workspace-coding-explorer-turn.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        assert {
+            "workspace_coding_explorer_run_bindings",
+            "workspace_coding_explorer_turn_proofs",
+        }.issubset(inspector.get_table_names())
+        run_columns = {
+            item["name"] for item in inspector.get_columns("workspace_coding_explorer_run_bindings")
+        }
+        decision_constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspector.get_check_constraints("agent_decisions")
+        }
+    engine.dispose()
+    assert {
+        "binding_id",
+        "snapshot_id",
+        "snapshot_digest",
+        "source_task_id",
+        "contract_version",
+        "contract_digest",
+        "plan_generation",
+        "plan_id",
+        "plan_manifest_digest",
+        "run_id",
+        "explorer_node_id",
+        "explorer_node_spec_digest",
+        "explorer_agent_id",
+        "explorer_agent_version",
+        "explorer_agent_contract_digest",
+        "explorer_prompt_package_digest",
+        "manifest",
+        "binding_digest",
+        "created_at",
+    } == run_columns
+    assert "propose_file_set" in decision_constraints["ck_agent_decision_kind"]
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0061_workspace_coding_explorations",
+        insert_statement="""
+            INSERT INTO workspace_coding_explorer_run_bindings (
+                binding_id, snapshot_id, snapshot_digest, source_task_id,
+                contract_version, contract_digest, plan_generation, plan_id,
+                plan_manifest_digest, run_id, explorer_node_id,
+                explorer_node_spec_digest, explorer_agent_id,
+                explorer_agent_version, explorer_agent_contract_digest,
+                explorer_prompt_package_digest, manifest, binding_digest,
+                created_at
+            ) VALUES (
+                :binding_id, :snapshot_id, :snapshot_digest, :task_id,
+                1, :contract_digest, 1, :plan_id, :plan_digest, :run_id,
+                :node_id, :node_digest, 'builtin.workspace_coding_explorer',
+                '1.0.0', :agent_digest, :prompt_digest, :empty_object,
+                :binding_digest, :created_at
+            )
+        """,
+        parameters={
+            "binding_id": "wxr_" + "1" * 64,
+            "snapshot_id": "wxs_" + "2" * 64,
+            "snapshot_digest": "3" * 64,
+            "task_id": "tsk_" + "4" * 32,
+            "contract_digest": "5" * 64,
+            "plan_id": "epl_" + "6" * 64,
+            "plan_digest": "7" * 64,
+            "run_id": "run_" + "8" * 64,
+            "node_id": "pnd_" + "9" * 64,
+            "node_digest": "a" * 64,
+            "agent_digest": "b" * 64,
+            "prompt_digest": "c" * 64,
+            "empty_object": "{}",
+            "binding_digest": "d" * 64,
+            "created_at": "2026-08-27 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT binding_id, binding_digest
+            FROM workspace_coding_explorer_run_bindings
+            WHERE binding_id = :binding_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM workspace_coding_explorer_run_bindings WHERE binding_id = :binding_id"
+        ),
+    )
+
+    command.downgrade(config, "0061_workspace_coding_explorations")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        assert "workspace_coding_explorer_run_bindings" not in inspector.get_table_names()
+        decision_constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspector.get_check_constraints("agent_decisions")
+        }
+    engine.dispose()
+    assert "propose_file_set" not in decision_constraints["ck_agent_decision_kind"]
     command.upgrade(config, "head")
     command.check(config)
 
@@ -1350,19 +1415,14 @@ def test_stage_112_model_planner_task_loop_migration_round_trips(
         inspector = inspect(connection)
         tables = set(inspector.get_table_names())
         loop_columns = {item["name"] for item in inspector.get_columns("task_loops")}
-        loop_constraints = {
-            item["name"] for item in inspector.get_check_constraints("task_loops")
-        }
+        loop_constraints = {item["name"] for item in inspector.get_check_constraints("task_loops")}
         loop_indexes = {item["name"] for item in inspector.get_indexes("task_loops")}
         event_foreign_keys = {
             item["name"] for item in inspector.get_foreign_keys("task_loop_events")
         }
-        draft_columns = {
-            item["name"] for item in inspector.get_columns("model_planner_drafts")
-        }
+        draft_columns = {item["name"] for item in inspector.get_columns("model_planner_drafts")}
         step_foreign_keys = {
-            item["name"]
-            for item in inspector.get_foreign_keys("model_planner_step_bindings")
+            item["name"] for item in inspector.get_foreign_keys("model_planner_step_bindings")
         }
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
@@ -1387,12 +1447,8 @@ def test_stage_112_model_planner_task_loop_migration_round_trips(
         "progress_digest",
         "loop_digest",
     }.issubset(loop_columns)
-    assert {"ck_task_loop_state", "ck_task_loop_lifecycle"}.issubset(
-        loop_constraints
-    )
-    assert {"ix_task_loops_recovery", "ix_task_loops_message"}.issubset(
-        loop_indexes
-    )
+    assert {"ck_task_loop_state", "ck_task_loop_lifecycle"}.issubset(loop_constraints)
+    assert {"ix_task_loops_recovery", "ix_task_loops_message"}.issubset(loop_indexes)
     assert {
         "fk_task_loop_event_scope",
         "fk_task_loop_event_previous",
@@ -1469,12 +1525,15 @@ def test_stage_112_model_planner_task_loop_migration_round_trips(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
     engine.dispose()
-    assert not {
-        "task_loops",
-        "task_loop_events",
-        "model_planner_drafts",
-        "model_planner_step_bindings",
-    } & tables
+    assert (
+        not {
+            "task_loops",
+            "task_loop_events",
+            "model_planner_drafts",
+            "model_planner_step_bindings",
+        }
+        & tables
+    )
     assert revision == "0051_turn_planning_offers"
 
     command.upgrade(config, "head")
@@ -1493,48 +1552,36 @@ def test_stage_112_task_loop_execution_migration_round_trips(
     with engine.connect() as connection:
         inspector = inspect(connection)
         tables = set(inspector.get_table_names())
-        execution_columns = {
-            item["name"] for item in inspector.get_columns("task_loop_executions")
-        }
+        execution_columns = {item["name"] for item in inspector.get_columns("task_loop_executions")}
         binding_columns = {
-            item["name"]
-            for item in inspector.get_columns("model_planner_node_bindings")
+            item["name"] for item in inspector.get_columns("model_planner_node_bindings")
         }
         attempt_columns = {
             item["name"] for item in inspector.get_columns("task_loop_node_attempts")
         }
         attempt_constraints = {
-            item["name"]
-            for item in inspector.get_check_constraints("task_loop_node_attempts")
+            item["name"] for item in inspector.get_check_constraints("task_loop_node_attempts")
         }
         result_foreign_keys = {
             item["referred_table"]
             for item in inspector.get_foreign_keys("task_loop_verified_results")
         }
         result_columns = {
-            item["name"]
-            for item in inspector.get_columns("task_loop_verified_results")
+            item["name"] for item in inspector.get_columns("task_loop_verified_results")
         }
         result_constraints = {
-            item["name"]
-            for item in inspector.get_check_constraints("task_loop_verified_results")
+            item["name"] for item in inspector.get_check_constraints("task_loop_verified_results")
         }
-        cycle_columns = {
-            item["name"] for item in inspector.get_columns("task_loop_cycle_events")
-        }
+        cycle_columns = {item["name"] for item in inspector.get_columns("task_loop_cycle_events")}
         cycle_constraints = {
-            item["name"]
-            for item in inspector.get_check_constraints("task_loop_cycle_events")
+            item["name"] for item in inspector.get_check_constraints("task_loop_cycle_events")
         }
         approval_columns = {
-            item["name"]
-            for item in inspector.get_columns("task_loop_capability_approvals")
+            item["name"] for item in inspector.get_columns("task_loop_capability_approvals")
         }
         approval_constraints = {
             item["name"]
-            for item in inspector.get_check_constraints(
-                "task_loop_capability_approvals"
-            )
+            for item in inspector.get_check_constraints("task_loop_capability_approvals")
         }
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
@@ -1695,9 +1742,7 @@ def test_stage_112_task_loop_execution_migration_round_trips(
             SELECT execution_id, status, revision, run_id, execution_digest
             FROM task_loop_executions WHERE execution_id = :row_id
         """,
-        cleanup_statement=(
-            "DELETE FROM task_loop_executions WHERE execution_id = :row_id"
-        ),
+        cleanup_statement=("DELETE FROM task_loop_executions WHERE execution_id = :row_id"),
     )
 
     command.downgrade(config, "0052_model_planner_task_loop")
@@ -1708,15 +1753,18 @@ def test_stage_112_task_loop_execution_migration_round_trips(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
     engine.dispose()
-    assert not {
-        "task_loop_executions",
-        "task_loop_execution_events",
-        "model_planner_node_bindings",
-        "task_loop_node_attempts",
-        "task_loop_verified_results",
-        "task_loop_capability_approvals",
-        "task_loop_cycle_events",
-    } & tables
+    assert (
+        not {
+            "task_loop_executions",
+            "task_loop_execution_events",
+            "model_planner_node_bindings",
+            "task_loop_node_attempts",
+            "task_loop_verified_results",
+            "task_loop_capability_approvals",
+            "task_loop_cycle_events",
+        }
+        & tables
+    )
     assert revision == "0052_model_planner_task_loop"
 
     command.upgrade(config, "head")
@@ -1732,9 +1780,7 @@ def test_stage_101_dynamic_patch_approval_migration_round_trips(tmp_path: Path) 
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
         inspector = inspect(connection)
-        node_columns = {
-            item["name"] for item in inspector.get_columns("agent_task_graph_nodes")
-        }
+        node_columns = {item["name"] for item in inspector.get_columns("agent_task_graph_nodes")}
         constraints = {
             item["name"]: str(item["sqltext"])
             for item in inspector.get_check_constraints("workspace_agent_results")
@@ -1771,18 +1817,14 @@ def test_stage_101_dynamic_patch_approval_migration_round_trips(tmp_path: Path) 
             SELECT invocation_id, run_id, result_kind, manifest, result_digest
             FROM workspace_agent_results WHERE invocation_id = :row_id
         """,
-        cleanup_statement=(
-            "DELETE FROM workspace_agent_results WHERE invocation_id = :row_id"
-        ),
+        cleanup_statement=("DELETE FROM workspace_agent_results WHERE invocation_id = :row_id"),
     )
 
     command.downgrade(config, "0048_agent_test_capability_inputs")
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
         inspector = inspect(connection)
-        node_columns = {
-            item["name"] for item in inspector.get_columns("agent_task_graph_nodes")
-        }
+        node_columns = {item["name"] for item in inspector.get_columns("agent_task_graph_nodes")}
         constraints = {
             item["name"]: str(item["sqltext"])
             for item in inspector.get_check_constraints("workspace_agent_results")
@@ -2706,9 +2748,7 @@ def test_stage_86_pdf_render_evidence_migration_round_trips(tmp_path: Path) -> N
             SELECT revision_id, render_evidence, render_evidence_digest
             FROM artifact_revisions WHERE revision_id = :row_id
         """,
-        cleanup_statement=(
-            "DELETE FROM artifact_revisions WHERE revision_id = :row_id"
-        ),
+        cleanup_statement=("DELETE FROM artifact_revisions WHERE revision_id = :row_id"),
     )
 
     command.downgrade(config, "0037_turn_routes")
@@ -2914,9 +2954,7 @@ def test_stage_90_agent_input_request_migration_round_trips(tmp_path: Path) -> N
             SELECT input_request_id, invocation_id, decision_id, request_digest, status
             FROM agent_input_requests WHERE input_request_id = :row_id
         """,
-        cleanup_statement=(
-            "DELETE FROM agent_input_requests WHERE input_request_id = :row_id"
-        ),
+        cleanup_statement=("DELETE FROM agent_input_requests WHERE input_request_id = :row_id"),
     )
 
     command.downgrade(config, "0040_durable_agent_model_loop")
@@ -2971,9 +3009,7 @@ def test_stage_91_workbench_runtime_item_migration_round_trips(tmp_path: Path) -
                    claim_fencing_token
             FROM workbench_runtime_items WHERE work_item_id = :row_id
         """,
-        cleanup_statement=(
-            "DELETE FROM workbench_runtime_items WHERE work_item_id = :row_id"
-        ),
+        cleanup_statement=("DELETE FROM workbench_runtime_items WHERE work_item_id = :row_id"),
     )
 
     command.downgrade(config, "0041_agent_input_requests")
@@ -3055,9 +3091,7 @@ def test_stage_93_agent_delegation_migration_round_trips(tmp_path: Path) -> None
                    budget_allocation
             FROM agent_delegations WHERE delegation_id = :row_id
         """,
-        cleanup_statement=(
-            "DELETE FROM agent_delegations WHERE delegation_id = :row_id"
-        ),
+        cleanup_statement=("DELETE FROM agent_delegations WHERE delegation_id = :row_id"),
     )
 
     command.downgrade(config, "0042_workbench_runtime_items")
@@ -3154,9 +3188,7 @@ def test_stage_94_agent_task_graph_migration_round_trips(tmp_path: Path) -> None
             SELECT invocation_id, run_id, result_kind, manifest, result_digest
             FROM workspace_agent_results WHERE invocation_id = :row_id
         """,
-        cleanup_statement=(
-            "DELETE FROM workspace_agent_results WHERE invocation_id = :row_id"
-        ),
+        cleanup_statement=("DELETE FROM workspace_agent_results WHERE invocation_id = :row_id"),
     )
 
     command.downgrade(config, "0043_agent_delegations")
@@ -3200,12 +3232,8 @@ def test_stage_95_agent_task_graph_result_ref_migration_round_trips(
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
         inspector = inspect(connection)
-        graph_columns = {
-            item["name"] for item in inspector.get_columns("agent_task_graphs")
-        }
-        node_columns = {
-            item["name"] for item in inspector.get_columns("agent_task_graph_nodes")
-        }
+        graph_columns = {item["name"] for item in inspector.get_columns("agent_task_graphs")}
+        node_columns = {item["name"] for item in inspector.get_columns("agent_task_graph_nodes")}
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
@@ -3255,12 +3283,8 @@ def test_stage_95_agent_task_graph_result_ref_migration_round_trips(
     engine = create_engine(_sync_url(database_path))
     with engine.connect() as connection:
         inspector = inspect(connection)
-        graph_columns = {
-            item["name"] for item in inspector.get_columns("agent_task_graphs")
-        }
-        node_columns = {
-            item["name"] for item in inspector.get_columns("agent_task_graph_nodes")
-        }
+        graph_columns = {item["name"] for item in inspector.get_columns("agent_task_graphs")}
+        node_columns = {item["name"] for item in inspector.get_columns("agent_task_graph_nodes")}
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
@@ -3480,9 +3504,7 @@ def test_stage_98_agent_test_result_kind_migration_round_trips(tmp_path: Path) -
             SELECT invocation_id, run_id, result_kind, manifest, result_digest
             FROM workspace_agent_results WHERE invocation_id = :row_id
         """,
-        cleanup_statement=(
-            "DELETE FROM workspace_agent_results WHERE invocation_id = :row_id"
-        ),
+        cleanup_statement=("DELETE FROM workspace_agent_results WHERE invocation_id = :row_id"),
     )
 
     command.downgrade(config, "0047_agent_replans")
@@ -3514,25 +3536,15 @@ def test_stage_111_turn_planning_migration_round_trips(tmp_path: Path) -> None:
     with engine.connect() as connection:
         inspector = inspect(connection)
         tables = set(inspector.get_table_names())
-        route_columns = {
-            item["name"] for item in inspector.get_columns("turn_routes")
-        }
-        offer_columns = {
-            item["name"] for item in inspector.get_columns("turn_planning_offers")
-        }
+        route_columns = {item["name"] for item in inspector.get_columns("turn_routes")}
+        offer_columns = {item["name"] for item in inspector.get_columns("turn_planning_offers")}
         offer_constraints = {
-            item["name"]
-            for item in inspector.get_check_constraints("turn_planning_offers")
+            item["name"] for item in inspector.get_check_constraints("turn_planning_offers")
         }
-        run_columns = {
-            item["name"] for item in inspector.get_columns("turn_planner_runs")
-        }
-        run_indexes = {
-            item["name"] for item in inspector.get_indexes("turn_planner_runs")
-        }
+        run_columns = {item["name"] for item in inspector.get_columns("turn_planner_runs")}
+        run_indexes = {item["name"] for item in inspector.get_indexes("turn_planner_runs")}
         run_unique_constraints = {
-            item["name"]
-            for item in inspector.get_unique_constraints("turn_planner_runs")
+            item["name"] for item in inspector.get_unique_constraints("turn_planner_runs")
         }
         route_constraints = {
             item["name"] for item in inspector.get_check_constraints("turn_routes")
@@ -3540,9 +3552,7 @@ def test_stage_111_turn_planning_migration_round_trips(tmp_path: Path) -> None:
         route_foreign_keys = {
             item["name"]: item for item in inspector.get_foreign_keys("turn_routes")
         }
-        route_indexes = {
-            item["name"] for item in inspector.get_indexes("turn_routes")
-        }
+        route_indexes = {item["name"] for item in inspector.get_indexes("turn_routes")}
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
@@ -3829,27 +3839,31 @@ def test_stage_111_turn_planning_migration_round_trips(tmp_path: Path) -> None:
     with engine.connect() as connection:
         inspector = inspect(connection)
         tables = set(inspector.get_table_names())
-        route_columns = {
-            item["name"] for item in inspector.get_columns("turn_routes")
-        }
+        route_columns = {item["name"] for item in inspector.get_columns("turn_routes")}
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
     engine.dispose()
-    assert not {
-        "turn_planning_offers",
-        "turn_planner_runs",
-        "turn_planner_adjudications",
-        "turn_plan_bindings",
-    } & tables
-    assert not {
-        "turn_planner_run_id",
-        "turn_planning_reservation_digest",
-        "turn_planning_adjudication_id",
-        "turn_plan_binding_id",
-        "turn_plan_binding_digest",
-        "turn_planning_provenance_digest",
-    } & route_columns
+    assert (
+        not {
+            "turn_planning_offers",
+            "turn_planner_runs",
+            "turn_planner_adjudications",
+            "turn_plan_bindings",
+        }
+        & tables
+    )
+    assert (
+        not {
+            "turn_planner_run_id",
+            "turn_planning_reservation_digest",
+            "turn_planning_adjudication_id",
+            "turn_plan_binding_id",
+            "turn_plan_binding_digest",
+            "turn_planning_provenance_digest",
+        }
+        & route_columns
+    )
     assert revision == "0050_agent_graph_test_conditions"
 
     command.upgrade(config, "head")

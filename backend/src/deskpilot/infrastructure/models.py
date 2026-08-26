@@ -415,9 +415,7 @@ class TurnPlannerRunRecord(Base):
     failure_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
     run_digest: Mapped[str] = mapped_column(String(64))
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
@@ -499,9 +497,7 @@ class TurnPlannerAdjudicationRecord(Base):
     parameter_bindings_manifest: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSON(none_as_null=True), nullable=True
     )
-    parameter_bindings_digest: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
+    parameter_bindings_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     proposal_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reason_code: Mapped[str] = mapped_column(String(100))
     manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
@@ -571,8 +567,7 @@ class TurnPlanBindingRecord(Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint(
-            "status IN ('bound', 'multi_step_deferred', 'task_loop_deferred', "
-            "'not_applicable')",
+            "status IN ('bound', 'multi_step_deferred', 'task_loop_deferred', 'not_applicable')",
             name="ck_turn_plan_binding_status",
         ),
         CheckConstraint(
@@ -693,8 +688,7 @@ class TaskLoopRecord(Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint(
-            "status IN ('observed', 'planned', 'failed') AND "
-            "phase IN ('observe', 'plan')",
+            "status IN ('observed', 'planned', 'failed') AND phase IN ('observe', 'plan')",
             name="ck_task_loop_state",
         ),
         CheckConstraint(
@@ -748,9 +742,7 @@ class TaskLoopRecord(Base):
     latest_event_digest: Mapped[str] = mapped_column(String(64))
     progress_digest: Mapped[str] = mapped_column(String(64))
     active_draft_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
-    active_draft_record_digest: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
+    active_draft_record_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     failure_manifest: Mapped[dict[str, Any] | None] = mapped_column(
         JSON(none_as_null=True), nullable=True
     )
@@ -785,8 +777,7 @@ class TaskLoopEventRecord(Base):
         ),
         CheckConstraint("sequence BETWEEN 1 AND 2", name="ck_task_loop_event_sequence"),
         CheckConstraint(
-            "phase IN ('observe', 'plan') AND "
-            "kind IN ('observed', 'plan_bound', 'plan_failed')",
+            "phase IN ('observe', 'plan') AND kind IN ('observed', 'plan_bound', 'plan_failed')",
             name="ck_task_loop_event_kind",
         ),
         CheckConstraint(
@@ -997,8 +988,7 @@ class WorkspaceCommandPlanBindingRecord(Base):
     __tablename__ = "workspace_command_plan_bindings"
     __table_args__ = (
         CheckConstraint(
-            "group_ordinal BETWEEN 1 AND 8 AND step_count BETWEEN 1 AND 6 "
-            "AND plan_generation = 1",
+            "group_ordinal BETWEEN 1 AND 8 AND step_count BETWEEN 1 AND 6 AND plan_generation = 1",
             name="ck_workspace_command_plan_binding_bounds",
         ),
         CheckConstraint(
@@ -1030,12 +1020,8 @@ class WorkspaceCommandPlanBindingRecord(Base):
     draft_id: Mapped[str] = mapped_column(
         ForeignKey("model_planner_drafts.draft_id", ondelete="CASCADE")
     )
-    loop_id: Mapped[str] = mapped_column(
-        ForeignKey("task_loops.loop_id", ondelete="CASCADE")
-    )
-    task_id: Mapped[str] = mapped_column(
-        ForeignKey("tasks.task_id", ondelete="CASCADE")
-    )
+    loop_id: Mapped[str] = mapped_column(ForeignKey("task_loops.loop_id", ondelete="CASCADE"))
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
     group_ordinal: Mapped[int] = mapped_column(Integer)
     expected_plan_id: Mapped[str] = mapped_column(String(68))
     expected_plan_manifest_digest: Mapped[str] = mapped_column(String(64))
@@ -1073,9 +1059,7 @@ class TaskLoopExecutionRecord(Base):
         UniqueConstraint("loop_id", name="uq_task_loop_execution_loop"),
         UniqueConstraint("draft_id", name="uq_task_loop_execution_draft"),
         UniqueConstraint("run_id", name="uq_task_loop_execution_run"),
-        UniqueConstraint(
-            "execution_digest", name="uq_task_loop_execution_digest"
-        ),
+        UniqueConstraint("execution_digest", name="uq_task_loop_execution_digest"),
         Index(
             "ix_task_loop_executions_recovery",
             "status",
@@ -1085,15 +1069,11 @@ class TaskLoopExecutionRecord(Base):
     )
 
     execution_id: Mapped[str] = mapped_column(String(68), primary_key=True)
-    loop_id: Mapped[str] = mapped_column(
-        ForeignKey("task_loops.loop_id", ondelete="RESTRICT")
-    )
+    loop_id: Mapped[str] = mapped_column(ForeignKey("task_loops.loop_id", ondelete="RESTRICT"))
     draft_id: Mapped[str] = mapped_column(
         ForeignKey("model_planner_drafts.draft_id", ondelete="RESTRICT")
     )
-    task_id: Mapped[str] = mapped_column(
-        ForeignKey("tasks.task_id", ondelete="CASCADE")
-    )
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
     plan_id: Mapped[str] = mapped_column(String(68))
     plan_generation: Mapped[int] = mapped_column(Integer)
     plan_manifest_digest: Mapped[str] = mapped_column(String(64))
@@ -1130,12 +1110,8 @@ class TaskLoopExecutionEventRecord(Base):
             "previous_event_digest IS NOT NULL)",
             name="ck_task_loop_execution_event_lifecycle",
         ),
-        UniqueConstraint(
-            "execution_id", "sequence", name="uq_task_loop_execution_event_sequence"
-        ),
-        UniqueConstraint(
-            "event_digest", name="uq_task_loop_execution_event_digest"
-        ),
+        UniqueConstraint("execution_id", "sequence", name="uq_task_loop_execution_event_sequence"),
+        UniqueConstraint("event_digest", name="uq_task_loop_execution_event_digest"),
         UniqueConstraint(
             "execution_id",
             "event_digest",
@@ -1161,9 +1137,7 @@ class TaskLoopExecutionEventRecord(Base):
     execution_id: Mapped[str] = mapped_column(
         ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
     )
-    task_id: Mapped[str] = mapped_column(
-        ForeignKey("tasks.task_id", ondelete="CASCADE")
-    )
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
     sequence: Mapped[int] = mapped_column(Integer)
     previous_event_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     kind: Mapped[str] = mapped_column(String(24))
@@ -1180,9 +1154,7 @@ class ModelPlannerNodeBindingRecord(Base):
 
     __tablename__ = "model_planner_node_bindings"
     __table_args__ = (
-        CheckConstraint(
-            "step_ordinal BETWEEN 1 AND 8", name="ck_model_planner_node_step"
-        ),
+        CheckConstraint("step_ordinal BETWEEN 1 AND 8", name="ck_model_planner_node_step"),
         UniqueConstraint(
             "execution_id",
             "composite_node_id",
@@ -1194,9 +1166,7 @@ class ModelPlannerNodeBindingRecord(Base):
             "source_node_id",
             name="uq_model_planner_node_source",
         ),
-        UniqueConstraint(
-            "binding_digest", name="uq_model_planner_node_binding_digest"
-        ),
+        UniqueConstraint("binding_digest", name="uq_model_planner_node_binding_digest"),
         Index(
             "ix_model_planner_node_bindings_step",
             "execution_id",
@@ -1208,9 +1178,7 @@ class ModelPlannerNodeBindingRecord(Base):
     execution_id: Mapped[str] = mapped_column(
         ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
     )
-    task_id: Mapped[str] = mapped_column(
-        ForeignKey("tasks.task_id", ondelete="CASCADE")
-    )
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
     user_message_id: Mapped[str] = mapped_column(
         ForeignKey("conversation_messages.message_id", ondelete="RESTRICT")
     )
@@ -1286,9 +1254,7 @@ class TaskLoopNodeAttemptRecord(Base):
             "verified_at IS NOT NULL AND candidate_manifest IS NOT NULL))",
             name="ck_task_loop_node_attempt_evidence",
         ),
-        UniqueConstraint(
-            "execution_id", "node_id", "attempt", name="uq_task_loop_node_attempt"
-        ),
+        UniqueConstraint("execution_id", "node_id", "attempt", name="uq_task_loop_node_attempt"),
         UniqueConstraint("attempt_digest", name="uq_task_loop_node_attempt_digest"),
         Index(
             "ix_task_loop_node_attempts_claim",
@@ -1342,9 +1308,7 @@ class TaskLoopNodeAttemptRecord(Base):
         JSON(none_as_null=True), nullable=True
     )
     verification_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    verified_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     receipt_manifest: Mapped[dict[str, Any] | None] = mapped_column(
         JSON(none_as_null=True), nullable=True
     )
@@ -1378,9 +1342,7 @@ class TaskLoopVerifiedResultRecord(Base):
             name="ck_task_loop_verified_result_producer_evidence",
         ),
         UniqueConstraint("attempt_id", name="uq_task_loop_verified_result_attempt"),
-        UniqueConstraint(
-            "result_ref_digest", name="uq_task_loop_verified_result_digest"
-        ),
+        UniqueConstraint("result_ref_digest", name="uq_task_loop_verified_result_digest"),
         Index(
             "ix_task_loop_verified_results_node",
             "execution_id",
@@ -1413,12 +1375,8 @@ class TaskLoopVerifiedResultRecord(Base):
         JSON(none_as_null=True), nullable=True
     )
     agent_binding_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    executor_manifest_digest: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
-    agent_result_proof_digest: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
+    executor_manifest_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_result_proof_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     input_binding_digest: Mapped[str] = mapped_column(String(64))
     context_digest: Mapped[str] = mapped_column(String(64))
     candidate_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -1452,9 +1410,7 @@ class WorkspaceCodingDeliveryRecord(Base):
     execution_id: Mapped[str] = mapped_column(
         ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
     )
-    task_id: Mapped[str] = mapped_column(
-        ForeignKey("tasks.task_id", ondelete="CASCADE")
-    )
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
     run_id: Mapped[str] = mapped_column(
         ForeignKey("task_execution_runs.run_id", ondelete="RESTRICT")
     )
@@ -1537,9 +1493,7 @@ class WorkspaceCodingAmendmentBindingRecord(Base):
     source_plan_digest: Mapped[str] = mapped_column(String(64))
     source_execution_digest: Mapped[str] = mapped_column(String(64))
     source_execution_event_digest: Mapped[str] = mapped_column(String(64))
-    successor_task_id: Mapped[str] = mapped_column(
-        ForeignKey("tasks.task_id", ondelete="RESTRICT")
-    )
+    successor_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="RESTRICT"))
     successor_user_message_id: Mapped[str] = mapped_column(
         ForeignKey("conversation_messages.message_id", ondelete="RESTRICT")
     )
@@ -1575,9 +1529,7 @@ class WorkspaceCodingExplorationSnapshotRecord(Base):
     )
 
     snapshot_id: Mapped[str] = mapped_column(String(68), primary_key=True)
-    source_task_id: Mapped[str] = mapped_column(
-        ForeignKey("tasks.task_id", ondelete="RESTRICT")
-    )
+    source_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="RESTRICT"))
     source_user_message_id: Mapped[str] = mapped_column(
         ForeignKey("conversation_messages.message_id", ondelete="RESTRICT")
     )
@@ -1592,6 +1544,81 @@ class WorkspaceCodingExplorationSnapshotRecord(Base):
     truncated: Mapped[bool] = mapped_column(Boolean)
     manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
     snapshot_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WorkspaceCodingExplorerRunBindingRecord(Base):
+    """Immutable exact snapshot-to-Explorer Plan/Run/node binding."""
+
+    __tablename__ = "workspace_coding_explorer_run_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "contract_version = 1 AND plan_generation = 1",
+            name="ck_workspace_coding_explorer_run_generation",
+        ),
+        UniqueConstraint(
+            "snapshot_id",
+            name="uq_workspace_coding_explorer_run_snapshot",
+        ),
+        UniqueConstraint(
+            "source_task_id",
+            name="uq_workspace_coding_explorer_run_task",
+        ),
+        UniqueConstraint("run_id", name="uq_workspace_coding_explorer_run_run"),
+        UniqueConstraint(
+            "explorer_node_id",
+            name="uq_workspace_coding_explorer_run_node",
+        ),
+        UniqueConstraint(
+            "binding_digest",
+            name="uq_workspace_coding_explorer_run_digest",
+        ),
+        Index(
+            "ix_workspace_coding_explorer_run_created",
+            "source_task_id",
+            "created_at",
+        ),
+        ForeignKeyConstraint(
+            ["source_task_id", "contract_version"],
+            ["task_contract_versions.task_id", "task_contract_versions.version"],
+            name="fk_workspace_coding_explorer_run_contract",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["source_task_id", "plan_generation"],
+            ["task_plan_generations.task_id", "task_plan_generations.generation"],
+            name="fk_workspace_coding_explorer_run_plan",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    binding_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "workspace_coding_exploration_snapshots.snapshot_id",
+            ondelete="RESTRICT",
+        )
+    )
+    snapshot_digest: Mapped[str] = mapped_column(String(64))
+    source_task_id: Mapped[str] = mapped_column(String(40))
+    contract_version: Mapped[int] = mapped_column(Integer)
+    contract_digest: Mapped[str] = mapped_column(String(64))
+    plan_generation: Mapped[int] = mapped_column(Integer)
+    plan_id: Mapped[str] = mapped_column(String(68))
+    plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="RESTRICT")
+    )
+    explorer_node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="RESTRICT")
+    )
+    explorer_node_spec_digest: Mapped[str] = mapped_column(String(64))
+    explorer_agent_id: Mapped[str] = mapped_column(String(128))
+    explorer_agent_version: Mapped[str] = mapped_column(String(32))
+    explorer_agent_contract_digest: Mapped[str] = mapped_column(String(64))
+    explorer_prompt_package_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    binding_digest: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -1632,14 +1659,80 @@ class WorkspaceCodingExplorationProposalRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class WorkspaceCodingExplorerTurnProofRecord(Base):
+    """Immutable succeeded Invocation/Model Turn proof for one proposal."""
+
+    __tablename__ = "workspace_coding_explorer_turn_proofs"
+    __table_args__ = (
+        UniqueConstraint(
+            "proposal_id",
+            name="uq_workspace_coding_explorer_turn_proposal",
+        ),
+        UniqueConstraint(
+            "run_binding_id",
+            name="uq_workspace_coding_explorer_turn_run_binding",
+        ),
+        UniqueConstraint(
+            "invocation_id",
+            name="uq_workspace_coding_explorer_turn_invocation",
+        ),
+        UniqueConstraint(
+            "turn_id",
+            name="uq_workspace_coding_explorer_turn_turn",
+        ),
+        UniqueConstraint(
+            "agent_decision_id",
+            name="uq_workspace_coding_explorer_turn_decision",
+        ),
+        UniqueConstraint(
+            "proof_digest",
+            name="uq_workspace_coding_explorer_turn_digest",
+        ),
+        Index(
+            "ix_workspace_coding_explorer_turn_created",
+            "created_at",
+        ),
+    )
+
+    proof_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "workspace_coding_exploration_proposals.proposal_id",
+            ondelete="RESTRICT",
+        )
+    )
+    proposal_digest: Mapped[str] = mapped_column(String(64))
+    run_binding_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "workspace_coding_explorer_run_bindings.binding_id",
+            ondelete="RESTRICT",
+        )
+    )
+    run_binding_digest: Mapped[str] = mapped_column(String(64))
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="RESTRICT")
+    )
+    turn_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_model_turns.turn_id", ondelete="RESTRICT")
+    )
+    agent_decision_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_decisions.decision_id", ondelete="RESTRICT")
+    )
+    agent_decision_digest: Mapped[str] = mapped_column(String(64))
+    model_request_digest: Mapped[str] = mapped_column(String(64))
+    model_response_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    proof_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class WorkspaceCodingFileSetPlanBindingRecord(Base):
     """Atomic explicit confirmation to successor Contract/Plan generation lineage."""
 
     __tablename__ = "workspace_coding_file_set_plan_bindings"
     __table_args__ = (
         CheckConstraint(
-            "contract_version = 1 AND plan_generation = 1 "
-            "AND file_count BETWEEN 2 AND 8",
+            "contract_version = 1 AND plan_generation = 1 AND file_count BETWEEN 2 AND 8",
             name="ck_workspace_coding_file_set_plan_scope",
         ),
         UniqueConstraint(
@@ -1724,15 +1817,9 @@ class TaskLoopCapabilityApprovalRecord(Base):
             "consumed_at IS NOT NULL AND result_digest IS NOT NULL)",
             name="ck_task_loop_capability_approval_lifecycle",
         ),
-        UniqueConstraint(
-            "execution_id", "node_id", name="uq_task_loop_capability_approval_node"
-        ),
-        UniqueConstraint(
-            "attempt_id", name="uq_task_loop_capability_approval_attempt"
-        ),
-        UniqueConstraint(
-            "approval_digest", name="uq_task_loop_capability_approval_digest"
-        ),
+        UniqueConstraint("execution_id", "node_id", name="uq_task_loop_capability_approval_node"),
+        UniqueConstraint("attempt_id", name="uq_task_loop_capability_approval_attempt"),
+        UniqueConstraint("approval_digest", name="uq_task_loop_capability_approval_digest"),
         Index(
             "ix_task_loop_capability_approvals_pending",
             "task_id",
@@ -1745,9 +1832,7 @@ class TaskLoopCapabilityApprovalRecord(Base):
     execution_id: Mapped[str] = mapped_column(
         ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
     )
-    task_id: Mapped[str] = mapped_column(
-        ForeignKey("tasks.task_id", ondelete="CASCADE")
-    )
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
     run_id: Mapped[str] = mapped_column(
         ForeignKey("task_execution_runs.run_id", ondelete="RESTRICT")
     )
@@ -1770,12 +1855,8 @@ class TaskLoopCapabilityApprovalRecord(Base):
     requested_execution_revision: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16))
     revision: Mapped[int] = mapped_column(Integer)
-    approved_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    consumed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     result_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
     approval_digest: Mapped[str] = mapped_column(String(64))
@@ -1802,9 +1883,7 @@ class TaskLoopCycleEventRecord(Base):
             "(sequence > 1 AND previous_event_digest IS NOT NULL)",
             name="ck_task_loop_cycle_event_chain_root",
         ),
-        UniqueConstraint(
-            "execution_id", "sequence", name="uq_task_loop_cycle_event_sequence"
-        ),
+        UniqueConstraint("execution_id", "sequence", name="uq_task_loop_cycle_event_sequence"),
         UniqueConstraint("event_digest", name="uq_task_loop_cycle_event_digest"),
         UniqueConstraint(
             "execution_id",
@@ -1833,13 +1912,9 @@ class TaskLoopCycleEventRecord(Base):
     execution_id: Mapped[str] = mapped_column(
         ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
     )
-    task_id: Mapped[str] = mapped_column(
-        ForeignKey("tasks.task_id", ondelete="CASCADE")
-    )
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
     sequence: Mapped[int] = mapped_column(Integer)
-    previous_event_digest: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
+    previous_event_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     kind: Mapped[str] = mapped_column(String(32))
     plan_generation: Mapped[int] = mapped_column(Integer)
     source_progress_digest: Mapped[str] = mapped_column(String(64))
@@ -1848,9 +1923,7 @@ class TaskLoopCycleEventRecord(Base):
     evidence_digest: Mapped[str] = mapped_column(String(64))
     manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
     event_digest: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class TurnRouteRecord(Base):
@@ -1954,19 +2027,11 @@ class TurnRouteRecord(Base):
     resolution_rule: Mapped[str | None] = mapped_column(String(64), nullable=True)
     resolution_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     turn_planner_run_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
-    turn_planning_reservation_digest: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
-    turn_planning_adjudication_id: Mapped[str | None] = mapped_column(
-        String(68), nullable=True
-    )
+    turn_planning_reservation_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    turn_planning_adjudication_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
     turn_plan_binding_id: Mapped[str | None] = mapped_column(String(68), nullable=True)
-    turn_plan_binding_digest: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
-    turn_planning_provenance_digest: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
+    turn_plan_binding_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    turn_planning_provenance_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reason_code: Mapped[str] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(32))
     result_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -2595,7 +2660,7 @@ class AgentDecisionRecord(Base):
     __table_args__ = (
         CheckConstraint(
             "kind IN ('request_route', 'submit_result', 'needs_user_input', "
-            "'propose_handoff', 'propose_task_graph')",
+            "'propose_handoff', 'propose_task_graph', 'propose_file_set')",
             name="ck_agent_decision_kind",
         ),
     )

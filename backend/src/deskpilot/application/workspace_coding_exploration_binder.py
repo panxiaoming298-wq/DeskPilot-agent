@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from deskpilot.application.agent_registry import AgentRegistry, AgentRegistryError
+from deskpilot.application.agent_registry import AgentRegistry
 from deskpilot.application.capability_catalog import CapabilityCatalog
 from deskpilot.application.plan_compilation_service import (
     PlanCompilationService,
@@ -26,21 +26,33 @@ from deskpilot.application.workspace_coding_runtime import (
 )
 from deskpilot.application.workspace_file_runtime import WorkspaceFileError
 from deskpilot.core.canonical_json import sha256_digest
-from deskpilot.domain.agent_contracts import BoundAgentRef
+from deskpilot.domain.agent_runtime import AgentOutputResult
 from deskpilot.domain.workspace_coding_explorations import (
     WorkspaceCodingExplorationDecision,
     WorkspaceCodingExplorationProposal,
     WorkspaceCodingExplorationSnapshot,
     WorkspaceCodingExplorationWorkbenchRead,
+    WorkspaceCodingExplorerRunBinding,
+    WorkspaceCodingExplorerTurnProof,
     WorkspaceCodingFileSetNodeMapping,
     WorkspaceCodingFileSetPlanBinding,
 )
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
+    AgentDecisionRecord,
+    AgentInvocationRecord,
+    AgentModelTurnRecord,
+    AgentResultRecord,
     ConversationMessageRecord,
+    TaskContractVersionRecord,
+    TaskExecutionNodeRecord,
+    TaskExecutionRunRecord,
+    TaskPlanGenerationRecord,
     TaskRecord,
     WorkspaceCodingExplorationProposalRecord,
     WorkspaceCodingExplorationSnapshotRecord,
+    WorkspaceCodingExplorerRunBindingRecord,
+    WorkspaceCodingExplorerTurnProofRecord,
     WorkspaceCodingFileSetPlanBindingRecord,
 )
 
@@ -49,9 +61,7 @@ class WorkspaceCodingExplorationBindingError(RuntimeError):
     code = "WORKSPACE_CODING_EXPLORATION_BINDING_ERROR"
 
 
-class WorkspaceCodingExplorationNotFoundError(
-    WorkspaceCodingExplorationBindingError
-):
+class WorkspaceCodingExplorationNotFoundError(WorkspaceCodingExplorationBindingError):
     code = "WORKSPACE_CODING_EXPLORATION_NOT_FOUND"
 
 
@@ -59,9 +69,7 @@ class WorkspaceCodingExplorationConflictError(WorkspaceCodingExplorationBindingE
     code = "WORKSPACE_CODING_EXPLORATION_CONFLICT"
 
 
-class WorkspaceCodingExplorationProofRejectedError(
-    WorkspaceCodingExplorationBindingError
-):
+class WorkspaceCodingExplorationProofRejectedError(WorkspaceCodingExplorationBindingError):
     code = "WORKSPACE_CODING_EXPLORATION_PROOF_REJECTED"
 
 
@@ -103,8 +111,7 @@ class WorkspaceCodingExplorationBinder:
             assert task is not None and message is not None and message.content is not None
             existing = await session.scalar(
                 select(WorkspaceCodingExplorationSnapshotRecord).where(
-                    WorkspaceCodingExplorationSnapshotRecord.source_task_id
-                    == task_id
+                    WorkspaceCodingExplorationSnapshotRecord.source_task_id == task_id
                 )
             )
             if existing is not None:
@@ -125,10 +132,7 @@ class WorkspaceCodingExplorationBinder:
             async with self._database.session() as session, session.begin():
                 existing = await session.scalar(
                     select(WorkspaceCodingExplorationSnapshotRecord)
-                    .where(
-                        WorkspaceCodingExplorationSnapshotRecord.source_task_id
-                        == task_id
-                    )
+                    .where(WorkspaceCodingExplorationSnapshotRecord.source_task_id == task_id)
                     .with_for_update()
                 )
                 if existing is not None:
@@ -148,8 +152,7 @@ class WorkspaceCodingExplorationBinder:
                     locked_message is None
                     or locked_message.message_digest != snapshot.user_message_digest
                     or locked_task is None
-                    or sha256_digest({"objective": locked_task.goal})
-                    != snapshot.objective_digest
+                    or sha256_digest({"objective": locked_task.goal}) != snapshot.objective_digest
                 ):
                     raise WorkspaceCodingExplorationProofRejectedError(
                         "Exploration source changed before snapshot persistence"
@@ -169,71 +172,12 @@ class WorkspaceCodingExplorationBinder:
         snapshot_id: str,
         decision: WorkspaceCodingExplorationDecision,
     ) -> WorkspaceCodingExplorationProposal:
-        """Accept only canonical paths already present in the exact current snapshot."""
+        """Reject the removed unverified ingress; use the persistent Explorer runtime."""
 
-        snapshot = await self.get_snapshot(snapshot_id=snapshot_id)
-        self._assert_current_snapshot(snapshot)
-        try:
-            registration = self._agents.resolve_exact(
-                "builtin.workspace_coding_explorer",
-                "1.0.0",
-            )
-        except AgentRegistryError as error:
-            raise WorkspaceCodingExplorationProofRejectedError(
-                "Exact Workspace Explorer Agent is unavailable"
-            ) from error
-        explorer = BoundAgentRef(
-            agent_id=registration.contract.agent_id,
-            version=registration.contract.version,
-            contract_digest=registration.contract.digest,
-            prompt_package_digest=registration.prompt_package.digest,
+        del snapshot_id, decision
+        raise WorkspaceCodingExplorationProofRejectedError(
+            "Explorer proposals require a verified persistent Invocation/Model Turn"
         )
-        self._assert_decision(snapshot, decision)
-        proposal = WorkspaceCodingExplorationProposal.build(
-            snapshot_id=snapshot.snapshot_id,
-            snapshot_digest=snapshot.snapshot_digest,
-            explorer_agent=explorer,
-            decision=decision,
-            created_at=self._now(),
-        )
-        try:
-            async with self._database.session() as session, session.begin():
-                record = await session.scalar(
-                    select(WorkspaceCodingExplorationSnapshotRecord)
-                    .where(
-                        WorkspaceCodingExplorationSnapshotRecord.snapshot_id
-                        == snapshot.snapshot_id
-                    )
-                    .with_for_update()
-                )
-                if record is None or self._snapshot_from_record(record) != snapshot:
-                    raise WorkspaceCodingExplorationProofRejectedError(
-                        "Exploration snapshot changed before proposal persistence"
-                    )
-                existing = await session.scalar(
-                    select(WorkspaceCodingExplorationProposalRecord)
-                    .where(
-                        WorkspaceCodingExplorationProposalRecord.snapshot_id
-                        == snapshot.snapshot_id
-                    )
-                    .with_for_update()
-                )
-                if existing is not None:
-                    persisted = self._proposal_from_record(existing)
-                    if persisted.proposal_id != proposal.proposal_id:
-                        raise WorkspaceCodingExplorationConflictError(
-                            "Snapshot already has another Explorer proposal"
-                        )
-                    return persisted
-                session.add(self._proposal_record(proposal))
-        except IntegrityError:
-            persisted = await self.get_proposal(snapshot_id=snapshot.snapshot_id)
-            if persisted.proposal_id == proposal.proposal_id:
-                return persisted
-            raise WorkspaceCodingExplorationConflictError(
-                "Concurrent Explorer proposal did not converge"
-            ) from None
-        return await self.get_proposal(snapshot_id=snapshot.snapshot_id)
 
     async def confirm(
         self,
@@ -287,24 +231,21 @@ class WorkspaceCodingExplorationBinder:
                 snapshot_record = await session.scalar(
                     select(WorkspaceCodingExplorationSnapshotRecord)
                     .where(
-                        WorkspaceCodingExplorationSnapshotRecord.snapshot_id
-                        == snapshot.snapshot_id
+                        WorkspaceCodingExplorationSnapshotRecord.snapshot_id == snapshot.snapshot_id
                     )
                     .with_for_update()
                 )
                 proposal_record = await session.scalar(
                     select(WorkspaceCodingExplorationProposalRecord)
                     .where(
-                        WorkspaceCodingExplorationProposalRecord.proposal_id
-                        == proposal.proposal_id
+                        WorkspaceCodingExplorationProposalRecord.proposal_id == proposal.proposal_id
                     )
                     .with_for_update()
                 )
                 existing = await session.scalar(
                     select(WorkspaceCodingFileSetPlanBindingRecord)
                     .where(
-                        WorkspaceCodingFileSetPlanBindingRecord.proposal_id
-                        == proposal.proposal_id
+                        WorkspaceCodingFileSetPlanBindingRecord.proposal_id == proposal.proposal_id
                     )
                     .with_for_update()
                 )
@@ -405,8 +346,7 @@ class WorkspaceCodingExplorationBinder:
                 message is None
                 or task is None
                 or message.message_digest != snapshot.user_message_digest
-                or sha256_digest({"objective": task.goal})
-                != snapshot.objective_digest
+                or sha256_digest({"objective": task.goal}) != snapshot.objective_digest
             ):
                 raise WorkspaceCodingExplorationProofRejectedError(
                     "Exploration snapshot crossed its persisted source"
@@ -451,6 +391,183 @@ class WorkspaceCodingExplorationBinder:
                 raise WorkspaceCodingExplorationProofRejectedError(
                     "Explorer proposal crossed its persisted snapshot"
                 )
+            turn_proof_record = await session.scalar(
+                select(WorkspaceCodingExplorerTurnProofRecord).where(
+                    WorkspaceCodingExplorerTurnProofRecord.proposal_id == proposal.proposal_id
+                )
+            )
+            if turn_proof_record is None:
+                raise WorkspaceCodingExplorationProofRejectedError(
+                    "Explorer proposal has no succeeded persistent Model Turn proof"
+                )
+            try:
+                proof = WorkspaceCodingExplorerTurnProof.model_validate(turn_proof_record.manifest)
+            except ValidationError as error:
+                raise WorkspaceCodingExplorationProofRejectedError(
+                    "Persisted Explorer Model Turn proof is invalid"
+                ) from error
+            run_binding_record = await session.get(
+                WorkspaceCodingExplorerRunBindingRecord,
+                proof.run_binding_id,
+            )
+            invocation = await session.get(AgentInvocationRecord, proof.invocation_id)
+            turn = await session.get(AgentModelTurnRecord, proof.turn_id)
+            agent_decision = await session.get(
+                AgentDecisionRecord,
+                proof.agent_decision_id,
+            )
+            result = (
+                await session.get(AgentResultRecord, invocation.result_id)
+                if invocation is not None and invocation.result_id is not None
+                else None
+            )
+            if run_binding_record is None:
+                raise WorkspaceCodingExplorationProofRejectedError(
+                    "Explorer proposal lost its persistent Run binding"
+                )
+            try:
+                run_binding = WorkspaceCodingExplorerRunBinding.model_validate(
+                    run_binding_record.manifest
+                )
+            except ValidationError as error:
+                raise WorkspaceCodingExplorationProofRejectedError(
+                    "Persisted Explorer Run binding is invalid"
+                ) from error
+            contract_record = await session.get(
+                TaskContractVersionRecord,
+                (
+                    run_binding.task_contract.task_id,
+                    run_binding.task_contract.version,
+                ),
+            )
+            plan_record = await session.get(
+                TaskPlanGenerationRecord,
+                (
+                    run_binding.expected_plan.task_id,
+                    run_binding.expected_plan.plan_generation,
+                ),
+            )
+            run_record = await session.get(TaskExecutionRunRecord, run_binding.run_id)
+            explorer_node = await session.get(
+                TaskExecutionNodeRecord,
+                run_binding.explorer_node_id,
+            )
+            try:
+                result_envelope = (
+                    AgentOutputResult.model_validate(result.manifest)
+                    if result is not None
+                    else None
+                )
+            except ValidationError as error:
+                raise WorkspaceCodingExplorationProofRejectedError(
+                    "Persisted Explorer Agent Result is invalid"
+                ) from error
+            expected_agent_decision_digest = (
+                sha256_digest(
+                    {
+                        "turn_id": turn.turn_id,
+                        "invocation_id": turn.invocation_id,
+                        "decision": agent_decision.manifest,
+                        "response_digest": turn.response_digest,
+                    }
+                )
+                if turn is not None and agent_decision is not None
+                else None
+            )
+            if (
+                turn_proof_record.proof_id != proof.proof_id
+                or turn_proof_record.proposal_id != proof.proposal_id
+                or turn_proof_record.proposal_digest != proof.proposal_digest
+                or turn_proof_record.run_binding_id != proof.run_binding_id
+                or turn_proof_record.run_binding_digest != proof.run_binding_digest
+                or turn_proof_record.invocation_id != proof.invocation_id
+                or turn_proof_record.turn_id != proof.turn_id
+                or turn_proof_record.agent_decision_id != proof.agent_decision_id
+                or turn_proof_record.agent_decision_digest != proof.agent_decision_digest
+                or turn_proof_record.model_request_digest != proof.model_request_digest
+                or turn_proof_record.model_response_digest != proof.model_response_digest
+                or turn_proof_record.proof_digest != proof.proof_digest
+                or self._aware(turn_proof_record.created_at) != proof.created_at
+                or proof.proposal_id != proposal.proposal_id
+                or proof.proposal_digest != proposal.proposal_digest
+                or proof.run_binding_digest != run_binding.binding_digest
+                or run_binding_record.binding_id != run_binding.binding_id
+                or run_binding_record.snapshot_id != run_binding.snapshot_id
+                or run_binding_record.snapshot_digest != run_binding.snapshot_digest
+                or run_binding_record.source_task_id != run_binding.task_contract.task_id
+                or run_binding_record.contract_version != run_binding.task_contract.version
+                or run_binding_record.contract_digest != run_binding.task_contract_digest
+                or run_binding_record.plan_generation != run_binding.expected_plan.plan_generation
+                or run_binding_record.plan_id != run_binding.expected_plan.plan_id
+                or run_binding_record.plan_manifest_digest
+                != run_binding.expected_plan_manifest_digest
+                or run_binding_record.run_id != run_binding.run_id
+                or run_binding_record.explorer_node_id != run_binding.explorer_node_id
+                or run_binding_record.explorer_node_spec_digest
+                != run_binding.explorer_node_spec_digest
+                or run_binding_record.explorer_agent_id != run_binding.explorer_agent.agent_id
+                or run_binding_record.explorer_agent_version != run_binding.explorer_agent.version
+                or run_binding_record.explorer_agent_contract_digest
+                != run_binding.explorer_agent.contract_digest
+                or run_binding_record.explorer_prompt_package_digest
+                != run_binding.explorer_agent.prompt_package_digest
+                or run_binding_record.binding_digest != run_binding.binding_digest
+                or self._aware(run_binding_record.created_at) != run_binding.created_at
+                or run_binding.snapshot_id != snapshot.snapshot_id
+                or run_binding.snapshot_digest != snapshot.snapshot_digest
+                or run_binding.explorer_agent != proposal.explorer_agent
+                or invocation is None
+                or invocation.run_id != run_binding.run_id
+                or invocation.node_id != run_binding.explorer_node_id
+                or invocation.execution_status != "result_submitted"
+                or invocation.verification_status != "verified"
+                or invocation.agent_id != run_binding.explorer_agent.agent_id
+                or invocation.agent_version != run_binding.explorer_agent.version
+                or invocation.agent_contract_digest != run_binding.explorer_agent.contract_digest
+                or invocation.prompt_package_digest
+                != run_binding.explorer_agent.prompt_package_digest
+                or turn is None
+                or turn.invocation_id != invocation.invocation_id
+                or turn.status != "succeeded"
+                or turn.request_digest != proof.model_request_digest
+                or turn.response_digest != proof.model_response_digest
+                or agent_decision is None
+                or agent_decision.turn_id != turn.turn_id
+                or agent_decision.invocation_id != invocation.invocation_id
+                or agent_decision.binding_id != run_binding.binding_id
+                or agent_decision.kind != "propose_file_set"
+                or agent_decision.manifest != proposal.decision.model_dump(mode="json")
+                or agent_decision.decision_digest != proof.agent_decision_digest
+                or agent_decision.decision_digest != expected_agent_decision_digest
+                or contract_record is None
+                or contract_record.contract_digest != run_binding.task_contract_digest
+                or contract_record.manifest != run_binding.task_contract.model_dump(mode="json")
+                or plan_record is None
+                or plan_record.status != "active"
+                or plan_record.plan_manifest_digest != run_binding.expected_plan_manifest_digest
+                or plan_record.manifest != run_binding.expected_plan.model_dump(mode="json")
+                or run_record is None
+                or run_record.task_id != run_binding.task_contract.task_id
+                or run_record.plan_generation != run_binding.expected_plan.plan_generation
+                or run_record.plan_digest != run_binding.expected_plan_manifest_digest
+                or run_record.status != "succeeded"
+                or explorer_node is None
+                or explorer_node.run_id != run_binding.run_id
+                or explorer_node.node_spec_digest != run_binding.explorer_node_spec_digest
+                or explorer_node.status != "verified"
+                or result is None
+                or result_envelope is None
+                or result.result_digest != result_envelope.result_digest
+                or result_envelope.invocation_id != invocation.invocation_id
+                or result_envelope.output != proposal.decision.model_dump(mode="json")
+                or result_envelope.input_digest != proof.model_request_digest
+                or result_envelope.model_response_digest != proof.model_response_digest
+                or f"workspace-explorer-turn:{proof.proof_digest}"
+                not in result_envelope.evidence_refs
+            ):
+                raise WorkspaceCodingExplorationProofRejectedError(
+                    "Explorer proposal crossed its Invocation/Model Turn proof"
+                )
             return proposal
 
     async def get_binding(
@@ -484,10 +601,7 @@ class WorkspaceCodingExplorationBinder:
             for item in contracts.contracts
             if item.contract.version == binding.task_contract.version
         )
-        if (
-            contract_matches != (binding.task_contract,)
-            or plan.plan != binding.expected_plan
-        ):
+        if contract_matches != (binding.task_contract,) or plan.plan != binding.expected_plan:
             raise WorkspaceCodingExplorationProofRejectedError(
                 "Confirmed file-set planning evidence crossed its binding"
             )
@@ -506,8 +620,19 @@ class WorkspaceCodingExplorationBinder:
                 )
             )
             proposal_record: WorkspaceCodingExplorationProposalRecord | None = None
+            run_binding_record: WorkspaceCodingExplorerRunBindingRecord | None = None
+            turn_proof_record: WorkspaceCodingExplorerTurnProofRecord | None = None
+            explorer_run_record: TaskExecutionRunRecord | None = None
+            explorer_invocation_record: AgentInvocationRecord | None = None
+            explorer_turn_record: AgentModelTurnRecord | None = None
             binding_record: WorkspaceCodingFileSetPlanBindingRecord | None = None
             if snapshot_record is not None:
+                run_binding_record = await session.scalar(
+                    select(WorkspaceCodingExplorerRunBindingRecord).where(
+                        WorkspaceCodingExplorerRunBindingRecord.snapshot_id
+                        == snapshot_record.snapshot_id
+                    )
+                )
                 proposal_record = await session.scalar(
                     select(WorkspaceCodingExplorationProposalRecord).where(
                         WorkspaceCodingExplorationProposalRecord.snapshot_id
@@ -515,6 +640,12 @@ class WorkspaceCodingExplorationBinder:
                     )
                 )
                 if proposal_record is not None:
+                    turn_proof_record = await session.scalar(
+                        select(WorkspaceCodingExplorerTurnProofRecord).where(
+                            WorkspaceCodingExplorerTurnProofRecord.proposal_id
+                            == proposal_record.proposal_id
+                        )
+                    )
                     binding_record = await session.scalar(
                         select(WorkspaceCodingFileSetPlanBindingRecord).where(
                             WorkspaceCodingFileSetPlanBindingRecord.proposal_id
@@ -524,8 +655,7 @@ class WorkspaceCodingExplorationBinder:
             else:
                 binding_record = await session.scalar(
                     select(WorkspaceCodingFileSetPlanBindingRecord).where(
-                        WorkspaceCodingFileSetPlanBindingRecord.successor_task_id
-                        == task_id
+                        WorkspaceCodingFileSetPlanBindingRecord.successor_task_id == task_id
                     )
                 )
                 if binding_record is not None:
@@ -538,10 +668,56 @@ class WorkspaceCodingExplorationBinder:
                             WorkspaceCodingExplorationSnapshotRecord,
                             proposal_record.snapshot_id,
                         )
+                        run_binding_record = await session.scalar(
+                            select(WorkspaceCodingExplorerRunBindingRecord).where(
+                                WorkspaceCodingExplorerRunBindingRecord.snapshot_id
+                                == proposal_record.snapshot_id
+                            )
+                        )
+                        turn_proof_record = await session.scalar(
+                            select(WorkspaceCodingExplorerTurnProofRecord).where(
+                                WorkspaceCodingExplorerTurnProofRecord.proposal_id
+                                == proposal_record.proposal_id
+                            )
+                        )
+            if run_binding_record is not None:
+                explorer_run_record = await session.get(
+                    TaskExecutionRunRecord,
+                    run_binding_record.run_id,
+                )
+                explorer_invocation_record = await session.scalar(
+                    select(AgentInvocationRecord)
+                    .where(
+                        AgentInvocationRecord.run_id == run_binding_record.run_id,
+                        AgentInvocationRecord.node_id == run_binding_record.explorer_node_id,
+                    )
+                    .order_by(AgentInvocationRecord.attempt.desc())
+                    .limit(1)
+                )
+                if explorer_invocation_record is not None:
+                    explorer_turn_record = await session.scalar(
+                        select(AgentModelTurnRecord)
+                        .where(
+                            AgentModelTurnRecord.invocation_id
+                            == explorer_invocation_record.invocation_id
+                        )
+                        .order_by(AgentModelTurnRecord.turn_no.desc())
+                        .limit(1)
+                    )
         if snapshot_record is None:
             return None
         snapshot = await self.get_snapshot(snapshot_id=snapshot_record.snapshot_id)
         self._assert_current_snapshot(snapshot)
+        run_binding = (
+            WorkspaceCodingExplorerRunBinding.model_validate(run_binding_record.manifest)
+            if run_binding_record is not None
+            else None
+        )
+        turn_proof = (
+            WorkspaceCodingExplorerTurnProof.model_validate(turn_proof_record.manifest)
+            if turn_proof_record is not None
+            else None
+        )
         proposal = (
             await self.get_proposal(proposal_id=proposal_record.proposal_id)
             if proposal_record is not None
@@ -554,12 +730,21 @@ class WorkspaceCodingExplorationBinder:
         )
         phase: Literal[
             "snapshot_ready",
+            "explorer_ready",
+            "explorer_blocked",
             "proposal_ready",
             "confirmed_read_only_plan",
         ] = (
             "confirmed_read_only_plan"
             if binding is not None
-            else "proposal_ready" if proposal is not None else "snapshot_ready"
+            else "proposal_ready"
+            if proposal is not None
+            else "explorer_blocked"
+            if explorer_turn_record is not None
+            and explorer_turn_record.status in {"failed", "outcome_unknown"}
+            else "explorer_ready"
+            if run_binding is not None
+            else "snapshot_ready"
         )
         material = {
             "schema_version": "deskpilot.workspace-coding-exploration-workbench.v1",
@@ -572,21 +757,39 @@ class WorkspaceCodingExplorationBinder:
             "test_path": snapshot.test_path,
             "catalog_file_count": len(snapshot.files),
             "catalog_truncated": snapshot.truncated,
-            "proposal_id": proposal.proposal_id if proposal is not None else None,
-            "proposal_digest": (
-                proposal.proposal_digest if proposal is not None else None
+            "explorer_run_binding_id": (
+                run_binding.binding_id if run_binding is not None else None
             ),
+            "explorer_run_binding_digest": (
+                run_binding.binding_digest if run_binding is not None else None
+            ),
+            "explorer_run_id": run_binding.run_id if run_binding is not None else None,
+            "explorer_run_status": (
+                explorer_run_record.status if explorer_run_record is not None else None
+            ),
+            "explorer_invocation_id": (
+                explorer_invocation_record.invocation_id
+                if explorer_turn_record is not None and explorer_invocation_record is not None
+                else None
+            ),
+            "explorer_turn_id": (
+                explorer_turn_record.turn_id if explorer_turn_record is not None else None
+            ),
+            "explorer_turn_status": (
+                explorer_turn_record.status if explorer_turn_record is not None else None
+            ),
+            "explorer_turn_proof_digest": (
+                turn_proof.proof_digest if turn_proof is not None else None
+            ),
+            "proposal_id": proposal.proposal_id if proposal is not None else None,
+            "proposal_digest": (proposal.proposal_digest if proposal is not None else None),
             "candidates": proposal.decision.files if proposal is not None else (),
             "confirmation_text": (
-                f"确认候选文件集：{proposal.proposal_id}"
-                if proposal is not None
-                else None
+                f"确认候选文件集：{proposal.proposal_id}" if proposal is not None else None
             ),
             "binding_id": binding.binding_id if binding is not None else None,
             "binding_digest": binding.binding_digest if binding is not None else None,
-            "successor_task_id": (
-                binding.successor_task_id if binding is not None else None
-            ),
+            "successor_task_id": (binding.successor_task_id if binding is not None else None),
             "plan_generation": (
                 binding.expected_plan.plan_generation if binding is not None else None
             ),
@@ -624,6 +827,14 @@ class WorkspaceCodingExplorationBinder:
                 "Workspace exploration catalog drifted"
             )
 
+    def revalidate_snapshot(
+        self,
+        snapshot: WorkspaceCodingExplorationSnapshot,
+    ) -> None:
+        """Fail closed when the persisted snapshot no longer matches disk metadata."""
+
+        self._assert_current_snapshot(snapshot)
+
     @staticmethod
     def _assert_decision(
         snapshot: WorkspaceCodingExplorationSnapshot,
@@ -639,13 +850,19 @@ class WorkspaceCodingExplorationBinder:
         catalog = {item.relative_path: item for item in snapshot.files}
         for candidate in decision.files:
             source = catalog.get(candidate.relative_path)
-            if (
-                source is None
-                or candidate.source_file_proof_digest != source.proof_digest
-            ):
+            if source is None or candidate.source_file_proof_digest != source.proof_digest:
                 raise WorkspaceCodingExplorationProofRejectedError(
                     "Explorer candidate path or file proof is not in the snapshot"
                 )
+
+    def validate_decision(
+        self,
+        snapshot: WorkspaceCodingExplorationSnapshot,
+        decision: WorkspaceCodingExplorationDecision,
+    ) -> None:
+        """Validate one untrusted decision against the exact server snapshot."""
+
+        self._assert_decision(snapshot, decision)
 
     @staticmethod
     def _assert_binding_proposal(
@@ -653,12 +870,10 @@ class WorkspaceCodingExplorationBinder:
         proposal: WorkspaceCodingExplorationProposal,
     ) -> None:
         expected = tuple(
-            (item.relative_path, item.source_file_proof_digest)
-            for item in proposal.decision.files
+            (item.relative_path, item.source_file_proof_digest) for item in proposal.decision.files
         )
         actual = tuple(
-            (item.relative_path, item.source_file_proof_digest)
-            for item in binding.mappings
+            (item.relative_path, item.source_file_proof_digest) for item in binding.mappings
         )
         if (
             binding.proposal_id != proposal.proposal_id
@@ -777,6 +992,14 @@ class WorkspaceCodingExplorationBinder:
             proposal_digest=proposal.proposal_digest,
             created_at=proposal.created_at,
         )
+
+    @staticmethod
+    def proposal_record(
+        proposal: WorkspaceCodingExplorationProposal,
+    ) -> WorkspaceCodingExplorationProposalRecord:
+        """Build the normalized persistence row used by the verified Turn reducer."""
+
+        return WorkspaceCodingExplorationBinder._proposal_record(proposal)
 
     @staticmethod
     def _binding_record(

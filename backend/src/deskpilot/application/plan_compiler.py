@@ -994,9 +994,7 @@ def workspace_project_search_contract(
         criterion=AcceptanceCriterion(
             criterion_id="ac_workspace_project_search",
             kind=AcceptanceKind.OUTPUT_REQUIREMENT,
-            description=(
-                "结果绑定项目根、查询摘要、排序匹配、扫描边界与链接拒绝策略。"
-            ),
+            description=("结果绑定项目根、查询摘要、排序匹配、扫描边界与链接拒绝策略。"),
             verification_requirement=VerificationRequirement.DETERMINISTIC,
             origin="trusted_template",
         ),
@@ -1036,9 +1034,7 @@ def workspace_project_batch_read_contract(
     )
 
 
-def workspace_project_batch_read_draft(
-    task_id: str, contract_version: int = 1
-) -> DraftPlan:
+def workspace_project_batch_read_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
     return _direct_capability_draft(
         task_id,
         contract_version,
@@ -1051,9 +1047,7 @@ def workspace_project_batch_read_draft(
     )
 
 
-def workspace_git_inspect_contract(
-    task_id: str, capabilities: CapabilityCatalog
-) -> TaskContract:
+def workspace_git_inspect_contract(task_id: str, capabilities: CapabilityCatalog) -> TaskContract:
     return _direct_capability_contract(
         task_id,
         capabilities,
@@ -1062,9 +1056,7 @@ def workspace_git_inspect_contract(
         criterion=AcceptanceCriterion(
             criterion_id="ac_workspace_git_inspect",
             kind=AcceptanceKind.OUTPUT_REQUIREMENT,
-            description=(
-                "结果绑定仓库/HEAD/工具链摘要、固定操作、输出限制及关闭扩展证明。"
-            ),
+            description=("结果绑定仓库/HEAD/工具链摘要、固定操作、输出限制及关闭扩展证明。"),
             verification_requirement=VerificationRequirement.DETERMINISTIC,
             origin="trusted_template",
         ),
@@ -1109,9 +1101,7 @@ def workspace_command_profile_contract(
     )
 
 
-def workspace_command_profile_draft(
-    task_id: str, contract_version: int = 1
-) -> DraftPlan:
+def workspace_command_profile_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
     return _direct_capability_draft(
         task_id,
         contract_version,
@@ -1261,11 +1251,7 @@ def workspace_agent_patch_test_contract(
         "workspace.file.read.v1",
         "workspace.patch.propose.v1",
         "workspace.patch.bundle.v1",
-        (
-            "workspace.python.test.v1"
-            if test_kind == "python"
-            else "workspace.node.test.v1"
-        ),
+        ("workspace.python.test.v1" if test_kind == "python" else "workspace.node.test.v1"),
     )
     refs = tuple(
         CapabilityRef(
@@ -1329,18 +1315,14 @@ def workspace_agent_patch_test_contract(
     )
 
 
-def workspace_agent_patch_test_draft(
-    task_id: str, contract_version: int = 1
-) -> DraftPlan:
+def workspace_agent_patch_test_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
     return _direct_capability_draft(
         task_id,
         contract_version,
         producer_ref="workspace_agent_patch_test.v1",
         local_key="workspace_agent_patch_test",
         capability_id="workspace.patch.propose.v1",
-        objective=(
-            "读取服务器绑定文件，提出一次无授权精确替换，并等待用户确认后固定测试。"
-        ),
+        objective=("读取服务器绑定文件，提出一次无授权精确替换，并等待用户确认后固定测试。"),
         acceptance_ref="ac_workspace_agent_patch_test",
         verification_profile=VerificationProfile.DETERMINISTIC,
         agent_selector="builtin.workspace_patch_planner",
@@ -1366,11 +1348,7 @@ def workspace_dynamic_patch_test_contract(
         "workspace.file.read.v1",
         "workspace.patch.propose.v1",
         "workspace.patch.bundle.v1",
-        (
-            "workspace.python.test.v1"
-            if test_kind == "python"
-            else "workspace.node.test.v1"
-        ),
+        ("workspace.python.test.v1" if test_kind == "python" else "workspace.node.test.v1"),
     )
     material["normalized_objective"] = (
         "由受约束父 Agent 生成动态修复 DAG；每个 Patch 节点只能消费"
@@ -1426,9 +1404,7 @@ def workspace_dynamic_patch_test_contract(
     return TaskContract.model_validate(material)
 
 
-def workspace_dynamic_patch_test_draft(
-    task_id: str, contract_version: int = 1
-) -> DraftPlan:
+def workspace_dynamic_patch_test_draft(task_id: str, contract_version: int = 1) -> DraftPlan:
     base = workspace_directory_analyze_draft(task_id, contract_version)
     material = base.model_dump(mode="json")
     material["producer"] = {
@@ -1475,11 +1451,7 @@ def workspace_coding_loop_contract(
         "workspace.patch.propose.v1",
         "workspace.patch.bundle.v1",
         "workspace.git.commit.v1",
-        (
-            "workspace.python.test.v1"
-            if test_kind == "python"
-            else "workspace.node.test.v1"
-        ),
+        ("workspace.python.test.v1" if test_kind == "python" else "workspace.node.test.v1"),
     )
     refs = tuple(
         CapabilityRef(
@@ -1565,15 +1537,11 @@ def workspace_coding_loop_contract(
         budget=TaskBudget(
             max_model_calls=(5 if file_count == 2 else 1 + (2 * file_count)),
             max_tool_calls=(5 if file_count == 2 else file_count + 3),
-            max_input_tokens=(
-                56_000 if file_count == 2 else 12_000 + (12_001 * file_count)
-            ),
+            max_input_tokens=(56_000 if file_count == 2 else 12_000 + (12_001 * file_count)),
             max_output_tokens=workspace_coding_max_output_tokens(file_count),
             max_wall_seconds=(780 if file_count == 2 else 510 + (120 * file_count)),
             max_retries=1,
-            max_cost_micros=(
-                300_000 if file_count == 2 else 100_000 + (50_000 * file_count)
-            ),
+            max_cost_micros=(300_000 if file_count == 2 else 100_000 + (50_000 * file_count)),
             max_handoffs=0,
             max_plan_nodes=2 * file_count + 6,
         ),
@@ -1653,9 +1621,7 @@ def workspace_coding_loop_draft(
         handoffs=0,
     )
     test_capability = (
-        "workspace.python.test.v1"
-        if test_kind == "python"
-        else "workspace.node.test.v1"
+        "workspace.python.test.v1" if test_kind == "python" else "workspace.node.test.v1"
     )
     reader_nodes = tuple(
         DraftPlanNode(
@@ -1849,9 +1815,7 @@ def workspace_coding_file_set_contract(
             AcceptanceCriterion(
                 criterion_id="ac_workspace_confirmed_file_set",
                 kind=AcceptanceKind.OUTPUT_REQUIREMENT,
-                description=(
-                    f"恰好 {file_count} 个服务器绑定 Reader 都必须返回确定性版本证明。"
-                ),
+                description=(f"恰好 {file_count} 个服务器绑定 Reader 都必须返回确定性版本证明。"),
                 verification_requirement=VerificationRequirement.DETERMINISTIC,
                 origin="trusted_template",
             ),
@@ -1901,6 +1865,134 @@ def workspace_coding_file_set_contract(
     )
 
 
+def workspace_coding_explorer_contract(task_id: str) -> TaskContract:
+    """Zero-tool Contract for one snapshot-bound Explorer Model Turn."""
+
+    suffix = task_id.removeprefix("tsk_")
+    return TaskContract(
+        contract_id=f"tc_{suffix}",
+        task_id=task_id,
+        version=1,
+        goal_ref=f"artifact://task-input/{task_id}",
+        normalized_objective=(
+            "只从服务器封存的项目元数据快照提议 2～8 个候选文件；提议不授予"
+            "读取文件内容、Patch、测试、Git、Shell、网络或审批权限。"
+        ),
+        acceptance_criteria=(
+            AcceptanceCriterion(
+                criterion_id="ac_workspace_explorer_proposal",
+                kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+                description=("Explorer 必须返回恰好一个绑定 exact snapshot 的规范候选文件集。"),
+                verification_requirement=VerificationRequirement.DETERMINISTIC,
+                origin="trusted_template",
+            ),
+        ),
+        constraints=(
+            "workspace_exploration_snapshot_v1",
+            "server_bound_snapshot_only_v1",
+            "proposal_has_no_execution_authority",
+            "no_file_content_read",
+            "no_patch_authority",
+            "no_test_authority",
+            "no_git_authority",
+            "no_shell",
+            "no_network",
+            "no_dependency_install",
+            "no_automatic_push",
+        ),
+        privacy_policy=PrivacyPolicy(
+            classification="internal",
+            allowed_provider_locations=(ModelLocation.LOCAL,),
+            allowed_privacy_modes=("local_only", "local_preferred", "balanced"),
+            external_egress_allowed=False,
+        ),
+        max_risk_level=ToolRiskLevel.R0,
+        budget=TaskBudget(
+            max_model_calls=1,
+            max_tool_calls=0,
+            max_input_tokens=24_000,
+            max_output_tokens=2_000,
+            max_wall_seconds=90,
+            max_retries=0,
+            max_cost_micros=100_000,
+            max_handoffs=0,
+            max_plan_nodes=3,
+        ),
+        output_contract=OutputContract(
+            media_type="application/json",
+            language="zh-CN",
+        ),
+        capabilities=(),
+        created_by="trusted_template",
+    )
+
+
+def workspace_coding_explorer_draft(
+    task_id: str,
+    *,
+    contract_version: int = 1,
+) -> DraftPlan:
+    """Compile one persistent Explorer Invocation followed by trusted controls."""
+
+    zero = PlanNodeBudget(
+        model_calls=0,
+        tool_calls=0,
+        input_tokens=0,
+        output_tokens=0,
+        wall_seconds=15,
+        retries=0,
+        cost_micros=0,
+        handoffs=0,
+    )
+    return DraftPlan(
+        task_id=task_id,
+        contract_version=contract_version,
+        producer=PlanProducer(
+            kind="trusted_template",
+            producer_ref="workspace_coding_snapshot_explorer.v1",
+        ),
+        nodes=(
+            DraftPlanNode(
+                local_key="propose_file_set",
+                kind=DraftNodeKind.AGENT,
+                objective=(
+                    "消费服务器绑定的 exact snapshot 元数据，只提议 2～8 个候选路径；"
+                    "不得读取文件内容或申请任何执行权限。"
+                ),
+                agent_selector="builtin.workspace_coding_explorer",
+                acceptance_refs=("ac_workspace_explorer_proposal",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=PlanNodeBudget(
+                    model_calls=1,
+                    tool_calls=0,
+                    input_tokens=24_000,
+                    output_tokens=2_000,
+                    wall_seconds=60,
+                    retries=0,
+                    cost_micros=100_000,
+                    handoffs=0,
+                ),
+            ),
+            DraftPlanNode(
+                local_key="final_acceptance",
+                kind=DraftNodeKind.FINAL_ACCEPTANCE,
+                objective="确定性复核 Explorer decision 与 snapshot、Turn 证明完全一致。",
+                depends_on=("propose_file_set",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+            DraftPlanNode(
+                local_key="delivery",
+                kind=DraftNodeKind.DELIVERY,
+                objective="只投影未获授权的候选文件集并等待用户精确确认。",
+                depends_on=("final_acceptance",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+        ),
+    )
+
+
 def workspace_coding_file_set_draft(
     task_id: str,
     *,
@@ -1931,9 +2023,7 @@ def workspace_coding_file_set_draft(
         cost_micros=0,
         handoffs=0,
     )
-    reader_keys = tuple(
-        f"inspect_candidate_{index:02d}" for index in range(1, file_count + 1)
-    )
+    reader_keys = tuple(f"inspect_candidate_{index:02d}" for index in range(1, file_count + 1))
     return DraftPlan(
         task_id=task_id,
         contract_version=contract_version,

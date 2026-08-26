@@ -65,6 +65,10 @@ from deskpilot.domain.research import (
 from deskpilot.domain.task_plans import PlanNodeBudget
 from deskpilot.domain.tool_contracts import ToolRiskLevel
 from deskpilot.domain.turn_planning import TurnPlannerUnsupportedDecision
+from deskpilot.domain.workspace_coding_explorations import (
+    WorkspaceCodingExplorationCandidateFile,
+    WorkspaceCodingExplorationDecision,
+)
 
 TASK_CLASSIFICATION_SCHEMA = "task_classification"
 TASK_PLAN_SCHEMA = "task_plan"
@@ -79,6 +83,7 @@ WORKSPACE_BOUNDED_CODING_COORDINATOR_DECISION_SCHEMA = (
 )
 CITATION_VERIFICATION_DECISION_SCHEMA = "citation_verification_decision"
 TURN_PLANNER_DECISION_SCHEMA = "turn_planner_decision"
+WORKSPACE_CODING_EXPLORATION_DECISION_SCHEMA = "workspace_coding_exploration_decision"
 
 
 class FakeModelProvider:
@@ -225,8 +230,32 @@ class FakeModelProvider:
         if request.output_schema.name == TURN_PLANNER_DECISION_SCHEMA:
             # The default offline provider must never infer that selecting the first
             # capability offer is safe. Positive planner paths use explicit fixtures.
-            return TurnPlannerUnsupportedDecision(
-                kind="unsupported"
+            return TurnPlannerUnsupportedDecision(kind="unsupported").model_dump(mode="json")
+        if request.output_schema.name == WORKSPACE_CODING_EXPLORATION_DECISION_SCHEMA:
+            raw_files = request.metadata.get("workspace_exploration_files")
+            snapshot_id = request.metadata.get("workspace_exploration_snapshot_id")
+            snapshot_digest = request.metadata.get("workspace_exploration_snapshot_digest")
+            if (
+                not isinstance(raw_files, list)
+                or len(raw_files) < 2
+                or not isinstance(snapshot_id, str)
+                or not isinstance(snapshot_digest, str)
+            ):
+                raise ValueError("Fake Explorer fixture requires an exact snapshot")
+            selected = raw_files[:2]
+            return WorkspaceCodingExplorationDecision(
+                snapshot_id=snapshot_id,
+                snapshot_digest=snapshot_digest,
+                files=tuple(
+                    WorkspaceCodingExplorationCandidateFile(
+                        relative_path=str(item["relative_path"]),
+                        source_file_proof_digest=str(item["proof_digest"]),
+                        rationale=f"检查 {item['relative_path']}",
+                    )
+                    for item in selected
+                    if isinstance(item, dict)
+                ),
+                decision_summary="选择两个与目标相关的候选实现文件。",
             ).model_dump(mode="json")
         if request.output_schema.name == TASK_PLAN_SCHEMA:
             return TaskPlan(
@@ -461,25 +490,17 @@ class FakeModelProvider:
                     )
                 ).model_dump(mode="json"),
             )
-        if (
-            request.output_schema.name
-            == WORKSPACE_BOUNDED_CODING_COORDINATOR_DECISION_SCHEMA
-        ):
+        if request.output_schema.name == WORKSPACE_BOUNDED_CODING_COORDINATOR_DECISION_SCHEMA:
             capabilities = request.metadata.get("task_graph_allowed_capabilities")
             max_nodes = request.metadata.get("task_graph_max_nodes")
             if (
                 not isinstance(capabilities, list)
                 or not capabilities
-                or not all(
-                    isinstance(item, dict) and "local_key" in item
-                    for item in capabilities
-                )
+                or not all(isinstance(item, dict) and "local_key" in item for item in capabilities)
                 or not isinstance(max_nodes, int)
                 or len(capabilities) != max_nodes
             ):
-                raise ValueError(
-                    "Fake bounded coding fixture requires an exact server graph"
-                )
+                raise ValueError("Fake bounded coding fixture requires an exact server graph")
             return cast(
                 dict[str, JsonValue],
                 WorkspaceBoundedCodingCoordinatorDecision(
@@ -491,9 +512,7 @@ class FakeModelProvider:
                         output_node_key=str(
                             cast(dict[str, JsonValue], capabilities[-1])["local_key"]
                         ),
-                        decision_summary=(
-                            "确认服务器封存的多文件固定编码图，不扩展任何执行权限。"
-                        ),
+                        decision_summary=("确认服务器封存的多文件固定编码图，不扩展任何执行权限。"),
                     )
                 ).model_dump(mode="json"),
             )
@@ -506,10 +525,7 @@ class FakeModelProvider:
                 if (
                     isinstance(capabilities, list)
                     and capabilities
-                    and all(
-                        isinstance(item, dict) and "local_key" in item
-                        for item in capabilities
-                    )
+                    and all(isinstance(item, dict) and "local_key" in item for item in capabilities)
                     and isinstance(max_nodes, int)
                     and len(capabilities) == max_nodes
                 ):
@@ -522,9 +538,7 @@ class FakeModelProvider:
                                     for item in capabilities
                                 ),
                                 output_node_key=str(
-                                    cast(dict[str, JsonValue], capabilities[-1])[
-                                        "local_key"
-                                    ]
+                                    cast(dict[str, JsonValue], capabilities[-1])["local_key"]
                                 ),
                                 decision_summary=(
                                     "确认服务器封存的固定编码图，不扩展任何执行权限。"
@@ -562,9 +576,7 @@ class FakeModelProvider:
                 if patch_capability is not None:
                     raw_input_bindings = patch_capability.get("input_bindings")
                     input_bindings = (
-                        raw_input_bindings
-                        if isinstance(raw_input_bindings, list)
-                        else []
+                        raw_input_bindings if isinstance(raw_input_bindings, list) else []
                     )
                     if (
                         directory_capability is None
@@ -592,9 +604,9 @@ class FakeModelProvider:
                         if input_bindings
                         else [None]
                     )
-                    directory_source = cast(
-                        list[JsonValue], directory_capability["input_sources"]
-                    )[0]
+                    directory_source = cast(list[JsonValue], directory_capability["input_sources"])[
+                        0
+                    ]
                     patch_source = cast(list[JsonValue], patch_capability["input_sources"])[0]
                     shared_context = (str(context_refs[0]),)
                     graph_nodes: list[AgentTaskGraphNodeProposal] = [
@@ -627,11 +639,7 @@ class FakeModelProvider:
                         )
                         depends_on = (previous_key,)
                         conditions = (
-                            (
-                                AgentTaskGraphConditionProposal(
-                                    source_local_key=previous_key
-                                ),
-                            )
+                            (AgentTaskGraphConditionProposal(source_local_key=previous_key),)
                             if previous_key.startswith("patch_approval")
                             else ()
                         )
@@ -640,8 +648,7 @@ class FakeModelProvider:
                                 local_key=local_key,
                                 target_capability_id="workspace.patch.propose.v1",
                                 objective=(
-                                    "消费一个服务器签发的节点绑定，提出补丁并"
-                                    "独立等待确认。"
+                                    "消费一个服务器签发的节点绑定，提出补丁并独立等待确认。"
                                 ),
                                 context_refs=shared_context,
                                 input_source=cast(
@@ -681,9 +688,7 @@ class FakeModelProvider:
                             ),
                             depends_on=(previous_key,),
                             conditions=(
-                                AgentTaskGraphConditionProposal(
-                                    source_local_key=previous_key
-                                ),
+                                AgentTaskGraphConditionProposal(source_local_key=previous_key),
                             ),
                             budget_slice=PlanNodeBudget.model_validate(
                                 directory_capability["budget"]
@@ -697,8 +702,7 @@ class FakeModelProvider:
                                 nodes=tuple(graph_nodes),
                                 output_node_key="directory_output",
                                 decision_summary=(
-                                    "提出可组合节点级 Patch/Approval 与验证后"
-                                    "目录输出的受控 DAG。"
+                                    "提出可组合节点级 Patch/Approval 与验证后目录输出的受控 DAG。"
                                 ),
                             )
                         ).model_dump(mode="json"),

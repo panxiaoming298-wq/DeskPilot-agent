@@ -153,8 +153,7 @@ class AgentTaskGraphCapabilityInput(BaseModel):
                 raise ValueError("Legacy capability input contains a test binding")
         elif self.schema_version == "deskpilot.agent-task-graph-capability-input.v2" and (
             self.source_key not in {"route_python_test_spec", "route_node_test_spec"}
-            or
-            (
+            or (
                 self.source_key == "route_python_test_spec"
                 and (self.read_kind != "python_test" or self.test_path is None)
             )
@@ -198,9 +197,7 @@ class AgentTaskGraphCapabilityInput(BaseModel):
             raise ValueError("Legacy capability input contains a binding key")
         excluded = {"input_digest"}
         if self.schema_version == "deskpilot.agent-task-graph-capability-input.v1":
-            excluded.update(
-                {"test_path", "target_path", "test_kind", "objective", "binding_key"}
-            )
+            excluded.update({"test_path", "target_path", "test_kind", "objective", "binding_key"})
         elif self.schema_version == "deskpilot.agent-task-graph-capability-input.v2":
             excluded.update({"target_path", "test_kind", "objective", "binding_key"})
         elif self.schema_version == "deskpilot.agent-task-graph-capability-input.v3":
@@ -490,16 +487,12 @@ class AgentTaskGraphManifest(BaseModel):
             "deskpilot.agent-task-graph.v6",
             "deskpilot.agent-task-graph.v7",
             "deskpilot.agent-task-graph.v8",
-        } and any(
-            item.import_sources or item.imported_result_refs for item in self.nodes
-        ):
+        } and any(item.import_sources or item.imported_result_refs for item in self.nodes):
             raise ValueError("Legacy task graph contains cross-generation ResultRefs")
         if self.schema_version not in {
             "deskpilot.agent-task-graph.v7",
             "deskpilot.agent-task-graph.v8",
-        } and any(
-            item.conditions for item in self.nodes
-        ):
+        } and any(item.conditions for item in self.nodes):
             raise ValueError("Legacy task graph contains conditional edges")
         if self.schema_version != "deskpilot.agent-task-graph.v8" and any(
             item.approval_binding is not None for item in self.nodes
@@ -663,6 +656,7 @@ class AgentModelTurnRead(BaseModel):
             "needs_user_input",
             "propose_handoff",
             "propose_task_graph",
+            "propose_file_set",
         ]
         | None
     ) = None

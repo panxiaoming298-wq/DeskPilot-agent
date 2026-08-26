@@ -134,6 +134,9 @@ from deskpilot.application.workspace_check_runtime import WorkspaceCheckRuntime
 from deskpilot.application.workspace_coding_exploration_binder import (
     WorkspaceCodingExplorationBinder,
 )
+from deskpilot.application.workspace_coding_explorer_runtime import (
+    WorkspaceCodingExplorerRuntime,
+)
 from deskpilot.application.workspace_coding_runtime import WorkspaceCodingRuntime
 from deskpilot.application.workspace_command_plan_binder import WorkspaceCommandPlanBinder
 from deskpilot.application.workspace_command_plan_compiler import WorkspaceCommandPlanCompiler
@@ -422,6 +425,14 @@ def create_app(
             model_gateway,
             context_memory_runtime,
         )
+        workspace_coding_explorer_runtime = WorkspaceCodingExplorerRuntime(
+            database,
+            workspace_coding_explorations,
+            agent_registry,
+            plan_compilation_service,
+            agent_execution_runtime,
+            agent_model_loop_runtime,
+        )
         agent_supervisor_runtime = AgentSupervisorRuntime(
             database,
             agent_registry,
@@ -683,6 +694,7 @@ def create_app(
         app.state.workspace_file_runtime = workspace_file_runtime
         app.state.workspace_coding_runtime = workspace_coding_runtime
         app.state.workspace_coding_explorations = workspace_coding_explorations
+        app.state.workspace_coding_explorer_runtime = workspace_coding_explorer_runtime
         app.state.command_profile_catalog = command_profile_catalog
         app.state.workspace_command_runtime = workspace_command_runtime
         app.state.workspace_agent_runtime = workspace_agent_runtime
