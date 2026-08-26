@@ -364,7 +364,7 @@ def test_rejects_budget_domain_overflow_instead_of_clamping() -> None:
         composer.compose(TASK_ID, steps)
 
 
-def test_rejects_merged_structural_node_budget_over_twenty() -> None:
+def test_rejects_merged_structural_node_budget_over_twenty_four() -> None:
     composer, compiler, capabilities, planner, provider = _environment()
     routes = _routes(
         capabilities,
@@ -372,14 +372,17 @@ def test_rejects_merged_structural_node_budget_over_twenty() -> None:
         "workspace_dynamic_patch_test:node",
         "workspace_directory_list",
         "workspace_directory_analyze",
+        "workspace_agent_patch_test:python",
+        "workspace_agent_patch_test:node",
+        "workspace_file_read",
     )
     steps = tuple(
         _step(route, compiler=compiler, planner=planner, provider=provider) for route in routes
     )
     merged_node_budget = 2 + sum(step.route.contract.budget.max_plan_nodes - 2 for step in steps)
 
-    assert merged_node_budget == 22
-    with pytest.raises(ModelPlannerDomainLimitError, match="twenty nodes"):
+    assert merged_node_budget == 25
+    with pytest.raises(ModelPlannerDomainLimitError, match="twenty-four nodes"):
         composer.compose(TASK_ID, steps)
 
 

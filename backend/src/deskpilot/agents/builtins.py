@@ -30,6 +30,7 @@ from deskpilot.domain.agent_contracts import (
 from deskpilot.domain.agent_loop import (
     CoordinatorLoopDecision,
     DynamicCoordinatorLoopDecision,
+    WorkspaceBoundedCodingCoordinatorDecision,
     WorkspaceLoopDecision,
     WorkspacePatchLoopDecision,
 )
@@ -513,6 +514,44 @@ def create_builtin_agent_registry(
             ),
             input_model=AgentReferenceInput,
             output_model=DynamicCoordinatorLoopDecision,
+            prompt_package=dynamic_coordinator_prompt,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_bounded_coordinator",
+                version="1.0.0",
+                kind=AgentKind.SYNTHESIZER,
+                display_name="Bounded Workspace Coding Coordinator",
+                description=(
+                    "确认服务器预编译的 3～8 文件编码 DAG；不得创建路径、节点或权限。"
+                ),
+                provides=("workspace.dynamic.coordinate.v1",),
+                prompt=dynamic_coordinator_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(),
+                role=ModelRole.SUMMARIZER,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=2,
+                    max_tool_calls=0,
+                    max_input_tokens=12_000,
+                    max_output_tokens=2_000,
+                    max_wall_seconds=60,
+                    max_retries=0,
+                    max_cost_micros=100_000,
+                    max_handoffs=0,
+                ),
+                required_evidence=("server_sealed_bounded_coding_graph",),
+                output_model=WorkspaceBoundedCodingCoordinatorDecision,
+                allowed_sources=(
+                    "task_contract",
+                    "conversation_message",
+                ),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=WorkspaceBoundedCodingCoordinatorDecision,
             prompt_package=dynamic_coordinator_prompt,
         )
     )

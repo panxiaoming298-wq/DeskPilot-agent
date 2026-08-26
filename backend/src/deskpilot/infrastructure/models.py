@@ -1439,7 +1439,7 @@ class WorkspaceCodingDeliveryRecord(Base):
     __tablename__ = "workspace_coding_deliveries"
     __table_args__ = (
         CheckConstraint(
-            "changed_file_count = 2 AND test_run_count BETWEEN 1 AND 2 "
+            "changed_file_count BETWEEN 2 AND 8 AND test_run_count BETWEEN 1 AND 2 "
             "AND failure_count BETWEEN 0 AND 1",
             name="ck_workspace_coding_delivery_counts",
         ),

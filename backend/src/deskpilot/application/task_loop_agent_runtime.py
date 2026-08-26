@@ -17,7 +17,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
 from deskpilot.application.agent_model_loop import AgentModelLoopRuntime
 from deskpilot.application.agent_model_requests import (
+    build_bounded_coding_coordinator_model_request,
     build_dynamic_coordinator_model_request,
     build_patch_planner_model_request,
 )
@@ -44,13 +45,28 @@ from deskpilot.application.task_loop_agent_adapter_registry import (
     TaskLoopAgentAdapterRegistry,
 )
 from deskpilot.application.verified_edges import mark_verified_and_unlock
+from deskpilot.application.workspace_coding_graph import (
+    WORKSPACE_CODING_MAX_FILES,
+    WORKSPACE_CODING_MIN_FILES,
+    is_workspace_coding_planner_key,
+    is_workspace_coding_reader_key,
+    workspace_coding_file_count,
+    workspace_coding_graph_keys,
+    workspace_coding_parameter_for_key,
+    workspace_coding_path_parameter,
+    workspace_coding_planner_key,
+    workspace_coding_planner_keys,
+    workspace_coding_reader_key,
+    workspace_coding_reader_keys,
+)
 from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import BoundAgentRef
 from deskpilot.domain.agent_loop import (
     AgentProposeTaskGraphDecision,
-    AgentTaskGraphNodeProposal,
     DynamicCoordinatorLoopDecision,
+    WorkspaceBoundedCodingCoordinatorDecision,
+    WorkspaceBoundedCodingGraphDecision,
     WorkspacePatchLoopDecision,
     WorkspacePatchSubmitProposalDecision,
 )
@@ -113,6 +129,12 @@ AgentSourceParameter = Literal[
     "path",
     "primary_path",
     "secondary_path",
+    "file_03_path",
+    "file_04_path",
+    "file_05_path",
+    "file_06_path",
+    "file_07_path",
+    "file_08_path",
     "project_path",
 ]
 
@@ -529,8 +551,13 @@ class TaskLoopAgentRuntime:
         profile = self._profile(source.binding)
         if (
             profile.route_id != "workspace_coding_loop"
-            or profile.source_local_key != "coordinate_coding"
-            or profile.agent_id != "builtin.workspace_coordinator"
+            or profile.source_local_key
+            not in {"coordinate_coding", "coordinate_bounded_coding"}
+            or profile.agent_id
+            not in {
+                "builtin.workspace_coordinator",
+                "builtin.workspace_bounded_coordinator",
+            }
         ):
             raise TaskLoopAgentConflictError(
                 "Source-bound claim is not the coding Coordinator node"
@@ -558,33 +585,64 @@ class TaskLoopAgentRuntime:
             source.claimed.claim_owner_id,
             source.claimed.claim_fencing_token,
         )
-        request = build_dynamic_coordinator_model_request(
-            request_id=(
-                "task-loop-coordinate-"
-                f"{source.claimed.invocation.invocation_id[-20:]}"
-            ),
-            task_id=source.binding.task_id,
-            privacy_mode=cast(PrivacyMode, task.privacy_mode),
-            budget=source.claimed.handoff.budget_allocation,
-            phase="propose_task_graph",
-            offered_capabilities=[
-                cast(dict[str, object], item.model_dump(mode="json"))
-                for item in expected.nodes
-            ],
-            allowed_context_refs=("task_contract", "conversation_message"),
-            max_nodes=len(expected.nodes),
-            repair_advice=None,
-            import_sources=[],
+        request_id = (
+            "task-loop-coordinate-"
+            f"{source.claimed.invocation.invocation_id[-20:]}"
         )
-        dispatched = await self._model_loop.dispatch(
-            source.claimed,
-            turn_no=1,
-            request=request,
-            decision_model=DynamicCoordinatorLoopDecision,
+        privacy_mode = cast(PrivacyMode, task.privacy_mode)
+        offered_capabilities = [
+            cast(dict[str, object], item.model_dump(mode="json"))
+            for item in expected.nodes
+        ]
+        proposal: (
+            AgentProposeTaskGraphDecision
+            | WorkspaceBoundedCodingGraphDecision
+            | object
         )
-        proposal = cast(DynamicCoordinatorLoopDecision, dispatched.decision).root
+        if isinstance(expected, WorkspaceBoundedCodingGraphDecision):
+            request = build_bounded_coding_coordinator_model_request(
+                request_id=request_id,
+                task_id=source.binding.task_id,
+                privacy_mode=privacy_mode,
+                budget=source.claimed.handoff.budget_allocation,
+                offered_capabilities=offered_capabilities,
+                allowed_context_refs=("task_contract", "conversation_message"),
+            )
+            dispatched = await self._model_loop.dispatch(
+                source.claimed,
+                turn_no=1,
+                request=request,
+                decision_model=WorkspaceBoundedCodingCoordinatorDecision,
+            )
+            proposal = cast(
+                WorkspaceBoundedCodingCoordinatorDecision,
+                dispatched.decision,
+            ).root
+        else:
+            request = build_dynamic_coordinator_model_request(
+                request_id=request_id,
+                task_id=source.binding.task_id,
+                privacy_mode=privacy_mode,
+                budget=source.claimed.handoff.budget_allocation,
+                phase="propose_task_graph",
+                offered_capabilities=offered_capabilities,
+                allowed_context_refs=("task_contract", "conversation_message"),
+                max_nodes=len(expected.nodes),
+                repair_advice=None,
+                import_sources=[],
+            )
+            dispatched = await self._model_loop.dispatch(
+                source.claimed,
+                turn_no=1,
+                request=request,
+                decision_model=DynamicCoordinatorLoopDecision,
+            )
+            proposal = cast(DynamicCoordinatorLoopDecision, dispatched.decision).root
         if (
-            not isinstance(proposal, AgentProposeTaskGraphDecision)
+            not isinstance(
+                proposal,
+                (AgentProposeTaskGraphDecision, WorkspaceBoundedCodingGraphDecision),
+            )
             or proposal.nodes != expected.nodes
             or proposal.output_node_key != expected.output_node_key
         ):
@@ -642,7 +700,10 @@ class TaskLoopAgentRuntime:
     async def _coding_coordinator_context(
         self,
         source: SourceBoundAgentClaim,
-    ) -> tuple[TaskRecord, AgentProposeTaskGraphDecision]:
+    ) -> tuple[
+        TaskRecord,
+        AgentProposeTaskGraphDecision | WorkspaceBoundedCodingGraphDecision,
+    ]:
         async with self._database.session() as session:
             task = await session.get(TaskRecord, source.binding.task_id)
             record = await session.scalar(
@@ -671,15 +732,18 @@ class TaskLoopAgentRuntime:
     def _coding_proposal_from_plan(
         binding: ModelPlannerNodeBinding,
         plan: ExecutablePlan,
-    ) -> AgentProposeTaskGraphDecision:
-        keys = (
-            "inspect_primary",
-            "inspect_secondary",
-            "plan_primary_patch",
-            "plan_secondary_patch",
-            "apply_patch",
-            "run_fixed_test",
-            "commit_git",
+    ) -> AgentProposeTaskGraphDecision | WorkspaceBoundedCodingGraphDecision:
+        try:
+            file_count = workspace_coding_file_count(binding.bound_input_manifest)
+        except ValueError as error:
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Coordinator bounded file count changed"
+            ) from error
+        keys = workspace_coding_graph_keys(file_count)
+        coordinator_key = (
+            "coordinate_coding"
+            if file_count == WORKSPACE_CODING_MIN_FILES
+            else "coordinate_bounded_coding"
         )
         prefix = f"s{binding.step_ordinal:02d}_"
         by_key = {
@@ -687,16 +751,12 @@ class TaskLoopAgentRuntime:
             for item in plan.nodes
             if item.local_key.startswith(prefix)
         }
-        if set(keys) - set(by_key) or "coordinate_coding" not in by_key:
+        if set(keys) - set(by_key) or coordinator_key not in by_key:
             raise TaskLoopAgentProofRejectedError(
                 "Coding Coordinator fixed Plan nodes changed"
             )
         node_id_to_key = {item.node_id: key for key, item in by_key.items()}
         input_specs: dict[str, tuple[str, str]] = {
-            "inspect_primary": ("route_explicit_file_path", "primary_path"),
-            "inspect_secondary": ("route_explicit_file_path", "secondary_path"),
-            "plan_primary_patch": ("route_patch_test_spec", "primary_change"),
-            "plan_secondary_patch": ("route_patch_test_spec", "secondary_change"),
             "apply_patch": ("route_patch_test_spec", "patch_bundle"),
             "run_fixed_test": (
                 (
@@ -708,11 +768,24 @@ class TaskLoopAgentRuntime:
             ),
             "commit_git": ("route_patch_test_spec", "git_commit"),
         }
+        for index in range(1, file_count + 1):
+            parameter_name = workspace_coding_path_parameter(index)
+            input_specs[workspace_coding_reader_key(index)] = (
+                "route_explicit_file_path",
+                parameter_name,
+            )
+            planner_binding_key = (
+                "primary_change"
+                if index == 1
+                else "secondary_change"
+                if index == 2
+                else f"file_{index:02d}_change"
+            )
+            input_specs[workspace_coding_planner_key(index)] = (
+                "route_patch_test_spec",
+                planner_binding_key,
+            )
         expected_capabilities = {
-            "inspect_primary": "workspace.file.read.v1",
-            "inspect_secondary": "workspace.file.read.v1",
-            "plan_primary_patch": "workspace.patch.propose.v1",
-            "plan_secondary_patch": "workspace.patch.propose.v1",
             "apply_patch": "workspace.patch.bundle.v1",
             "run_fixed_test": (
                 "workspace.python.test.v1"
@@ -721,12 +794,27 @@ class TaskLoopAgentRuntime:
             ),
             "commit_git": "workspace.git.commit.v1",
         }
+        expected_capabilities.update(
+            {
+                key: "workspace.file.read.v1"
+                for key in workspace_coding_reader_keys(file_count)
+            }
+        )
+        expected_capabilities.update(
+            {
+                key: "workspace.patch.propose.v1"
+                for key in workspace_coding_planner_keys(file_count)
+            }
+        )
         expected_dependencies: dict[str, tuple[str, ...]] = {
-            "inspect_primary": (),
-            "inspect_secondary": (),
-            "plan_primary_patch": ("inspect_primary",),
-            "plan_secondary_patch": ("inspect_secondary",),
-            "apply_patch": ("plan_primary_patch", "plan_secondary_patch"),
+            **{key: () for key in workspace_coding_reader_keys(file_count)},
+            **{
+                workspace_coding_planner_key(index): (
+                    workspace_coding_reader_key(index),
+                )
+                for index in range(1, file_count + 1)
+            },
+            "apply_patch": workspace_coding_planner_keys(file_count),
             "run_fixed_test": ("apply_patch",),
             "commit_git": ("run_fixed_test",),
         }
@@ -734,7 +822,7 @@ class TaskLoopAgentRuntime:
             raise TaskLoopAgentProofRejectedError(
                 "Coding Coordinator fixed test ecosystem changed"
             )
-        proposals: list[AgentTaskGraphNodeProposal] = []
+        proposals: list[dict[str, object]] = []
         known = set(keys)
         for key in keys:
             node = by_key[key]
@@ -757,28 +845,41 @@ class TaskLoopAgentRuntime:
                     "Coding Coordinator downstream Capability or dependency changed"
                 )
             proposals.append(
-                AgentTaskGraphNodeProposal(
-                    local_key=key,
-                    target_capability_id=node.capability.capability_id,
-                    objective=node.objective,
-                    context_refs=("task_contract", "conversation_message"),
-                    input_source=cast(Any, input_source),
-                    input_binding_key=binding_key,
-                    depends_on=expected_dependencies[key],
-                    budget_slice=node.budget,
-                )
+                {
+                    "local_key": key,
+                    "target_capability_id": node.capability.capability_id,
+                    "objective": node.objective,
+                    "context_refs": ("task_contract", "conversation_message"),
+                    "input_source": input_source,
+                    "input_binding_key": binding_key,
+                    "depends_on": expected_dependencies[key],
+                    "budget_slice": node.budget,
+                }
             )
-        return AgentProposeTaskGraphDecision(
-            nodes=tuple(proposals),
-            output_node_key="commit_git",
-            decision_summary="Confirm the exact server-sealed coding graph.",
+        decision_model = (
+            AgentProposeTaskGraphDecision
+            if file_count == WORKSPACE_CODING_MIN_FILES
+            else WorkspaceBoundedCodingGraphDecision
+        )
+        return decision_model.model_validate(
+            {
+                "schema_version": (
+                    "deskpilot.agent-decision.v1"
+                    if file_count == WORKSPACE_CODING_MIN_FILES
+                    else "deskpilot.agent-decision.v2"
+                ),
+                "kind": "propose_task_graph",
+                "nodes": proposals,
+                "output_node_key": "commit_git",
+                "decision_summary": "Confirm the exact server-sealed coding graph.",
+            }
         )
 
     async def _verify_coding_coordinator_result(
         self,
         source: SourceBoundAgentClaim,
         result: AgentOutputResult,
-        expected: AgentProposeTaskGraphDecision,
+        expected: AgentProposeTaskGraphDecision | WorkspaceBoundedCodingGraphDecision,
         *,
         graph_binding_id: str,
         graph_digest: str,
@@ -817,7 +918,7 @@ class TaskLoopAgentRuntime:
                 )
             turn, decision = turns[0], decisions[0]
             try:
-                proposal = AgentProposeTaskGraphDecision.model_validate(decision.manifest)
+                proposal = type(expected).model_validate(decision.manifest)
             except ValidationError as error:
                 raise TaskLoopAgentProofRejectedError(
                     "Coding Coordinator decision Schema was rejected"
@@ -858,7 +959,7 @@ class TaskLoopAgentRuntime:
     @staticmethod
     def _coding_coordinator_agent_result(
         source: SourceBoundAgentClaim,
-        proposal: AgentProposeTaskGraphDecision,
+        proposal: AgentProposeTaskGraphDecision | WorkspaceBoundedCodingGraphDecision,
         *,
         graph_digest: str,
         decision_id: str,
@@ -888,7 +989,7 @@ class TaskLoopAgentRuntime:
             "input_digest": request_digest,
             "model_response_digest": response_digest,
             "output_schema_digest": sha256_digest(
-                AgentProposeTaskGraphDecision.model_json_schema()
+                type(proposal).model_json_schema()
             ),
         }
         return AgentOutputResult.model_validate(
@@ -904,8 +1005,7 @@ class TaskLoopAgentRuntime:
         profile = self._profile(source.binding)
         if (
             profile.route_id != "workspace_coding_loop"
-            or profile.source_local_key
-            not in {"plan_primary_patch", "plan_secondary_patch"}
+            or not is_workspace_coding_planner_key(profile.source_local_key)
             or profile.agent_id != "builtin.workspace_patch_planner"
         ):
             raise TaskLoopAgentConflictError(
@@ -1258,9 +1358,15 @@ class TaskLoopAgentRuntime:
             raise TaskLoopAgentProofRejectedError(
                 "Coding Patch Planner change Offer is invalid JSON"
             ) from error
-        if not isinstance(changes, list) or len(changes) != 2:
+        try:
+            file_count = workspace_coding_file_count(binding.bound_input_manifest)
+        except ValueError as error:
             raise TaskLoopAgentProofRejectedError(
-                "Coding Patch Planner requires exactly two offered changes"
+                "Coding Patch Planner file count is invalid"
+            ) from error
+        if not isinstance(changes, list) or len(changes) != file_count:
+            raise TaskLoopAgentProofRejectedError(
+                "Coding Patch Planner requires the exact bounded change count"
             )
         matches: list[dict[str, str]] = []
         for item in changes:
@@ -1389,7 +1495,10 @@ class TaskLoopAgentRuntime:
                             verification_proof.evidence_snapshot.snapshot_digest
                         ),
                     }
-                elif profile.agent_id == "builtin.workspace_coordinator":
+                elif profile.agent_id in {
+                    "builtin.workspace_coordinator",
+                    "builtin.workspace_bounded_coordinator",
+                }:
                     expected_proposal = self._coding_proposal_from_plan(
                         binding,
                         composite_plan,
@@ -2612,17 +2721,22 @@ class TaskLoopAgentRuntime:
         parameter_values = {
             item.parameter_name: item.value for item in binding.parameter_bindings
         }
-        fixed_names = (
-            {"test_kind"}
-            if profile.route_id == "workspace_coding_loop"
-            else set()
-        )
+        fixed_names: set[str] = set()
+        if profile.route_id == "workspace_coding_loop":
+            fixed_names.add("test_kind")
+            if "file_count" in values:
+                fixed_names.add("file_count")
         if (
             set(values) != set(parameter_values) | fixed_names
             or any(values.get(name) != value for name, value in parameter_values.items())
             or (
                 fixed_names
                 and values.get("test_kind") not in {"python", "node"}
+            )
+            or (
+                "file_count" in fixed_names
+                and values.get("file_count")
+                not in {str(item) for item in range(3, WORKSPACE_CODING_MAX_FILES + 1)}
             )
         ):
             raise TaskLoopAgentProofRejectedError(
@@ -2714,6 +2828,37 @@ class TaskLoopAgentRuntime:
                 binding.mapping.source_local_key,
             )
         )
+        if profile is None and binding.recipe.route_id == "workspace_coding_loop":
+            local_key = binding.mapping.source_local_key
+            if local_key == "coordinate_bounded_coding":
+                profile = _AgentProfile(
+                    route_id="workspace_coding_loop",
+                    source_local_key=local_key,
+                    parameter_name="project_path",
+                    agent_id="builtin.workspace_bounded_coordinator",
+                    capability_id="workspace.dynamic.coordinate.v1",
+                )
+            else:
+                parameter_name = workspace_coding_parameter_for_key(local_key)
+                if parameter_name is not None and parameter_name not in {
+                    "primary_path",
+                    "secondary_path",
+                }:
+                    profile = _AgentProfile(
+                        route_id="workspace_coding_loop",
+                        source_local_key=local_key,
+                        parameter_name=cast(AgentSourceParameter, parameter_name),
+                        agent_id=(
+                            "builtin.workspace_reader"
+                            if is_workspace_coding_reader_key(local_key)
+                            else "builtin.workspace_patch_planner"
+                        ),
+                        capability_id=(
+                            "workspace.file.read.v1"
+                            if is_workspace_coding_reader_key(local_key)
+                            else "workspace.patch.propose.v1"
+                        ),
+                    )
         if profile is None:
             raise TaskLoopAgentProofRejectedError(
                 "Agent source Route is not activated by stage 112B"
@@ -2727,8 +2872,9 @@ class TaskLoopAgentRuntime:
             and source.binding.mapping.source_local_key == "workspace_file_read"
         ) or (
             source.route_id == "workspace_coding_loop"
-            and source.binding.mapping.source_local_key
-            in {"inspect_primary", "inspect_secondary"}
+            and is_workspace_coding_reader_key(
+                source.binding.mapping.source_local_key
+            )
         )
 
     @staticmethod

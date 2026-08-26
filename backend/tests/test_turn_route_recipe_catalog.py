@@ -66,7 +66,7 @@ def test_offers_are_precompiled_and_test_kind_is_server_fixed() -> None:
         capabilities=create_builtin_capability_catalog(research_runtime_enabled=True),
     )
 
-    assert len(offers) == 28
+    assert len(offers) == 40
     assert len({item.variant_key for item in offers}) == len(offers)
     assert len({item.recipe_digest for item in offers}) == len(offers)
     assert all(item.contract.task_id == task_id for item in offers)
@@ -81,13 +81,26 @@ def test_offers_are_precompiled_and_test_kind_is_server_fixed() -> None:
         ("workspace_agent_patch_test:node", "node"),
     }
     coding_variants = {
-        (item.variant_key, item.fixed_parameters.get("test_kind"))
+        (
+            item.variant_key,
+            item.fixed_parameters.get("test_kind"),
+            item.fixed_parameters.get("file_count", "2"),
+        )
         for item in offers
         if item.route_id == "workspace_coding_loop"
     }
     assert coding_variants == {
-        ("workspace_coding_loop:python", "python"),
-        ("workspace_coding_loop:node", "node"),
+        (
+            (
+                f"workspace_coding_loop:{test_kind}"
+                if file_count == 2
+                else f"workspace_coding_loop:{test_kind}:{file_count}"
+            ),
+            test_kind,
+            str(file_count),
+        )
+        for test_kind in ("python", "node")
+        for file_count in range(2, 9)
     }
     command_variants = {
         (item.variant_key, item.fixed_parameters.get("command_profile_id"))

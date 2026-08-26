@@ -6,6 +6,7 @@ from pydantic import JsonValue
 
 from deskpilot.domain.agent_loop import (
     DynamicCoordinatorLoopDecision,
+    WorkspaceBoundedCodingCoordinatorDecision,
     WorkspacePatchLoopDecision,
 )
 from deskpilot.domain.model_contracts import (
@@ -241,4 +242,44 @@ def build_dynamic_coordinator_model_request(
             "task_graph_id": graph_id,
             "task_graph_observation_digest": observation_digest,
         },
+    )
+
+
+def build_bounded_coding_coordinator_model_request(
+    *,
+    request_id: str,
+    task_id: str,
+    privacy_mode: PrivacyMode,
+    budget: PlanNodeBudget,
+    offered_capabilities: list[dict[str, object]],
+    allowed_context_refs: tuple[str, ...],
+) -> ModelRequest:
+    """Build the distinct 3..8-file Coordinator request without changing v1.1."""
+
+    base = build_dynamic_coordinator_model_request(
+        request_id=request_id,
+        task_id=task_id,
+        privacy_mode=privacy_mode,
+        budget=budget,
+        phase="propose_task_graph",
+        offered_capabilities=offered_capabilities,
+        allowed_context_refs=allowed_context_refs,
+        max_nodes=len(offered_capabilities),
+        repair_advice=None,
+        import_sources=[],
+    )
+    return base.model_copy(
+        update={
+            "output_schema": StructuredOutputDefinition.from_model(
+                name="workspace_bounded_coding_coordinator_decision",
+                description="One exact server-sealed 3..8-file coding DAG confirmation",
+                model=WorkspaceBoundedCodingCoordinatorDecision,
+                strict=True,
+            ),
+            "metadata": {
+                **base.metadata,
+                "agent_id": "builtin.workspace_bounded_coordinator",
+                "agent_version": "1.0.0",
+            },
+        }
     )

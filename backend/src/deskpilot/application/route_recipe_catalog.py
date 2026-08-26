@@ -52,6 +52,14 @@ from deskpilot.application.plan_compiler import (
     workspace_snapshot_check_contract,
     workspace_snapshot_check_draft,
 )
+from deskpilot.application.workspace_coding_graph import (
+    WORKSPACE_CODING_MAX_FILES,
+    WORKSPACE_CODING_MIN_FILES,
+    workspace_coding_file_count,
+    workspace_coding_fixed_parameters,
+    workspace_coding_path_parameter,
+    workspace_coding_variant_key,
+)
 from deskpilot.core.canonical_json import canonical_json_bytes, sha256_digest
 from deskpilot.domain.command_profiles import COMMAND_PROFILE_IDS
 from deskpilot.domain.task_plans import DraftPlan, TaskContract
@@ -427,7 +435,19 @@ class RouteRecipeCatalog:
             test_kind = draft.fixed_parameters.get("test_kind")
             if test_kind not in {"python", "node"}:
                 raise RouteRecipeError("Coding-loop Offer lacks its fixed test kind")
-            return f"{operational.objective} Fixed test ecosystem: {test_kind}."
+            try:
+                file_count = workspace_coding_file_count(draft.fixed_parameters)
+            except ValueError as error:
+                raise RouteRecipeError("Coding-loop Offer file count is invalid") from error
+            count_description = (
+                ""
+                if file_count == WORKSPACE_CODING_MIN_FILES
+                else f" Fixed file count: {file_count}."
+            )
+            return (
+                f"{operational.objective}{count_description} "
+                f"Fixed test ecosystem: {test_kind}."
+            )
         if draft.route_id != "workspace_command_profile":
             return operational.objective
         profile_id = draft.fixed_parameters.get("command_profile_id")
@@ -438,6 +458,61 @@ class RouteRecipeCatalog:
     @staticmethod
     def parameter_specs(route_id: RouteId) -> tuple[RouteParameterSpec, ...]:
         return _PARAMETERS[route_id]
+
+    @classmethod
+    def parameter_specs_for_variant(
+        cls,
+        route_id: RouteId,
+        fixed_parameters: Mapping[str, str],
+    ) -> tuple[RouteParameterSpec, ...]:
+        specs = cls.parameter_specs(route_id)
+        if route_id != "workspace_coding_loop":
+            return specs
+        try:
+            file_count = workspace_coding_file_count(fixed_parameters)
+        except ValueError as error:
+            raise RouteRecipeError("Coding-loop Offer file count is invalid") from error
+        if file_count == WORKSPACE_CODING_MIN_FILES:
+            return specs
+        return (
+            *specs,
+            *(
+                RouteParameterSpec(workspace_coding_path_parameter(index))
+                for index in range(3, file_count + 1)
+            ),
+        )
+
+    @classmethod
+    def variant_manifest(
+        cls,
+        route_id: RouteId,
+        variant_key: str,
+        fixed_parameters: Mapping[str, str],
+    ) -> dict[str, object]:
+        """Build one exact Offer manifest without changing legacy two-file bytes."""
+
+        manifest: dict[str, object] = {
+            **cls.manifest(route_id, cls.planner_version),
+            "variant_key": variant_key,
+            "fixed_parameters": dict(fixed_parameters),
+        }
+        if route_id == "workspace_coding_loop":
+            try:
+                file_count = workspace_coding_file_count(fixed_parameters)
+            except ValueError as error:
+                raise RouteRecipeError("Coding-loop Offer file count is invalid") from error
+            if file_count > WORKSPACE_CODING_MIN_FILES:
+                manifest["bounded_graph"] = {
+                    "schema_version": "deskpilot.workspace-coding-bounded-graph.v1",
+                    "file_count": file_count,
+                    "path_parameters": [
+                        workspace_coding_path_parameter(index)
+                        for index in range(1, file_count + 1)
+                    ],
+                    "reader_parallel_limit": min(2, file_count),
+                    "planner_parallel_limit": min(2, file_count),
+                }
+        return manifest
 
     @classmethod
     def offers_for(
@@ -463,12 +538,24 @@ class RouteRecipeCatalog:
             elif route_id in {
                 "workspace_agent_patch_test",
                 "workspace_dynamic_patch_test",
-                "workspace_coding_loop",
             }:
                 variants.extend(
                     (
                         (route_id, f"{route_id}:python", {"test_kind": "python"}),
                         (route_id, f"{route_id}:node", {"test_kind": "node"}),
+                    )
+                )
+            elif route_id == "workspace_coding_loop":
+                variants.extend(
+                    (
+                        route_id,
+                        workspace_coding_variant_key(test_kind, file_count),
+                        workspace_coding_fixed_parameters(test_kind, file_count),
+                    )
+                    for test_kind in ("python", "node")
+                    for file_count in range(
+                        WORKSPACE_CODING_MIN_FILES,
+                        WORKSPACE_CODING_MAX_FILES + 1,
                     )
                 )
             else:
@@ -488,11 +575,7 @@ class RouteRecipeCatalog:
                 for item in contract.capabilities
             ):
                 continue
-            manifest = {
-                **cls.manifest(route_id, cls.planner_version),
-                "variant_key": variant_key,
-                "fixed_parameters": fixed_parameters,
-            }
+            manifest = cls.variant_manifest(route_id, variant_key, fixed_parameters)
             result.append(
                 RouteOfferDraft(
                     variant_key=variant_key,
@@ -502,7 +585,10 @@ class RouteRecipeCatalog:
                     recipe_digest=sha256_digest(manifest),
                     parameter_specs=tuple(
                         item
-                        for item in cls.parameter_specs(route_id)
+                        for item in cls.parameter_specs_for_variant(
+                            route_id,
+                            fixed_parameters,
+                        )
                         if item.name not in fixed_parameters
                     ),
                     fixed_parameters=dict(fixed_parameters),
@@ -563,7 +649,7 @@ class RouteRecipeCatalog:
         fixed_parameters: Mapping[str, str] | None = None,
     ) -> tuple[dict[str, str], dict[str, object], str]:
         fixed = dict(fixed_parameters or {})
-        specs = cls.parameter_specs(route_id)
+        specs = cls.parameter_specs_for_variant(route_id, fixed)
         by_name = {item.name: item for item in specs}
         if set(proposed) - set(by_name) or set(proposed).intersection(fixed):
             raise RouteRecipeError("Turn proposal contains an unknown parameter")
@@ -676,11 +762,20 @@ class RouteRecipeCatalog:
             ), workspace_command_profile_draft(task_id)
         if route_id == "workspace_coding_loop":
             test_kind = cast(Literal["python", "node"], params["test_kind"])
+            try:
+                file_count = workspace_coding_file_count(params)
+            except ValueError as error:
+                raise RouteRecipeError("Coding-loop file count is invalid") from error
             return workspace_coding_loop_contract(
                 task_id,
                 capabilities,
                 test_kind=test_kind,
-            ), workspace_coding_loop_draft(task_id, test_kind=test_kind)
+                file_count=file_count,
+            ), workspace_coding_loop_draft(
+                task_id,
+                test_kind=test_kind,
+                file_count=file_count,
+            )
         if route_id == "workspace_file_replace":
             return workspace_file_replace_contract(
                 task_id, capabilities
@@ -732,7 +827,22 @@ class RouteRecipeCatalog:
             parameters=parameters,
             capabilities=capabilities,
         )
-        manifest = cls.manifest(route_id, cls.planner_version)
+        if route_id == "workspace_coding_loop":
+            file_count = workspace_coding_file_count(parameters)
+            variant_key = workspace_coding_variant_key(
+                parameters["test_kind"],
+                file_count,
+            )
+            manifest = cls.variant_manifest(
+                route_id,
+                variant_key,
+                workspace_coding_fixed_parameters(
+                    parameters["test_kind"],
+                    file_count,
+                ),
+            )
+        else:
+            manifest = cls.manifest(route_id, cls.planner_version)
         return CompiledRouteRecipe(
             route_id=route_id,
             route_version=cls.planner_version,
@@ -775,12 +885,16 @@ class RouteRecipeCatalog:
                 raise RouteRecipeError("Project batch-read paths are invalid")
         if route_id == "workspace_coding_loop":
             try:
+                file_count = workspace_coding_file_count(parameters)
+            except ValueError as error:
+                raise RouteRecipeError("Coding-loop file count is invalid") from error
+            try:
                 changes = json.loads(parameters["changes_json"])
             except (KeyError, TypeError, json.JSONDecodeError) as error:
                 raise RouteRecipeError("Coding-loop Patch changes are not valid JSON") from error
             if (
                 not isinstance(changes, list)
-                or len(changes) != 2
+                or len(changes) != file_count
                 or any(
                     not isinstance(item, dict)
                     or set(item) != {"path", "old_text", "new_text"}
@@ -792,14 +906,28 @@ class RouteRecipeCatalog:
             paths = [str(item["path"]) for item in changes]
             if len(paths) != len(set(paths)):
                 raise RouteRecipeError("Coding-loop Patch paths must be unique")
-            primary_path = parameters["primary_path"]
-            secondary_path = parameters["secondary_path"]
+            path_parameter_names = tuple(
+                workspace_coding_path_parameter(index)
+                for index in range(1, file_count + 1)
+            )
+            if any(name not in parameters for name in path_parameter_names):
+                raise RouteRecipeError(
+                    "Coding-loop Patch has no exact Reader path mapping"
+                )
             project_path = parameters["project_path"]
             test_path = parameters["test_path"]
-            bound_paths = {primary_path, secondary_path}
-            if len(bound_paths) != 2 or set(paths) != bound_paths:
+            bound_path_sequence = tuple(parameters[name] for name in path_parameter_names)
+            bound_paths = set(bound_path_sequence)
+            paths_match = (
+                set(paths) == bound_paths
+                if file_count == WORKSPACE_CODING_MIN_FILES
+                else tuple(paths) == bound_path_sequence
+            )
+            if len(bound_paths) != file_count or not paths_match:
                 raise RouteRecipeError(
                     "Coding-loop Patch paths must exactly match both Reader paths"
+                    if file_count == WORKSPACE_CODING_MIN_FILES
+                    else "Coding-loop Patch paths must exactly match every Reader mapping"
                 )
             project = RouteRecipeCatalog._relative_path(project_path, allow_dot=True)
             for value in (*bound_paths, *paths):

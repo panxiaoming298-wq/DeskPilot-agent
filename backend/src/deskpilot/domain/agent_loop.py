@@ -205,6 +205,70 @@ class AgentProposeTaskGraphDecision(BaseModel):
         return self
 
 
+class WorkspaceBoundedCodingGraphNodeProposal(AgentTaskGraphNodeProposal):
+    """A coding-only node whose Patch join may consume all eight planners."""
+
+    depends_on: tuple[str, ...] = Field(default=(), max_length=8)
+
+
+class WorkspaceBoundedCodingGraphDecision(BaseModel):
+    """Exact 3..8-file coding DAG confirmation under a separate Agent contract."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["deskpilot.agent-decision.v2"] = (
+        "deskpilot.agent-decision.v2"
+    )
+    kind: Literal["propose_task_graph"] = "propose_task_graph"
+    nodes: tuple[WorkspaceBoundedCodingGraphNodeProposal, ...] = Field(
+        min_length=9,
+        max_length=19,
+    )
+    output_node_key: str = Field(pattern=TOKEN_PATTERN)
+    decision_summary: str = Field(min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def graph_is_a_dag(self) -> Self:
+        keys = tuple(item.local_key for item in self.nodes)
+        if len(keys) != len(set(keys)):
+            raise ValueError("Task graph node keys must be unique")
+        known = set(keys)
+        if self.output_node_key not in known:
+            raise ValueError("Task graph output node is unknown")
+        graph = {item.local_key: item.depends_on for item in self.nodes}
+        for item in self.nodes:
+            if any(source not in known for source in item.depends_on):
+                raise ValueError("Task graph dependency is unknown")
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(key: str) -> None:
+            if key in visiting:
+                raise ValueError("Task graph contains a cycle")
+            if key in visited:
+                return
+            visiting.add(key)
+            for source in graph[key]:
+                visit(source)
+            visiting.remove(key)
+            visited.add(key)
+
+        for key in keys:
+            visit(key)
+        contributing: set[str] = set()
+
+        def collect(key: str) -> None:
+            if key in contributing:
+                return
+            contributing.add(key)
+            for source in graph[key]:
+                collect(source)
+
+        collect(self.output_node_key)
+        if contributing != known:
+            raise ValueError("Task graph output node must depend on every graph node")
+        return self
+
+
 class DynamicCoordinatorSubmitResultDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal["deskpilot.agent-decision.v1"] = "deskpilot.agent-decision.v1"
@@ -240,4 +304,10 @@ DynamicCoordinatorLoopDecisionValue = Annotated[
 
 
 class DynamicCoordinatorLoopDecision(RootModel[DynamicCoordinatorLoopDecisionValue]):
+    pass
+
+
+class WorkspaceBoundedCodingCoordinatorDecision(
+    RootModel[WorkspaceBoundedCodingGraphDecision]
+):
     pass

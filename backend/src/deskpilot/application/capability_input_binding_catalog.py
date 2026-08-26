@@ -17,6 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from deskpilot.application.capability_catalog import CapabilityCatalog
 from deskpilot.application.route_recipe_catalog import RouteId, RouteRecipeCatalog
+from deskpilot.application.workspace_coding_graph import (
+    WORKSPACE_CODING_MIN_FILES,
+    workspace_coding_file_count,
+    workspace_coding_fixed_parameters,
+    workspace_coding_variant_key,
+)
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import DIGEST_PATTERN
 from deskpilot.domain.capability_execution import (
@@ -704,12 +710,21 @@ class CapabilityInputBindingCatalog:
                 raise CapabilityInputLineageRejectedError(
                     "Coding-loop fixed test kind is invalid"
                 )
+            try:
+                file_count = workspace_coding_file_count(
+                    node_binding.bound_input_manifest
+                )
+            except ValueError as error:
+                raise CapabilityInputLineageRejectedError(
+                    "Coding-loop fixed file count is invalid"
+                ) from error
+            fixed = workspace_coding_fixed_parameters(test_kind, file_count)
             expected_recipe_digest = sha256_digest(
-                {
-                    **RouteRecipeCatalog.manifest(profile.route_id, "2"),
-                    "variant_key": f"{profile.route_id}:{test_kind}",
-                    "fixed_parameters": {"test_kind": test_kind},
-                }
+                RouteRecipeCatalog.variant_manifest(
+                    profile.route_id,
+                    workspace_coding_variant_key(test_kind, file_count),
+                    fixed,
+                )
             )
         if (
             node_binding.recipe.route_id != profile.route_id
@@ -815,6 +830,23 @@ class CapabilityInputBindingCatalog:
                     "Capability fixed parameter is missing"
                 )
             expected_bound[name] = fixed_value
+        if (
+            profile.route_id == "workspace_coding_loop"
+            and "file_count" in node_binding.bound_input_manifest
+        ):
+            try:
+                file_count = workspace_coding_file_count(
+                    node_binding.bound_input_manifest
+                )
+            except ValueError as error:
+                raise CapabilityInputLineageRejectedError(
+                    "Coding-loop fixed file count is invalid"
+                ) from error
+            if file_count == WORKSPACE_CODING_MIN_FILES:
+                raise CapabilityInputLineageRejectedError(
+                    "Legacy coding-loop input unexpectedly contains a file count"
+                )
+            expected_bound["file_count"] = str(file_count)
         if expected_bound != node_binding.bound_input_manifest:
             raise CapabilityInputLineageRejectedError(
                 "Capability normalized input changed from its persisted node binding"

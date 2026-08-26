@@ -127,7 +127,7 @@ class TaskBudget(BaseModel):
     max_retries: int = Field(ge=0, le=20)
     max_cost_micros: int = Field(ge=0, le=1_000_000_000_000)
     max_handoffs: int = Field(ge=0, le=20)
-    max_plan_nodes: int = Field(default=20, ge=1, le=20)
+    max_plan_nodes: int = Field(default=20, ge=1, le=24)
 
 
 class PlanNodeBudget(BaseModel):
@@ -370,7 +370,7 @@ class DraftPlan(BaseModel):
     task_id: str = Field(pattern=TASK_ID_PATTERN)
     contract_version: int = Field(ge=1)
     producer: PlanProducer
-    nodes: tuple[DraftPlanNode, ...] = Field(min_length=1, max_length=20)
+    nodes: tuple[DraftPlanNode, ...] = Field(min_length=1, max_length=24)
 
     @model_validator(mode="after")
     def validate_graph(self) -> Self:
@@ -471,7 +471,7 @@ class ExecutablePlan(BaseModel):
     plan_generation: int = Field(ge=1)
     task_contract: TaskContractRef
     producer: PlanProducer
-    nodes: tuple[ExecutablePlanNode, ...] = Field(min_length=1, max_length=20)
+    nodes: tuple[ExecutablePlanNode, ...] = Field(min_length=1, max_length=24)
     acceptance_coverage: tuple[AcceptanceCoverage, ...]
     runtime_enabled: bool
     binding_snapshot_digest: str = Field(pattern=DIGEST_PATTERN)

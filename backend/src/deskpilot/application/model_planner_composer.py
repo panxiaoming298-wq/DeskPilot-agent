@@ -38,7 +38,7 @@ from deskpilot.domain.turn_planning import TurnPlanningOffer, TurnPlanningParame
 
 MODEL_PLANNER_PRODUCER_REF = "deskpilot.offer-composer.v1"
 _MAX_COMPOSITE_STEPS = 8
-_MAX_PLAN_NODES = 20
+_MAX_PLAN_NODES = 24
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _RISK_ORDER = {
     ToolRiskLevel.R0: 0,
@@ -151,7 +151,7 @@ class ModelPlannerComposer:
             step.route.contract.budget.max_plan_nodes - 2 for step in steps
         )
         if actual_node_count > _MAX_PLAN_NODES or structural_node_budget > _MAX_PLAN_NODES:
-            raise ModelPlannerDomainLimitError("Composite Plan exceeds twenty nodes")
+            raise ModelPlannerDomainLimitError("Composite Plan exceeds twenty-four nodes")
 
         final_budget = self._control_budget()
         last_leaves = self._target_leaves(steps[-1].route.draft, node_maps[-1])
@@ -364,7 +364,11 @@ class ModelPlannerComposer:
             raise ModelPlannerOfferRejectedError("Parameter binding digest is invalid")
         parameters = dict(step.parameters)
         specs = {
-            item.name: item for item in RouteRecipeCatalog.parameter_specs(step.route.route_id)
+            item.name: item
+            for item in RouteRecipeCatalog.parameter_specs_for_variant(
+                step.route.route_id,
+                step.route.fixed_parameters,
+            )
         }
         allowed = set(specs) | set(step.route.fixed_parameters)
         if step.route.route_id == "workspace_dynamic_patch_test":

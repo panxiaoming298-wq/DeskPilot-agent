@@ -19,6 +19,9 @@ from deskpilot.domain.agent_loop import (
     CoordinatorSubmitResultDecision,
     DynamicCoordinatorLoopDecision,
     DynamicCoordinatorSubmitResultDecision,
+    WorkspaceBoundedCodingCoordinatorDecision,
+    WorkspaceBoundedCodingGraphDecision,
+    WorkspaceBoundedCodingGraphNodeProposal,
     WorkspaceLoopDecision,
     WorkspacePatchChangeProposal,
     WorkspacePatchLoopDecision,
@@ -71,6 +74,9 @@ WORKSPACE_AGENT_LOOP_DECISION_SCHEMA = "workspace_agent_loop_decision"
 WORKSPACE_PATCH_PLANNER_LOOP_DECISION_SCHEMA = "workspace_patch_planner_loop_decision"
 WORKSPACE_COORDINATOR_LOOP_DECISION_SCHEMA = "workspace_coordinator_loop_decision"
 WORKSPACE_DYNAMIC_COORDINATOR_LOOP_DECISION_SCHEMA = "workspace_dynamic_coordinator_loop_decision"
+WORKSPACE_BOUNDED_CODING_COORDINATOR_DECISION_SCHEMA = (
+    "workspace_bounded_coding_coordinator_decision"
+)
 CITATION_VERIFICATION_DECISION_SCHEMA = "citation_verification_decision"
 TURN_PLANNER_DECISION_SCHEMA = "turn_planner_decision"
 
@@ -452,6 +458,42 @@ class FakeModelProvider:
                     root=CoordinatorSubmitResultDecision(
                         child_observation_digest=observation_digest,
                         decision_summary="只基于已验证的子 Agent 结果提交父任务结果。",
+                    )
+                ).model_dump(mode="json"),
+            )
+        if (
+            request.output_schema.name
+            == WORKSPACE_BOUNDED_CODING_COORDINATOR_DECISION_SCHEMA
+        ):
+            capabilities = request.metadata.get("task_graph_allowed_capabilities")
+            max_nodes = request.metadata.get("task_graph_max_nodes")
+            if (
+                not isinstance(capabilities, list)
+                or not capabilities
+                or not all(
+                    isinstance(item, dict) and "local_key" in item
+                    for item in capabilities
+                )
+                or not isinstance(max_nodes, int)
+                or len(capabilities) != max_nodes
+            ):
+                raise ValueError(
+                    "Fake bounded coding fixture requires an exact server graph"
+                )
+            return cast(
+                dict[str, JsonValue],
+                WorkspaceBoundedCodingCoordinatorDecision(
+                    root=WorkspaceBoundedCodingGraphDecision(
+                        nodes=tuple(
+                            WorkspaceBoundedCodingGraphNodeProposal.model_validate(item)
+                            for item in capabilities
+                        ),
+                        output_node_key=str(
+                            cast(dict[str, JsonValue], capabilities[-1])["local_key"]
+                        ),
+                        decision_summary=(
+                            "确认服务器封存的多文件固定编码图，不扩展任何执行权限。"
+                        ),
                     )
                 ).model_dump(mode="json"),
             )

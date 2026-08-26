@@ -93,6 +93,11 @@ from deskpilot.application.workspace_agent_runtime import (
     WorkspaceAgentRuntime,
     WorkspaceAgentRuntimeError,
 )
+from deskpilot.application.workspace_coding_graph import (
+    WORKSPACE_CODING_MAX_FILES,
+    WORKSPACE_CODING_MIN_FILES,
+    workspace_coding_variant_key,
+)
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_replanning import (
     BOUNDED_PATCH_REPAIR_LOOP_CONSTRAINT,
@@ -1801,6 +1806,13 @@ class TaskWorkbenchService:
                         "workspace_dynamic_patch_test:python",
                     }
                 )
+                variants.update(
+                    workspace_coding_variant_key("python", file_count)
+                    for file_count in range(
+                        WORKSPACE_CODING_MIN_FILES,
+                        WORKSPACE_CODING_MAX_FILES + 1,
+                    )
+                )
         if self._router.workspace_node_test_enabled:
             variants.add("workspace_node_test")
             if self._router.workspace_patch_enabled and self._workspace_agents is not None:
@@ -1809,6 +1821,13 @@ class TaskWorkbenchService:
                         "workspace_agent_patch_test:node",
                         "workspace_dynamic_patch_test:node",
                     }
+                )
+                variants.update(
+                    workspace_coding_variant_key("node", file_count)
+                    for file_count in range(
+                        WORKSPACE_CODING_MIN_FILES,
+                        WORKSPACE_CODING_MAX_FILES + 1,
+                    )
                 )
         variants.update(
             f"workspace_command_profile:{profile_id}"

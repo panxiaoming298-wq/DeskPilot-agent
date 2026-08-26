@@ -203,7 +203,7 @@ class ModelPlannerStepBinding(BaseModel):
         default=(), max_length=32
     )
     parameter_bindings_digest: str = Field(pattern=DIGEST_PATTERN)
-    node_mappings: tuple[ModelPlannerNodeMapping, ...] = Field(min_length=1, max_length=18)
+    node_mappings: tuple[ModelPlannerNodeMapping, ...] = Field(min_length=1, max_length=20)
     node_mappings_digest: str = Field(pattern=DIGEST_PATTERN)
     created_at: datetime
     step_binding_digest: str = Field(pattern=DIGEST_PATTERN)

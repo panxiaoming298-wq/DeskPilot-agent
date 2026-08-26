@@ -51,6 +51,13 @@ from deskpilot.application.task_loop_reducer import (
 )
 from deskpilot.application.turn_planner_runtime import TurnPlannerRuntime
 from deskpilot.application.verified_edges import mark_verified_and_unlock
+from deskpilot.application.workspace_coding_graph import (
+    WORKSPACE_CODING_MIN_FILES,
+    is_workspace_coding_planner_key,
+    is_workspace_coding_reader_key,
+    workspace_coding_file_count,
+    workspace_coding_reader_keys,
+)
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.capability_execution import CapabilityResultKind
 from deskpilot.domain.coding_tools import GitCommitPreview
@@ -337,17 +344,18 @@ class TaskLoopExecutionCoordinator:
         elif source.route_id == "workspace_file_read":
             await self._agents.run_workspace_file_candidate(source)
         elif source.route_id == "workspace_coding_loop":
-            if source.binding.mapping.source_local_key == "coordinate_coding":
+            if source.binding.mapping.source_local_key in {
+                "coordinate_coding",
+                "coordinate_bounded_coding",
+            }:
                 await self._agents.run_coding_coordinator_candidate(source)
-            elif source.binding.mapping.source_local_key in {
-                "inspect_primary",
-                "inspect_secondary",
-            }:
+            elif is_workspace_coding_reader_key(
+                source.binding.mapping.source_local_key
+            ):
                 await self._agents.run_workspace_file_candidate(source)
-            elif source.binding.mapping.source_local_key in {
-                "plan_primary_patch",
-                "plan_secondary_patch",
-            }:
+            elif is_workspace_coding_planner_key(
+                source.binding.mapping.source_local_key
+            ):
                 await self._agents.run_patch_planner_candidate(source)
             else:
                 raise TaskLoopExecutionCoordinatorProofRejectedError(
@@ -717,9 +725,28 @@ class TaskLoopExecutionCoordinator:
         )
         if not coding_bindings:
             return
-        if len(coding_bindings) != 8 or len(coding_bindings) != len(bindings):
+        if len(coding_bindings) != len(bindings):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery has an incomplete Route binding set"
+            )
+        binding_input_digests = {item.bound_input_digest for item in coding_bindings}
+        if len(binding_input_digests) != 1:
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery bindings disagree on their sealed input"
+            )
+        bound_parameters = coding_bindings[0].bound_input_manifest
+        try:
+            file_count = workspace_coding_file_count(bound_parameters)
+            offered_changes = bound_parameters["changes_json"]
+            if not isinstance(offered_changes, str):
+                raise ValueError("Coding changes are not canonical JSON")
+        except (KeyError, ValueError) as error:
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery lost its bounded file count"
+            ) from error
+        if len(coding_bindings) != (2 * file_count) + 4:
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery binding cardinality changed"
             )
         result_records = tuple(
             (
@@ -796,8 +823,8 @@ class TaskLoopExecutionCoordinator:
         )
         if (
             len(coordinator_results) != 1
-            or len(reader_results) != 2
-            or len(proposal_results) != 2
+            or len(reader_results) != file_count
+            or len(proposal_results) != file_count
             or len(patch_results) != 1
             or not 1 <= len(test_results) <= 2
             or len(git_results) != 1
@@ -818,7 +845,7 @@ class TaskLoopExecutionCoordinator:
                 item
                 for item in coding_bindings
                 if item.mapping_manifest.get("source_local_key")
-                == "coordinate_coding"
+                in {"coordinate_coding", "coordinate_bounded_coding"}
             ),
             None,
         )
@@ -826,7 +853,7 @@ class TaskLoopExecutionCoordinator:
             item
             for item in coding_bindings
             if item.mapping_manifest.get("source_local_key")
-            in {"inspect_primary", "inspect_secondary"}
+            in set(workspace_coding_reader_keys(file_count))
         )
         reader_nodes = tuple(
             (
@@ -842,14 +869,14 @@ class TaskLoopExecutionCoordinator:
         if (
             coordination_attempt.status != "verified"
             or coordinator_binding is None
-            or len(reader_bindings) != 2
-            or len(reader_nodes) != 2
+            or len(reader_bindings) != file_count
+            or len(reader_nodes) != file_count
             or any(
                 item.depends_on != [coordinator_binding.composite_node_id]
                 for item in reader_nodes
             )
             or not isinstance(raw_graph_nodes, list)
-            or len(raw_graph_nodes) != 7
+            or len(raw_graph_nodes) != (2 * file_count) + 3
             or output_node_key != "commit_git"
             or not isinstance(graph_digest, str)
             or graph_digest
@@ -862,15 +889,24 @@ class TaskLoopExecutionCoordinator:
             or coordination_verification.get("graph_digest") != graph_digest
             or not isinstance(coordination_verification.get("decision_digest"), str)
             or coordinator_agent.get("agent_id")
-            != "builtin.workspace_coordinator"
-            or coordinator_agent.get("version") != "1.1.0"
+            != (
+                "builtin.workspace_coordinator"
+                if file_count == WORKSPACE_CODING_MIN_FILES
+                else "builtin.workspace_bounded_coordinator"
+            )
+            or coordinator_agent.get("version")
+            != (
+                "1.1.0"
+                if file_count == WORKSPACE_CODING_MIN_FILES
+                else "1.0.0"
+            )
         ):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding Coordinator graph proof changed"
             )
         coordinator_evidence = {
-            "agent_id": "builtin.workspace_coordinator",
-            "agent_version": "1.1.0",
+            "agent_id": coordinator_agent["agent_id"],
+            "agent_version": coordinator_agent["version"],
             "node_count": len(raw_graph_nodes),
             "output_node_key": output_node_key,
             "graph_digest": graph_digest,
@@ -982,8 +1018,8 @@ class TaskLoopExecutionCoordinator:
             if item.result_kind is CapabilityResultKind.PATCH_PROPOSAL
         }
         if (
-            len(changes) != 2
-            or len(change_receipts) != 2
+            len(changes) != file_count
+            or len(change_receipts) != file_count
             or set(change_receipts) != changed_paths
             or {item.relative_path for item in readers} != changed_paths
             or proposal_changes != expected_proposals
@@ -1113,7 +1149,11 @@ class TaskLoopExecutionCoordinator:
             for reader in sorted(readers, key=lambda item: item.relative_path)
         ]
         delivery_material: dict[str, Any] = {
-            "schema_version": "deskpilot.workspace-coding-delivery.v2",
+            "schema_version": (
+                "deskpilot.workspace-coding-delivery.v2"
+                if file_count == WORKSPACE_CODING_MIN_FILES
+                else "deskpilot.workspace-coding-delivery.v3"
+            ),
             "task_id": execution.task_id,
             "execution_id": execution.execution_id,
             "run_id": execution.run_id,
@@ -1143,6 +1183,8 @@ class TaskLoopExecutionCoordinator:
             ),
             "created_at": now.isoformat(),
         }
+        if file_count > WORKSPACE_CODING_MIN_FILES:
+            delivery_material["file_count"] = file_count
         delivery_id = f"wcd_{sha256_digest(delivery_material)}"
         manifest = {**delivery_material, "delivery_id": delivery_id}
         delivery_digest = sha256_digest(manifest)

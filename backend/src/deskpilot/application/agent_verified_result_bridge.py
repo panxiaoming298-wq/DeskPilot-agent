@@ -17,6 +17,7 @@ from deskpilot.application.artifact_delivery_runtime import POLICY_DIGEST, POLIC
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_loop import (
     AgentProposeTaskGraphDecision,
+    WorkspaceBoundedCodingGraphDecision,
     WorkspacePatchSubmitProposalDecision,
 )
 from deskpilot.domain.agent_runtime import AgentOutputResult, AgentResult
@@ -394,23 +395,32 @@ class AgentVerifiedResultBridge:
         plan_proof: AgentVerifiedResultPlanProof,
         verification_proof: WorkspaceCodingCoordinatorVerificationProof,
         *,
-        expected_proposal: AgentProposeTaskGraphDecision,
+        expected_proposal: (
+            AgentProposeTaskGraphDecision | WorkspaceBoundedCodingGraphDecision
+        ),
         expected_graph_binding_id: str,
         allow_pending_node_transition: bool = False,
     ) -> VerifiedCapabilityResultRef:
         """Bridge an exact fixed-graph confirmation without creating another DAG."""
 
+        bounded = isinstance(expected_proposal, WorkspaceBoundedCodingGraphDecision)
         resolved = cls._resolve_plan_proof(
             plan_proof,
             expected_route_id="workspace_coding_loop",
-            expected_source_local_key="coordinate_coding",
-            expected_agent_id="builtin.workspace_coordinator",
+            expected_source_local_key=(
+                "coordinate_bounded_coding" if bounded else "coordinate_coding"
+            ),
+            expected_agent_id=(
+                "builtin.workspace_bounded_coordinator"
+                if bounded
+                else "builtin.workspace_coordinator"
+            ),
             expected_capability_id="workspace.dynamic.coordinate.v1",
             allow_pending_node_transition=allow_pending_node_transition,
         )
         try:
             result = AgentOutputResult.model_validate(plan_proof.result.manifest)
-            proposal = AgentProposeTaskGraphDecision.model_validate(
+            proposal = type(expected_proposal).model_validate(
                 verification_proof.decision.manifest
             )
         except ValidationError as error:
@@ -455,7 +465,7 @@ class AgentVerifiedResultBridge:
             or result.input_digest != turn.request_digest
             or result.model_response_digest != turn.response_digest
             or result.output_schema_digest
-            != sha256_digest(AgentProposeTaskGraphDecision.model_json_schema())
+            != sha256_digest(type(expected_proposal).model_json_schema())
         ):
             raise AgentVerifiedResultProofRejectedError(
                 "Workspace coding Coordinator changed its sealed graph proof"
@@ -463,7 +473,9 @@ class AgentVerifiedResultBridge:
         verification_digest = sha256_digest(
             {
                 "schema_version": (
-                    "deskpilot.workspace-coding-coordinator-verification-proof.v1"
+                    "deskpilot.workspace-coding-coordinator-verification-proof.v2"
+                    if bounded
+                    else "deskpilot.workspace-coding-coordinator-verification-proof.v1"
                 ),
                 "step_binding_digest": plan_proof.step_binding.step_binding_digest,
                 "plan_manifest_digest": plan_proof.composite_plan.plan_manifest_digest,
@@ -487,7 +499,7 @@ class AgentVerifiedResultBridge:
             capability=resolved.capability,
             result_kind=CapabilityResultKind.COORDINATION_PLAN,
             result_schema_digest=sha256_digest(
-                AgentProposeTaskGraphDecision.model_json_schema()
+                type(expected_proposal).model_json_schema()
             ),
             result_digest=result.result_digest,
             verification_digest=verification_digest,

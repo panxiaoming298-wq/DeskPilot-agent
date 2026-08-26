@@ -6,6 +6,14 @@ from deskpilot.application.agent_registry import AgentRegistry, AgentRegistryErr
 from deskpilot.application.capability_catalog import CapabilityCatalog, CapabilityCatalogError
 from deskpilot.application.plan_binder import AgentPlanBinder, AgentPlanBindingError
 from deskpilot.application.tool_registry import ToolRegistry
+from deskpilot.application.workspace_coding_graph import (
+    WORKSPACE_CODING_MAX_FILES,
+    WORKSPACE_CODING_MIN_FILES,
+    workspace_coding_path_parameter,
+    workspace_coding_planner_key,
+    workspace_coding_planner_keys,
+    workspace_coding_reader_key,
+)
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import (
     AgentPlanBudget,
@@ -1445,14 +1453,18 @@ def workspace_coding_loop_contract(
     capabilities: CapabilityCatalog,
     *,
     test_kind: Literal["python", "node"],
+    file_count: int = WORKSPACE_CODING_MIN_FILES,
 ) -> TaskContract:
     """Authorize one persistent LOCAL-only inspect/patch/test coding loop.
 
-    The two file inputs and the complete Patch bundle are message-bound before
-    execution.  The model cannot turn either Reader result into new authority;
-    each Reader must feed one verified, unprivileged Patch Planner proposal and
-    both proposals form the fixed verified join before the Patch capability.
+    Every file input and the complete Patch bundle are message-bound before
+    execution. The model cannot turn a Reader result into new authority; each
+    Reader feeds one verified, unprivileged Patch Planner proposal and the
+    complete proposal set forms the fixed verified join before Patch execution.
     """
+
+    if not WORKSPACE_CODING_MIN_FILES <= file_count <= WORKSPACE_CODING_MAX_FILES:
+        raise ValueError("Workspace coding Contract file count is outside 2..8")
 
     suffix = task_id.removeprefix("tsk_")
     capability_ids = (
@@ -1475,28 +1487,51 @@ def workspace_coding_loop_contract(
         )
         for pack in (capabilities.resolve_preferred(item) for item in capability_ids)
     )
+    normalized_objective = (
+        "由受约束 Coordinator 确认服务器封存的固定编码图；两个独立本地 Reader"
+        "并行读取服务器绑定文件；两个无执行权 Patch Planner"
+        "只能提议服务器封存的精确替换；全部结果分别验证后执行经用户确认的多文件"
+        "Patch，再运行服务器固定测试；测试通过后经第二次精确确认创建服务器命名的"
+        "Git 分支与提交，最后独立验收交付"
+        if file_count == WORKSPACE_CODING_MIN_FILES
+        else (
+            f"由受约束 Coordinator 确认服务器封存的 {file_count} 文件固定编码图；"
+            f"{file_count} 个独立本地 Reader 分批并行读取服务器绑定文件；"
+            f"{file_count} 个无执行权 Patch Planner 只能提议服务器封存的精确替换；"
+            "全部结果分别验证后执行经用户确认的多文件 Patch，再运行服务器固定测试；"
+            "测试通过后经第二次精确确认创建服务器命名的 Git 分支与提交，最后独立验收交付"
+        )
+    )
+    acceptance_description = (
+        "结果必须绑定一个 Coordinator 图确认、两个 Reader ResultRef、"
+        "两个 Patch Proposal ResultRef、内容寻址 Patch 回执、固定测试结果、"
+        "受控 Git 提交回执、失败/Repair 历史和最终确定性验收。"
+        if file_count == WORKSPACE_CODING_MIN_FILES
+        else (
+            f"结果必须绑定一个 Coordinator 图确认、{file_count} 个 Reader ResultRef、"
+            f"{file_count} 个 Patch Proposal ResultRef、内容寻址 Patch 回执、固定测试"
+            "结果、受控 Git 提交回执、失败/Repair 历史和最终确定性验收。"
+        )
+    )
+    cardinality_constraints = (
+        ("two_independent_read_only_children_v1",)
+        if file_count == WORKSPACE_CODING_MIN_FILES
+        else (
+            "two_to_eight_independent_read_only_children_v1",
+            f"server_fixed_file_count_{file_count}_v1",
+        )
+    )
     return TaskContract(
         contract_id=f"tc_{suffix}",
         task_id=task_id,
         version=1,
         goal_ref=f"artifact://task-input/{task_id}",
-        normalized_objective=(
-            "由受约束 Coordinator 确认服务器封存的固定编码图；两个独立本地 Reader"
-            "并行读取服务器绑定文件；两个无执行权 Patch Planner"
-            "只能提议服务器封存的精确替换；全部结果分别验证后执行经用户确认的多文件"
-            "Patch，再运行服务器固定测试；测试通过后经第二次精确确认创建服务器命名的"
-            "Git 分支与提交，最后独立验收交付"
-        ),
+        normalized_objective=normalized_objective,
         acceptance_criteria=(
             AcceptanceCriterion(
                 criterion_id="ac_workspace_coding_loop",
                 kind=AcceptanceKind.OUTPUT_REQUIREMENT,
-                description=(
-                    "结果必须绑定一个 Coordinator 图确认、两个 Reader ResultRef、"
-                    "两个 Patch Proposal ResultRef、"
-                    "内容寻址 Patch 回执、固定测试结果、受控 Git 提交回执、"
-                    "失败/Repair 历史和最终确定性验收。"
-                ),
+                description=acceptance_description,
                 verification_requirement=VerificationRequirement.DETERMINISTIC,
                 origin="trusted_template",
             ),
@@ -1504,7 +1539,7 @@ def workspace_coding_loop_contract(
         constraints=(
             "local_only_coding_loop_v1",
             "server_bounded_coordinator_graph_v1",
-            "two_independent_read_only_children_v1",
+            *cardinality_constraints,
             "verified_result_join_before_patch_planner_v1",
             "unprivileged_patch_planner_model_turn_v1",
             "exact_multi_file_patch_confirmation_v1",
@@ -1526,15 +1561,21 @@ def workspace_coding_loop_contract(
         ),
         max_risk_level=ToolRiskLevel.R1,
         budget=TaskBudget(
-            max_model_calls=5,
-            max_tool_calls=5,
-            max_input_tokens=56_000,
-            max_output_tokens=6_000,
-            max_wall_seconds=780,
+            max_model_calls=(5 if file_count == 2 else 1 + (2 * file_count)),
+            max_tool_calls=(5 if file_count == 2 else file_count + 3),
+            max_input_tokens=(
+                56_000 if file_count == 2 else 12_000 + (12_001 * file_count)
+            ),
+            max_output_tokens=(
+                6_000 if file_count == 2 else 2_000 + (1_501 * file_count)
+            ),
+            max_wall_seconds=(780 if file_count == 2 else 510 + (120 * file_count)),
             max_retries=1,
-            max_cost_micros=300_000,
+            max_cost_micros=(
+                300_000 if file_count == 2 else 100_000 + (50_000 * file_count)
+            ),
             max_handoffs=0,
-            max_plan_nodes=10,
+            max_plan_nodes=2 * file_count + 6,
         ),
         output_contract=OutputContract(media_type="application/json", language="zh-CN"),
         capabilities=refs,
@@ -1546,8 +1587,11 @@ def workspace_coding_loop_draft(
     task_id: str,
     *,
     test_kind: Literal["python", "node"],
+    file_count: int = WORKSPACE_CODING_MIN_FILES,
     contract_version: int = 1,
 ) -> DraftPlan:
+    if not WORKSPACE_CODING_MIN_FILES <= file_count <= WORKSPACE_CODING_MAX_FILES:
+        raise ValueError("Workspace coding Draft file count is outside 2..8")
     coordinator_budget = PlanNodeBudget(
         model_calls=1,
         tool_calls=0,
@@ -1613,81 +1657,120 @@ def workspace_coding_loop_draft(
         if test_kind == "python"
         else "workspace.node.test.v1"
     )
+    reader_nodes = tuple(
+        DraftPlanNode(
+            local_key=workspace_coding_reader_key(index),
+            kind=DraftNodeKind.AGENT,
+            objective=(
+                (
+                    "独立读取主要目标文件并形成确定性版本证明。"
+                    if index == 1
+                    else "独立读取上下文文件并形成确定性版本证明。"
+                )
+                if file_count == WORKSPACE_CODING_MIN_FILES
+                else (
+                    f"独立读取第 {index} 个服务器绑定目标文件并形成确定性版本证明；"
+                    f"输入只来自 {workspace_coding_path_parameter(index)}。"
+                )
+            ),
+            agent_selector="builtin.workspace_reader",
+            capability_requirements=("workspace.file.read.v1",),
+            depends_on=(
+                "coordinate_coding"
+                if file_count == WORKSPACE_CODING_MIN_FILES
+                else "coordinate_bounded_coding",
+            ),
+            verification_profile=VerificationProfile.DETERMINISTIC,
+            budget=reader_budget,
+        )
+        for index in range(1, file_count + 1)
+    )
+    planner_nodes = tuple(
+        DraftPlanNode(
+            local_key=workspace_coding_planner_key(index),
+            kind=DraftNodeKind.AGENT,
+            objective=(
+                (
+                    "基于已验证的主要文件证据提议服务器 Offer 中唯一允许的精确替换；"
+                    "提议本身不授予写权限。"
+                    if index == 1
+                    else (
+                        "基于已验证的次要文件证据提议服务器 Offer 中唯一允许的精确替换；"
+                        "提议本身不授予写权限。"
+                    )
+                )
+                if file_count == WORKSPACE_CODING_MIN_FILES
+                else (
+                    f"基于第 {index} 个已验证文件证据提议服务器 Offer 中唯一允许的"
+                    "精确替换；提议本身不授予写权限。"
+                )
+            ),
+            agent_selector="builtin.workspace_patch_planner",
+            capability_requirements=("workspace.patch.propose.v1",),
+            depends_on=(workspace_coding_reader_key(index),),
+            verification_profile=VerificationProfile.DETERMINISTIC,
+            budget=planner_budget,
+        )
+        for index in range(1, file_count + 1)
+    )
+    coordinator_key = (
+        "coordinate_coding"
+        if file_count == WORKSPACE_CODING_MIN_FILES
+        else "coordinate_bounded_coding"
+    )
     return DraftPlan(
         task_id=task_id,
         contract_version=contract_version,
         producer=PlanProducer(
             kind="trusted_template",
-            producer_ref="workspace_coding_loop.v1",
+            producer_ref=(
+                "workspace_coding_loop.v1"
+                if file_count == WORKSPACE_CODING_MIN_FILES
+                else "workspace_coding_loop.bounded.v1"
+            ),
         ),
         nodes=(
             DraftPlanNode(
-                local_key="coordinate_coding",
+                local_key=coordinator_key,
                 kind=DraftNodeKind.AGENT,
                 objective=(
-                    "只确认服务器封存的七节点编码图、精确依赖和预算；不得创建"
-                    "路径、工具、节点、预算或权限。"
+                    (
+                        "只确认服务器封存的七节点编码图、精确依赖和预算；不得创建"
+                        "路径、工具、节点、预算或权限。"
+                    )
+                    if file_count == WORKSPACE_CODING_MIN_FILES
+                    else (
+                        f"只确认服务器封存的 {2 * file_count + 3} 节点编码图、精确依赖"
+                        "和预算；不得创建路径、工具、节点、预算或权限。"
+                    )
                 ),
-                agent_selector="builtin.workspace_coordinator",
+                agent_selector=(
+                    "builtin.workspace_coordinator"
+                    if file_count == WORKSPACE_CODING_MIN_FILES
+                    else "builtin.workspace_bounded_coordinator"
+                ),
                 capability_requirements=("workspace.dynamic.coordinate.v1",),
                 verification_profile=VerificationProfile.DETERMINISTIC,
                 budget=coordinator_budget,
             ),
-            DraftPlanNode(
-                local_key="inspect_primary",
-                kind=DraftNodeKind.AGENT,
-                objective="独立读取主要目标文件并形成确定性版本证明。",
-                agent_selector="builtin.workspace_reader",
-                capability_requirements=("workspace.file.read.v1",),
-                depends_on=("coordinate_coding",),
-                verification_profile=VerificationProfile.DETERMINISTIC,
-                budget=reader_budget,
-            ),
-            DraftPlanNode(
-                local_key="inspect_secondary",
-                kind=DraftNodeKind.AGENT,
-                objective="独立读取上下文文件并形成确定性版本证明。",
-                agent_selector="builtin.workspace_reader",
-                capability_requirements=("workspace.file.read.v1",),
-                depends_on=("coordinate_coding",),
-                verification_profile=VerificationProfile.DETERMINISTIC,
-                budget=reader_budget,
-            ),
-            DraftPlanNode(
-                local_key="plan_primary_patch",
-                kind=DraftNodeKind.AGENT,
-                objective=(
-                    "基于已验证的主要文件证据提议服务器 Offer 中唯一允许的精确替换；"
-                    "提议本身不授予写权限。"
-                ),
-                agent_selector="builtin.workspace_patch_planner",
-                capability_requirements=("workspace.patch.propose.v1",),
-                depends_on=("inspect_primary",),
-                verification_profile=VerificationProfile.DETERMINISTIC,
-                budget=planner_budget,
-            ),
-            DraftPlanNode(
-                local_key="plan_secondary_patch",
-                kind=DraftNodeKind.AGENT,
-                objective=(
-                    "基于已验证的次要文件证据提议服务器 Offer 中唯一允许的精确替换；"
-                    "提议本身不授予写权限。"
-                ),
-                agent_selector="builtin.workspace_patch_planner",
-                capability_requirements=("workspace.patch.propose.v1",),
-                depends_on=("inspect_secondary",),
-                verification_profile=VerificationProfile.DETERMINISTIC,
-                budget=planner_budget,
-            ),
+            *reader_nodes,
+            *planner_nodes,
             DraftPlanNode(
                 local_key="apply_patch",
                 kind=DraftNodeKind.CAPABILITY,
                 objective=(
-                    "只在两个 Reader 及两个无执行权 Patch Planner 提议均已验证后，"
-                    "准备并提交精确多文件 Patch。"
+                    (
+                        "只在两个 Reader 及两个无执行权 Patch Planner 提议均已验证后，"
+                        "准备并提交精确多文件 Patch。"
+                    )
+                    if file_count == WORKSPACE_CODING_MIN_FILES
+                    else (
+                        f"只在 {file_count} 个 Reader 及 {file_count} 个无执行权 Patch "
+                        "Planner 提议均已验证后，准备并提交精确多文件 Patch。"
+                    )
                 ),
                 capability_selector="workspace.patch.bundle.v1",
-                depends_on=("plan_primary_patch", "plan_secondary_patch"),
+                depends_on=workspace_coding_planner_keys(file_count),
                 verification_profile=VerificationProfile.DETERMINISTIC,
                 budget=patch_budget,
             ),
@@ -1717,7 +1800,14 @@ def workspace_coding_loop_draft(
             DraftPlanNode(
                 local_key="final_acceptance",
                 kind=DraftNodeKind.FINAL_ACCEPTANCE,
-                objective="独立复核双 Reader、Patch、Test、Git commit 与 Repair 证明链。",
+                objective=(
+                    "独立复核双 Reader、Patch、Test、Git commit 与 Repair 证明链。"
+                    if file_count == WORKSPACE_CODING_MIN_FILES
+                    else (
+                        f"独立复核 {file_count} 个 Reader/Planner、Patch、Test、Git commit "
+                        "与 Repair 证明链。"
+                    )
+                ),
                 depends_on=("commit_git",),
                 verification_profile=VerificationProfile.DETERMINISTIC,
                 budget=zero,

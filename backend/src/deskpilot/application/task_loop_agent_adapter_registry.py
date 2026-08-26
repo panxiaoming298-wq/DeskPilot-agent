@@ -6,6 +6,11 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from deskpilot.application.workspace_coding_graph import (
+    is_workspace_coding_planner_key,
+    is_workspace_coding_reader_key,
+    workspace_coding_parameter_for_key,
+)
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import DIGEST_PATTERN, BoundAgentRef
 from deskpilot.domain.task_plans import CapabilityRef
@@ -32,7 +37,17 @@ class TaskLoopAgentAdapterManifest(BaseModel):
     agent_versions: tuple[str, ...] = Field(min_length=1, max_length=8)
     capability_id: str = Field(min_length=1, max_length=128)
     parameter_name: Literal[
-        "goal", "path", "primary_path", "secondary_path", "project_path"
+        "goal",
+        "path",
+        "primary_path",
+        "secondary_path",
+        "file_03_path",
+        "file_04_path",
+        "file_05_path",
+        "file_06_path",
+        "file_07_path",
+        "file_08_path",
+        "project_path",
     ]
     runtime_enabled: Literal[True] = True
     manifest_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -81,6 +96,8 @@ class TaskLoopAgentAdapterRegistry:
         capability: CapabilityRef,
     ) -> TaskLoopAgentAdapterManifest:
         manifest = self._by_route_node.get((route_id, source_local_key))
+        if manifest is None and route_id == "workspace_coding_loop":
+            manifest = self._bounded_coding_manifest(source_local_key)
         if (
             manifest is None
             or not manifest.runtime_enabled
@@ -93,6 +110,45 @@ class TaskLoopAgentAdapterRegistry:
                 "Exact Route, Agent, Capability, or local runtime adapter is unavailable"
             )
         return manifest
+
+    @staticmethod
+    def _bounded_coding_manifest(
+        source_local_key: str,
+    ) -> TaskLoopAgentAdapterManifest | None:
+        if source_local_key == "coordinate_bounded_coding":
+            return TaskLoopAgentAdapterManifest.build(
+                adapter_id="builtin.task-loop.workspace-coding-bounded-coordinator.v1",
+                route_id="workspace_coding_loop",
+                source_local_key=source_local_key,
+                agent_id="builtin.workspace_bounded_coordinator",
+                agent_versions=("1.0.0",),
+                capability_id="workspace.dynamic.coordinate.v1",
+                parameter_name="project_path",
+            )
+        parameter_name = workspace_coding_parameter_for_key(source_local_key)
+        if parameter_name is None or parameter_name in {"primary_path", "secondary_path"}:
+            return None
+        if is_workspace_coding_reader_key(source_local_key):
+            return TaskLoopAgentAdapterManifest.build(
+                adapter_id=f"builtin.task-loop.workspace-coding-{source_local_key}.v1",
+                route_id="workspace_coding_loop",
+                source_local_key=source_local_key,
+                agent_id="builtin.workspace_reader",
+                agent_versions=("1.0.0", "1.1.0", "1.2.0"),
+                capability_id="workspace.file.read.v1",
+                parameter_name=parameter_name,
+            )
+        if is_workspace_coding_planner_key(source_local_key):
+            return TaskLoopAgentAdapterManifest.build(
+                adapter_id=f"builtin.task-loop.workspace-coding-{source_local_key}.v1",
+                route_id="workspace_coding_loop",
+                source_local_key=source_local_key,
+                agent_id="builtin.workspace_patch_planner",
+                agent_versions=("1.0.0",),
+                capability_id="workspace.patch.propose.v1",
+                parameter_name=parameter_name,
+            )
+        return None
 
     def manifests(self) -> tuple[TaskLoopAgentAdapterManifest, ...]:
         return tuple(

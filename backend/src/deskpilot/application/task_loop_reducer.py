@@ -132,8 +132,8 @@ class TaskLoopReducerSnapshot(BaseModel):
     execution_id: str | None = Field(default=None, pattern=TASK_LOOP_EXECUTION_ID_PATTERN)
     execution_status: TaskLoopReducerExecutionStatus
     execution_revision: int = Field(ge=0)
-    nodes: tuple[TaskLoopReducerNode, ...] = Field(default=(), max_length=20)
-    active_claim_count: int = Field(default=0, ge=0, le=20)
+    nodes: tuple[TaskLoopReducerNode, ...] = Field(default=(), max_length=24)
+    active_claim_count: int = Field(default=0, ge=0, le=24)
     no_progress_count: int = Field(default=0, ge=0, le=3)
     repair_count: int = Field(default=0, ge=0, le=2)
     repair_available: bool = False

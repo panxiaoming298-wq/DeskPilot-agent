@@ -124,11 +124,58 @@ def _select_coding_loop(request: Any) -> dict[str, Any]:
     }
 
 
+def _select_three_file_coding_loop(request: Any) -> dict[str, Any]:
+    payload = json.loads(request.messages[1].content)
+    matches = [
+        item["offer"]["offer_key"]
+        for item in payload["offers"]
+        if {spec["parameter_name"] for spec in item["parameter_specs"]}
+        == {
+            "primary_path",
+            "secondary_path",
+            "file_03_path",
+            "changes_json",
+            "project_path",
+            "test_path",
+        }
+    ]
+    assert len(matches) == 1
+    changes_json = json.dumps(
+        [
+            {
+                "path": f"backend/{name}.py",
+                "old_text": f"VALUE = 'old-{name}'",
+                "new_text": f"VALUE = 'new-{name}'",
+            }
+            for name in ("one", "two", "three")
+        ],
+        separators=(",", ":"),
+    )
+    return {
+        "schema_version": "deskpilot.turn-planner-decision.v1",
+        "kind": "propose_steps",
+        "steps": [
+            {
+                "offer_key": str(matches[0]),
+                "parameters": [
+                    {"name": "primary_path", "value": "backend/one.py"},
+                    {"name": "secondary_path", "value": "backend/two.py"},
+                    {"name": "file_03_path", "value": "backend/three.py"},
+                    {"name": "changes_json", "value": changes_json},
+                    {"name": "project_path", "value": "backend"},
+                    {"name": "test_path", "value": "tests/test_one.py"},
+                ],
+            }
+        ],
+    }
+
+
 def _propose_bound_patch(request: Any) -> dict[str, Any]:
     path = str(request.metadata["workspace_path"])
     changes = {
         "backend/one.py": ("VALUE = 'old-one'", "VALUE = 'new-one'"),
         "backend/two.py": ("VALUE = 'old-two'", "VALUE = 'new-two'"),
+        "backend/three.py": ("VALUE = 'old-three'", "VALUE = 'new-three'"),
     }
     old_text, new_text = changes[path]
     return {
@@ -157,6 +204,18 @@ def _confirm_bound_coding_graph(request: Any) -> dict[str, Any]:
         "nodes": nodes,
         "output_node_key": "commit_git",
         "decision_summary": "Confirm the exact server-sealed coding graph.",
+    }
+
+
+def _confirm_bounded_coding_graph(request: Any) -> dict[str, Any]:
+    nodes = request.metadata["task_graph_allowed_capabilities"]
+    assert isinstance(nodes, list) and len(nodes) == 9
+    return {
+        "schema_version": "deskpilot.agent-decision.v2",
+        "kind": "propose_task_graph",
+        "nodes": nodes,
+        "output_node_key": "commit_git",
+        "decision_summary": "Confirm the exact server-sealed bounded coding graph.",
     }
 
 
@@ -809,6 +868,231 @@ def test_coding_loop_recipe_has_two_parallel_readers_and_verified_patch_join() -
     assert tuple(
         item.value for item in contract.privacy_policy.allowed_provider_locations
     ) == ("local",)
+
+
+def test_coding_loop_recipe_seals_the_eight_file_upper_bound() -> None:
+    from deskpilot.application.capability_catalog import create_builtin_capability_catalog
+
+    contract, draft = RouteRecipeCatalog.compile(
+        task_id="tsk_" + "8" * 32,
+        route_id="workspace_coding_loop",
+        parameters={"test_kind": "python", "file_count": "8"},
+        capabilities=create_builtin_capability_catalog(),
+    )
+    by_key = {item.local_key: item for item in draft.nodes}
+    planner_keys = tuple(
+        key for key in by_key if key.startswith("plan_") and key.endswith("_patch")
+    )
+    assert len(draft.nodes) == 22
+    assert contract.budget.max_plan_nodes == 22
+    assert contract.budget.max_model_calls == 17
+    assert by_key["coordinate_bounded_coding"].agent_selector == (
+        "builtin.workspace_bounded_coordinator"
+    )
+    assert len(planner_keys) == 8
+    assert set(by_key["apply_patch"].depends_on) == set(planner_keys)
+    assert by_key["inspect_file_08"].depends_on == (
+        "coordinate_bounded_coding",
+    )
+    assert by_key["plan_file_08_patch"].depends_on == ("inspect_file_08",)
+
+
+@pytest.mark.asyncio
+async def test_three_file_coding_loop_persists_bounded_graph_and_v3_delivery(
+    tmp_path: Path,
+) -> None:
+    database = Database(
+        f"sqlite+aiosqlite:///{(tmp_path / 'bounded-coding-loop.db').as_posix()}"
+    )
+    await database.migrate()
+    provider = ScriptedTurnPlannerProvider(
+        [
+            _select_three_file_coding_loop,
+            _confirm_bounded_coding_graph,
+            _propose_bound_patch,
+            _propose_bound_patch,
+            _propose_bound_patch,
+        ]
+    )
+    planner, planning, task_loops, _composer = _runtimes(database, provider)
+    workspace_root = tmp_path / "workspace"
+    backend = workspace_root / "backend"
+    tests = backend / "tests"
+    tests.mkdir(parents=True)
+    for name in ("one", "two", "three"):
+        (backend / f"{name}.py").write_text(
+            f"VALUE = 'old-{name}'\n",
+            encoding="utf-8",
+        )
+    (tests / "test_one.py").write_text(
+        "def test_one():\n    assert True\n",
+        encoding="utf-8",
+    )
+    _initialize_repository(backend)
+    workspace = WorkspaceFileRuntime(
+        str(workspace_root),
+        str(tmp_path / "staging"),
+    )
+    python_tests = _RepairingPythonRuntime()
+    python_tests.calls = 1
+    registry = create_builtin_capability_executor_registry(
+        planner._capabilities,  # noqa: SLF001
+        workspace=workspace,
+        python_tests=python_tests,
+        workspace_patches=workspace,
+        workspace_coding=WorkspaceCodingRuntime(workspace, shutil.which("git")),
+    )
+    execution = AgentExecutionRuntime(
+        database,
+        planning._compiler,  # noqa: SLF001
+        planner._agents,  # noqa: SLF001
+        max_parallel=2,
+    )
+    model_loop = AgentModelLoopRuntime(
+        database,
+        execution,
+        planner._agents,  # noqa: SLF001
+        planner._gateway,  # noqa: SLF001
+        _PassThroughContextMemory(),  # type: ignore[arg-type]
+    )
+    adapters = create_task_loop_agent_adapter_registry(
+        research_available=False,
+        workspace_file_available=True,
+        workspace_coding_loop_available=True,
+    )
+    activation = TaskLoopActivationRuntime(
+        database,
+        task_loops,
+        planner,
+        planning,
+        execution,
+        ModelPlannerNodeBinder(
+            planner._agents,  # noqa: SLF001
+            registry,
+            adapters,
+        ),
+    )
+    capabilities = CapabilityExecutionRuntime(
+        database,
+        CapabilityInputBindingCatalog(planner._capabilities),  # noqa: SLF001
+        registry,
+        CapabilityExecutionEngine(registry),
+    )
+    agents = TaskLoopAgentRuntime(
+        database,
+        execution,
+        adapters,
+        workspace=workspace,
+        model_loop=model_loop,
+    )
+    coordinator = TaskLoopExecutionCoordinator(
+        database,
+        activation,
+        capabilities=capabilities,
+        agents=agents,
+        turn_planner=planner,
+    )
+    changes_json = json.dumps(
+        [
+            {
+                "path": f"backend/{name}.py",
+                "old_text": f"VALUE = 'old-{name}'",
+                "new_text": f"VALUE = 'new-{name}'",
+            }
+            for name in ("one", "two", "three")
+        ],
+        separators=(",", ":"),
+    )
+    message = (
+        "inspect backend/one.py backend/two.py backend/three.py apply "
+        f"{changes_json} in backend then test tests/test_one.py"
+    )
+    try:
+        task_id, fallback = await _seed_turn(
+            database,
+            suffix="8",
+            message=message,
+        )
+        await planner.prepare(
+            task_id,
+            fallback.user_message_id,
+            fallback,
+            frozenset({"workspace_coding_loop:python:3"}),
+        )
+        interpreted = await planner.interpret(task_id)
+        assert interpreted.adjudication is not None
+        assert interpreted.adjudication.outcome == "single_step"
+        await task_loops.plan(task_id)
+
+        batch_sizes: list[int] = []
+        delivered = None
+        for index in range(40):
+            result = await coordinator.advance(task_id, f"bounded-worker-{index}")
+            if result.command.kind == "execute_agent_batch":
+                batch_sizes.append(len(result.command.node_ids))
+            current_execution = result.read.execution
+            if current_execution is not None and current_execution.status == "awaiting_user":
+                patch = result.read.workspace_patch
+                git_commit = result.read.git_commit
+                if (
+                    patch is not None
+                    and patch.schema_version == "deskpilot.workspace-patch-preview.v1"
+                ):
+                    await coordinator.approve_workspace_patch(
+                        task_id,
+                        patch.confirmation_digest,
+                        expected_execution_revision=current_execution.revision,
+                    )
+                elif (
+                    git_commit is not None
+                    and git_commit.schema_version == "deskpilot.git-commit-preview.v1"
+                ):
+                    await coordinator.approve_git_commit(
+                        task_id,
+                        git_commit.confirmation_digest,
+                        expected_execution_revision=current_execution.revision,
+                    )
+            if current_execution is not None and current_execution.status == "succeeded":
+                delivered = result.read
+                break
+
+        assert delivered is not None
+        assert delivered.coding_delivery is not None
+        assert delivered.coding_delivery.changed_files == (
+            "backend/one.py",
+            "backend/three.py",
+            "backend/two.py",
+        )
+        assert delivered.coding_delivery.coordinator_evidence.agent_id == (
+            "builtin.workspace_bounded_coordinator"
+        )
+        assert delivered.coding_delivery.coordinator_evidence.node_count == 9
+        assert max(batch_sizes) == 2
+        assert batch_sizes.count(2) >= 2
+        assert all(
+            (backend / f"{name}.py").read_text(encoding="utf-8")
+            == f"VALUE = 'new-{name}'\n"
+            for name in ("one", "two", "three")
+        )
+
+        async with database.session() as session:
+            coding_delivery = await session.scalar(
+                select(WorkspaceCodingDeliveryRecord)
+            )
+            model_turns = tuple(
+                (await session.scalars(select(AgentModelTurnRecord))).all()
+            )
+        assert coding_delivery is not None
+        assert coding_delivery.changed_file_count == 3
+        assert coding_delivery.manifest["schema_version"] == (
+            "deskpilot.workspace-coding-delivery.v3"
+        )
+        assert coding_delivery.manifest["file_count"] == 3
+        assert len(coding_delivery.manifest["patch_planner_evidence"]) == 3
+        assert len(model_turns) == 4
+        assert all(item.status == "succeeded" for item in model_turns)
+    finally:
+        await database.dispose()
 
 
 def test_coding_loop_offers_expose_their_fixed_test_ecosystem() -> None:

@@ -437,7 +437,7 @@ class TaskLoopExecution(BaseModel):
     event_count: int = Field(ge=1)
     latest_event_id: str = Field(pattern=TASK_LOOP_EXECUTION_EVENT_ID_PATTERN)
     latest_event_digest: str = Field(pattern=DIGEST_PATTERN)
-    node_binding_count: int = Field(ge=1, le=18)
+    node_binding_count: int = Field(ge=1, le=20)
     binding_set_digest: str = Field(pattern=DIGEST_PATTERN)
     created_at: datetime
     updated_at: datetime
@@ -707,9 +707,12 @@ class WorkspaceCodingPlannerEvidenceRead(BaseModel):
 class WorkspaceCodingCoordinatorEvidenceRead(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    agent_id: Literal["builtin.workspace_coordinator"]
-    agent_version: Literal["1.1.0"]
-    node_count: Literal[6, 7]
+    agent_id: Literal[
+        "builtin.workspace_coordinator",
+        "builtin.workspace_bounded_coordinator",
+    ]
+    agent_version: Literal["1.1.0", "1.0.0"]
+    node_count: int = Field(ge=6, le=19)
     output_node_key: Literal["run_fixed_test", "commit_git"]
     graph_digest: str = Field(pattern=DIGEST_PATTERN)
     decision_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -717,10 +720,19 @@ class WorkspaceCodingCoordinatorEvidenceRead(BaseModel):
 
     @model_validator(mode="after")
     def graph_version_matches(self) -> Self:
-        if (self.node_count, self.output_node_key) not in {
-            (6, "run_fixed_test"),
-            (7, "commit_git"),
-        }:
+        legacy_graph = (
+            self.agent_id == "builtin.workspace_coordinator"
+            and self.agent_version == "1.1.0"
+            and (self.node_count, self.output_node_key)
+            in {(6, "run_fixed_test"), (7, "commit_git")}
+        )
+        bounded_graph = (
+            self.agent_id == "builtin.workspace_bounded_coordinator"
+            and self.agent_version == "1.0.0"
+            and self.output_node_key == "commit_git"
+            and self.node_count in range(9, 20, 2)
+        )
+        if not legacy_graph and not bounded_graph:
             raise ValueError("Workspace coding coordinator graph version is inconsistent")
         return self
 
@@ -773,12 +785,12 @@ class WorkspaceCodingDeliveryWorkbenchRead(BaseModel):
         "deskpilot.workspace-coding-delivery-workbench.v1"
     )
     delivery_id: str = Field(pattern=r"^wcd_[0-9a-f]{64}$")
-    changed_files: tuple[str, ...] = Field(min_length=2, max_length=2)
-    changes: tuple[WorkspaceCodingChangeRead, ...] = Field(min_length=2, max_length=2)
+    changed_files: tuple[str, ...] = Field(min_length=2, max_length=8)
+    changes: tuple[WorkspaceCodingChangeRead, ...] = Field(min_length=2, max_length=8)
     coordinator_evidence: WorkspaceCodingCoordinatorEvidenceRead
     patch_planner_evidence: tuple[WorkspaceCodingPlannerEvidenceRead, ...] = Field(
         min_length=2,
-        max_length=2,
+        max_length=8,
     )
     tests: tuple[WorkspaceCodingTestRunRead, ...] = Field(min_length=1, max_length=2)
     failure_repair_history: tuple[WorkspaceCodingFailureRepairRead, ...] = Field(
@@ -789,7 +801,7 @@ class WorkspaceCodingDeliveryWorkbenchRead(BaseModel):
     remaining_risks: tuple[str, ...] = Field(default=(), max_length=10)
     rollback_points: tuple[WorkspaceCodingRollbackPointRead, ...] = Field(
         min_length=2,
-        max_length=2,
+        max_length=8,
     )
     rollback_available: bool
     evidence_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -850,7 +862,7 @@ class TaskLoopExecutionRead(BaseModel):
     workspace_patch: WorkspacePatchPreview | WorkspacePatchReceipt | None = None
     git_commit: GitCommitPreview | GitCommitReceipt | None = None
     coding_delivery: WorkspaceCodingDeliveryWorkbenchRead | None = None
-    nodes: tuple[TaskLoopExecutionNodeRead, ...] = Field(default=(), max_length=18)
+    nodes: tuple[TaskLoopExecutionNodeRead, ...] = Field(default=(), max_length=24)
     recoverable: bool
     created_at: datetime
     updated_at: datetime
@@ -1029,24 +1041,24 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
     loop_event_count: int = Field(ge=1, le=2)
     execution_revision: int | None = Field(default=None, ge=1)
     execution_event_count: int = Field(default=0, ge=0)
-    node_count: int = Field(ge=0, le=18)
-    pending_count: int = Field(ge=0, le=18)
-    ready_count: int = Field(ge=0, le=18)
-    active_count: int = Field(ge=0, le=18)
-    awaiting_verification_count: int = Field(ge=0, le=18)
-    verified_count: int = Field(ge=0, le=18)
-    waiting_user_count: int = Field(ge=0, le=18)
-    failed_count: int = Field(ge=0, le=18)
-    cancelled_count: int = Field(ge=0, le=18)
-    candidate_count: int = Field(ge=0, le=18)
-    verified_result_count: int = Field(ge=0, le=18)
+    node_count: int = Field(ge=0, le=24)
+    pending_count: int = Field(ge=0, le=24)
+    ready_count: int = Field(ge=0, le=24)
+    active_count: int = Field(ge=0, le=24)
+    awaiting_verification_count: int = Field(ge=0, le=24)
+    verified_count: int = Field(ge=0, le=24)
+    waiting_user_count: int = Field(ge=0, le=24)
+    failed_count: int = Field(ge=0, le=24)
+    cancelled_count: int = Field(ge=0, le=24)
+    candidate_count: int = Field(ge=0, le=24)
+    verified_result_count: int = Field(ge=0, le=24)
     verified_failure_result_count: int = Field(default=0, ge=0)
     no_progress_count: int = Field(ge=0, le=3)
     no_progress_limit: Literal[3] = 3
     repair_count: int = Field(ge=0, le=2)
     maximum_plan_generations: Literal[3] = 3
     budget_exhausted: bool
-    nodes: tuple[TaskLoopExecutionWorkbenchNodeRead, ...] = Field(default=(), max_length=18)
+    nodes: tuple[TaskLoopExecutionWorkbenchNodeRead, ...] = Field(default=(), max_length=24)
     coding_delivery: WorkspaceCodingDeliveryWorkbenchRead | None = None
     recoverable: bool
     created_at: datetime

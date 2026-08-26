@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0059_workspace_coding_amendments"
+CURRENT_REVISION = "0060_workspace_coding_bounded_files"
 
 
 def _sync_url(path: Path) -> str:
@@ -972,7 +972,7 @@ def test_stage_116b_workspace_coding_amendment_migration_is_guarded(
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0059_workspace_coding_amendments",
         target_revision="0058_workspace_coding_deliveries",
         insert_statement="""
             INSERT INTO workspace_coding_amendment_bindings (
@@ -1026,6 +1026,80 @@ def test_stage_116b_workspace_coding_amendment_migration_is_guarded(
             connection
         ).get_table_names()
     engine.dispose()
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_116b_bounded_coding_delivery_migration_is_guarded(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-116b-bounded-coding-delivery.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspect(connection).get_check_constraints(
+                "workspace_coding_deliveries"
+            )
+        }
+    engine.dispose()
+    assert "BETWEEN 2 AND 8" in constraints["ck_workspace_coding_delivery_counts"]
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision=CURRENT_REVISION,
+        target_revision="0059_workspace_coding_amendments",
+        insert_statement="""
+            INSERT INTO workspace_coding_deliveries (
+                delivery_id, execution_id, task_id, run_id, plan_id,
+                plan_manifest_digest, changed_file_count, test_run_count,
+                failure_count, rollback_available, manifest, delivery_digest,
+                created_at
+            ) VALUES (
+                :delivery_id, :execution_id, :task_id, :run_id, :plan_id,
+                :digest, 3, 1, 0, 1, :empty_object, :delivery_digest,
+                :created_at
+            )
+        """,
+        parameters={
+            "delivery_id": "wcd_" + "1" * 64,
+            "execution_id": "tlx_" + "2" * 64,
+            "task_id": "tsk_" + "3" * 32,
+            "run_id": "run_" + "4" * 64,
+            "plan_id": "epl_" + "5" * 64,
+            "digest": "6" * 64,
+            "delivery_digest": "7" * 64,
+            "empty_object": "{}",
+            "created_at": "2026-08-26 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT delivery_id, changed_file_count, delivery_digest
+            FROM workspace_coding_deliveries WHERE delivery_id = :delivery_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM workspace_coding_deliveries "
+            "WHERE delivery_id = :delivery_id"
+        ),
+    )
+
+    command.downgrade(config, "0059_workspace_coding_amendments")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspect(connection).get_check_constraints(
+                "workspace_coding_deliveries"
+            )
+        }
+    engine.dispose()
+    assert "changed_file_count = 2" in constraints[
+        "ck_workspace_coding_delivery_counts"
+    ]
     command.upgrade(config, "head")
     command.check(config)
 

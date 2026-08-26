@@ -1326,6 +1326,7 @@ class TaskLoopActivationRuntime:
             not in {
                 "deskpilot.workspace-coding-delivery.v1",
                 "deskpilot.workspace-coding-delivery.v2",
+                "deskpilot.workspace-coding-delivery.v3",
             }
             or manifest.get("delivery_id") != record.delivery_id
             or record.delivery_digest != sha256_digest(manifest)
@@ -1412,6 +1413,21 @@ class TaskLoopActivationRuntime:
                 if isinstance(item, dict)
             )
             delivery_version = manifest["schema_version"]
+            if delivery_version in {
+                "deskpilot.workspace-coding-delivery.v1",
+                "deskpilot.workspace-coding-delivery.v2",
+            }:
+                if "file_count" in manifest or record.changed_file_count != 2:
+                    raise ValueError("Legacy coding delivery file count changed")
+            else:
+                raw_file_count = manifest.get("file_count")
+                if (
+                    not isinstance(raw_file_count, int)
+                    or isinstance(raw_file_count, bool)
+                    or raw_file_count not in range(3, 9)
+                    or raw_file_count != record.changed_file_count
+                ):
+                    raise ValueError("Bounded coding delivery file count changed")
             if delivery_version == "deskpilot.workspace-coding-delivery.v1":
                 if raw_git is not None:
                     raise ValueError("Legacy coding delivery cannot contain Git evidence")
@@ -1445,6 +1461,9 @@ class TaskLoopActivationRuntime:
             ) from error
         if (
             len(changes) != record.changed_file_count
+            or len(changed_files) != record.changed_file_count
+            or len(planners) != record.changed_file_count
+            or len(rollbacks) != record.changed_file_count
             or len(tests) != record.test_run_count
             or len(failures) != record.failure_count
             or bool(manifest.get("rollback_available"))
