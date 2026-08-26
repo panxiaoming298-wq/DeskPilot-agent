@@ -1460,6 +1460,7 @@ def workspace_coding_loop_contract(
         "workspace.file.read.v1",
         "workspace.patch.propose.v1",
         "workspace.patch.bundle.v1",
+        "workspace.git.commit.v1",
         (
             "workspace.python.test.v1"
             if test_kind == "python"
@@ -1483,7 +1484,8 @@ def workspace_coding_loop_contract(
             "由受约束 Coordinator 确认服务器封存的固定编码图；两个独立本地 Reader"
             "并行读取服务器绑定文件；两个无执行权 Patch Planner"
             "只能提议服务器封存的精确替换；全部结果分别验证后执行经用户确认的多文件"
-            "Patch，再运行服务器固定测试并独立验收交付"
+            "Patch，再运行服务器固定测试；测试通过后经第二次精确确认创建服务器命名的"
+            "Git 分支与提交，最后独立验收交付"
         ),
         acceptance_criteria=(
             AcceptanceCriterion(
@@ -1492,7 +1494,8 @@ def workspace_coding_loop_contract(
                 description=(
                     "结果必须绑定一个 Coordinator 图确认、两个 Reader ResultRef、"
                     "两个 Patch Proposal ResultRef、"
-                    "内容寻址 Patch 回执、固定测试结果、失败/Repair 历史和最终确定性验收。"
+                    "内容寻址 Patch 回执、固定测试结果、受控 Git 提交回执、"
+                    "失败/Repair 历史和最终确定性验收。"
                 ),
                 verification_requirement=VerificationRequirement.DETERMINISTIC,
                 origin="trusted_template",
@@ -1506,6 +1509,8 @@ def workspace_coding_loop_contract(
             "unprivileged_patch_planner_model_turn_v1",
             "exact_multi_file_patch_confirmation_v1",
             "server_bound_fixed_test_v1",
+            "exact_git_branch_commit_confirmation_v1",
+            "git_hooks_signing_push_disabled_v1",
             "single_bounded_test_repair_v1",
             "no_shell",
             "no_dynamic_code",
@@ -1522,14 +1527,14 @@ def workspace_coding_loop_contract(
         max_risk_level=ToolRiskLevel.R1,
         budget=TaskBudget(
             max_model_calls=5,
-            max_tool_calls=4,
+            max_tool_calls=5,
             max_input_tokens=56_000,
             max_output_tokens=6_000,
-            max_wall_seconds=660,
+            max_wall_seconds=780,
             max_retries=1,
             max_cost_micros=300_000,
             max_handoffs=0,
-            max_plan_nodes=9,
+            max_plan_nodes=10,
         ),
         output_contract=OutputContract(media_type="application/json", language="zh-CN"),
         capabilities=refs,
@@ -1620,7 +1625,7 @@ def workspace_coding_loop_draft(
                 local_key="coordinate_coding",
                 kind=DraftNodeKind.AGENT,
                 objective=(
-                    "只确认服务器封存的六节点编码图、精确依赖和预算；不得创建"
+                    "只确认服务器封存的七节点编码图、精确依赖和预算；不得创建"
                     "路径、工具、节点、预算或权限。"
                 ),
                 agent_selector="builtin.workspace_coordinator",
@@ -1697,10 +1702,23 @@ def workspace_coding_loop_draft(
                 budget=test_budget,
             ),
             DraftPlanNode(
+                local_key="commit_git",
+                kind=DraftNodeKind.CAPABILITY,
+                objective=(
+                    "只在固定测试通过后，准备经用户精确确认的服务器命名 Git 分支与"
+                    "提交；关闭 hooks、签名和 push，并生成可对账回执。"
+                ),
+                capability_selector="workspace.git.commit.v1",
+                depends_on=("run_fixed_test",),
+                acceptance_refs=("ac_workspace_coding_loop",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=patch_budget,
+            ),
+            DraftPlanNode(
                 local_key="final_acceptance",
                 kind=DraftNodeKind.FINAL_ACCEPTANCE,
-                objective="独立复核双 Reader、Patch、Test 与 Repair 证明链。",
-                depends_on=("run_fixed_test",),
+                objective="独立复核双 Reader、Patch、Test、Git commit 与 Repair 证明链。",
+                depends_on=("commit_git",),
                 verification_profile=VerificationProfile.DETERMINISTIC,
                 budget=zero,
             ),

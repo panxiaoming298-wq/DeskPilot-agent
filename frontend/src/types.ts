@@ -992,6 +992,7 @@ export type WorkbenchAction =
   | 'replan_failed_execution'
   | 'commit_workspace_edit'
   | 'commit_workspace_patch'
+  | 'commit_workspace_git'
   | 'commit_workspace_path_operation'
   | 'prepare_export'
   | 'stop_execution'
@@ -1743,6 +1744,52 @@ export interface WorkspacePatchReceipt {
   receipt_digest: string
 }
 
+export interface GitCommitPathProof {
+  relative_path: string
+  content_digest: string
+  byte_count: number
+  proof_digest: string
+}
+
+export interface GitCommitPreview {
+  schema_version: 'deskpilot.git-commit-preview.v1'
+  task_id: string
+  project_path: string
+  expected_repository_digest: string
+  toolchain_digest: string
+  expected_head_oid: string
+  original_branch: string
+  target_branch: string
+  commit_message: string
+  paths: GitCommitPathProof[]
+  excluded_backups: GitCommitPathProof[]
+  hooks_disabled: true
+  signing_disabled: true
+  push_disabled: true
+  confirmation_digest: string
+}
+
+export interface GitCommitReceipt {
+  schema_version: 'deskpilot.git-commit-receipt.v1'
+  task_id: string
+  project_path: string
+  confirmation_digest: string
+  expected_head_oid: string
+  commit_oid: string
+  tree_oid: string
+  original_branch: string
+  target_branch: string
+  commit_message_digest: string
+  paths: GitCommitPathProof[]
+  excluded_backups: GitCommitPathProof[]
+  committed_at: string
+  hooks_disabled: true
+  signing_disabled: true
+  push_disabled: true
+  rollback_available: true
+  receipt_digest: string
+}
+
 export interface WorkspacePatchTestRead {
   schema_version: 'deskpilot.workspace-patch-test.v1'
   task_id: string
@@ -1881,6 +1928,7 @@ export interface TaskWorkbench {
   workspace_file: WorkspaceFileRead | null
   workspace_edit: WorkspaceEditPreview | WorkspaceEditReceipt | null
   workspace_patch: WorkspacePatchPreview | WorkspacePatchReceipt | null
+  workspace_git_commit?: GitCommitPreview | GitCommitReceipt | null
   workspace_path_operation: WorkspacePathOperationPreview | WorkspacePathOperationReceipt | null
   workspace_directory: WorkspaceDirectoryRead | null
   workspace_check: WorkspaceCheckRead | null

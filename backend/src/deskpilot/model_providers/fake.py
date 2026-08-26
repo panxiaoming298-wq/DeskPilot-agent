@@ -479,7 +479,11 @@ class FakeModelProvider:
                                     AgentTaskGraphNodeProposal.model_validate(item)
                                     for item in capabilities
                                 ),
-                                output_node_key="run_fixed_test",
+                                output_node_key=str(
+                                    cast(dict[str, JsonValue], capabilities[-1])[
+                                        "local_key"
+                                    ]
+                                ),
                                 decision_summary=(
                                     "确认服务器封存的固定编码图，不扩展任何执行权限。"
                                 ),

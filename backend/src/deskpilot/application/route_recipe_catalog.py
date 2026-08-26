@@ -291,6 +291,7 @@ _PLANNER_ONLY_ROUTE_SPECS: Mapping[RouteId, dict[str, object]] = MappingProxyTyp
                 "workspace.patch.bundle.v1",
                 "workspace.python.test.v1",
                 "workspace.node.test.v1",
+                "workspace.git.commit.v1",
             ),
             "max_risk": "R1",
         },

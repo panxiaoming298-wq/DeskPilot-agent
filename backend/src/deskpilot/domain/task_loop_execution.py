@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import DIGEST_PATTERN, AgentToolGrant, BoundAgentRef
+from deskpilot.domain.coding_tools import GitCommitPreview, GitCommitReceipt
 from deskpilot.domain.command_profiles import CommandProfileId
 from deskpilot.domain.model_contracts import ModelLocation, PrivacyMode
 from deskpilot.domain.task_loop import (
@@ -708,11 +709,20 @@ class WorkspaceCodingCoordinatorEvidenceRead(BaseModel):
 
     agent_id: Literal["builtin.workspace_coordinator"]
     agent_version: Literal["1.1.0"]
-    node_count: Literal[6]
-    output_node_key: Literal["run_fixed_test"]
+    node_count: Literal[6, 7]
+    output_node_key: Literal["run_fixed_test", "commit_git"]
     graph_digest: str = Field(pattern=DIGEST_PATTERN)
     decision_digest: str = Field(pattern=DIGEST_PATTERN)
     verification_digest: str = Field(pattern=DIGEST_PATTERN)
+
+    @model_validator(mode="after")
+    def graph_version_matches(self) -> Self:
+        if (self.node_count, self.output_node_key) not in {
+            (6, "run_fixed_test"),
+            (7, "commit_git"),
+        }:
+            raise ValueError("Workspace coding coordinator graph version is inconsistent")
+        return self
 
 
 class WorkspaceCodingTestRunRead(BaseModel):
@@ -732,6 +742,17 @@ class WorkspaceCodingFailureRepairRead(BaseModel):
     attempt: int = Field(ge=1, le=2)
     status: Literal["failed", "error"]
     failure_receipt_digest: str = Field(pattern=DIGEST_PATTERN)
+
+
+class WorkspaceCodingGitCommitEvidenceRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    target_branch: str = Field(pattern=r"^codex/deskpilot-[0-9a-f]{16}$")
+    expected_head_oid: str = Field(pattern=r"^[0-9a-f]{40,64}$")
+    commit_oid: str = Field(pattern=r"^[0-9a-f]{40,64}$")
+    receipt_digest: str = Field(pattern=DIGEST_PATTERN)
+    push_disabled: Literal[True] = True
+    rollback_available: Literal[True] = True
 
 
 class WorkspaceCodingRollbackPointRead(BaseModel):
@@ -764,6 +785,7 @@ class WorkspaceCodingDeliveryWorkbenchRead(BaseModel):
         default=(),
         max_length=1,
     )
+    git_commit: WorkspaceCodingGitCommitEvidenceRead | None = None
     remaining_risks: tuple[str, ...] = Field(default=(), max_length=10)
     rollback_points: tuple[WorkspaceCodingRollbackPointRead, ...] = Field(
         min_length=2,
@@ -787,6 +809,8 @@ class WorkspaceCodingDeliveryWorkbenchRead(BaseModel):
             or sum(item.status == "passed" for item in self.tests) != 1
             or len(self.failure_repair_history)
             != sum(item.status != "passed" for item in self.tests)
+            or (self.git_commit is None)
+            is not (self.coordinator_evidence.output_node_key == "run_fixed_test")
             or self.rollback_available
             is not all(item.available for item in self.rollback_points)
             or self.created_at.tzinfo is None
@@ -824,6 +848,7 @@ class TaskLoopExecutionRead(BaseModel):
     execution: TaskLoopExecution | None = None
     cycle: TaskLoopCycleRead | None = None
     workspace_patch: WorkspacePatchPreview | WorkspacePatchReceipt | None = None
+    git_commit: GitCommitPreview | GitCommitReceipt | None = None
     coding_delivery: WorkspaceCodingDeliveryWorkbenchRead | None = None
     nodes: tuple[TaskLoopExecutionNodeRead, ...] = Field(default=(), max_length=18)
     recoverable: bool
@@ -854,6 +879,8 @@ class TaskLoopExecutionRead(BaseModel):
                 raise ValueError("Pre-execution Task Loop cannot expose cycle state")
             if self.workspace_patch is not None:
                 raise ValueError("Pre-execution Task Loop cannot expose an approval")
+            if self.git_commit is not None:
+                raise ValueError("Pre-execution Task Loop cannot expose a Git approval")
             if self.coding_delivery is not None:
                 raise ValueError("Pre-execution Task Loop cannot expose a coding delivery")
         else:
@@ -889,6 +916,7 @@ class TaskLoopExecutionRead(BaseModel):
         }
         material.setdefault("cycle", None)
         material.setdefault("workspace_patch", None)
+        material.setdefault("git_commit", None)
         material.setdefault("coding_delivery", None)
         if material.get("execution") is not None and material.get("cycle") is None:
             material["cycle"] = TaskLoopCycleRead.build(

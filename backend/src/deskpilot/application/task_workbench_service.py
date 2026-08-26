@@ -108,6 +108,7 @@ from deskpilot.domain.agent_runtime import (
     ExecutionRunStatus,
 )
 from deskpilot.domain.artifact_runtime import DeliveryManifestRead
+from deskpilot.domain.coding_tools import GitCommitPreview, GitCommitReceipt
 from deskpilot.domain.command_profiles import CommandProfileId
 from deskpilot.domain.context_memory import (
     ConversationMessageRead,
@@ -1411,6 +1412,53 @@ class TaskWorkbenchService:
             return await self._schedule_automatic(updated)
         return updated
 
+    async def commit_workspace_git(
+        self,
+        task_id: str,
+        confirmation_digest: str,
+    ) -> TaskWorkbenchRead:
+        workbench = await self.get(task_id)
+        git_commit = workbench.workspace_git_commit
+        if not any(
+            item.action is WorkbenchAction.COMMIT_WORKSPACE_GIT and item.enabled
+            for item in workbench.actions
+        ):
+            if (
+                isinstance(git_commit, GitCommitPreview)
+                and git_commit.confirmation_digest == confirmation_digest
+            ) or (
+                isinstance(git_commit, GitCommitReceipt)
+                and git_commit.confirmation_digest == confirmation_digest
+            ):
+                return workbench
+            raise TaskWorkbenchConflictError("Git commit is not awaiting confirmation")
+        generic_summary = (
+            workbench.task_loop
+            if isinstance(workbench.task_loop, TaskLoopExecutionWorkbenchRead)
+            else None
+        )
+        if (
+            self._task_loop_execution is None
+            or generic_summary is None
+            or generic_summary.execution_revision is None
+            or not isinstance(git_commit, GitCommitPreview)
+        ):
+            raise TaskWorkbenchConflictError("Task Loop Git commit runtime is unavailable")
+        try:
+            preview = await self._task_loop_execution.approve_git_commit(
+                task_id,
+                confirmation_digest,
+                expected_execution_revision=generic_summary.execution_revision,
+            )
+        except TaskLoopExecutionCoordinatorError as error:
+            raise TaskWorkbenchConflictError(str(error)) from error
+        await self._add_assistant_message(
+            task_id,
+            f"已批准受控 Git 提交到 {preview.target_branch}；hooks、签名和 push 均关闭，"
+            "任务循环将恢复并核验提交回执。",
+        )
+        return await self._schedule_automatic(await self.get(task_id))
+
     async def commit_workspace_path_operation(
         self, task_id: str, confirmation_digest: str
     ) -> TaskWorkbenchRead:
@@ -1892,6 +1940,11 @@ class TaskWorkbenchService:
             and task_loop_execution.workspace_patch is not None
         ):
             workspace_patch = task_loop_execution.workspace_patch
+        workspace_git_commit = (
+            task_loop_execution.git_commit
+            if task_loop_execution is not None
+            else None
+        )
         mcp_enabled = bool(
             route is not None
             and route.route_id == "mcp_text_metrics"
@@ -1959,6 +2012,7 @@ class TaskWorkbenchService:
             "workspace_file": workspace_file,
             "workspace_edit": workspace_edit,
             "workspace_patch": workspace_patch,
+            "workspace_git_commit": workspace_git_commit,
             "workspace_path_operation": workspace_path_operation,
             "workspace_directory": workspace_directory,
             "workspace_check": workspace_check,
@@ -2513,6 +2567,20 @@ class TaskWorkbenchService:
                 ),
                 "WORKSPACE_PATCH_PREVIEW_OR_CONFIRMATION_MISSING",
             ),
+            WorkbenchAction.COMMIT_WORKSPACE_GIT: (
+                bool(
+                    task_loop_execution is not None
+                    and generic_execution is not None
+                    and generic_execution.status == "awaiting_user"
+                    and isinstance(task_loop_execution.git_commit, GitCommitPreview)
+                    and any(
+                        node.local_key.endswith("commit_git")
+                        and node.status == "waiting_user"
+                        for node in task_loop_execution.nodes
+                    )
+                ),
+                "GIT_COMMIT_PREVIEW_OR_CONFIRMATION_MISSING",
+            ),
             WorkbenchAction.COMMIT_WORKSPACE_PATH_OPERATION: (
                 bool(
                     route is not None
@@ -2571,6 +2639,9 @@ class TaskWorkbenchService:
             ),
             WorkbenchAction.COMMIT_WORKSPACE_EDIT: "提交已确认的单次文本替换并保留安全备份。",
             WorkbenchAction.COMMIT_WORKSPACE_PATCH: "提交已确认的多文件补丁并保留逐项回执。",
+            WorkbenchAction.COMMIT_WORKSPACE_GIT: (
+                "在服务器命名的新分支提交已测试文件；关闭 hooks、签名和 push。"
+            ),
             WorkbenchAction.COMMIT_WORKSPACE_PATH_OPERATION: (
                 "提交已确认的新建或重命名，并核验路径与版本证明。"
             ),
@@ -2592,6 +2663,7 @@ class TaskWorkbenchService:
             WorkbenchAction.REPLAN_FAILED_EXECUTION: "execution_control",
             WorkbenchAction.COMMIT_WORKSPACE_EDIT: "user_path_write",
             WorkbenchAction.COMMIT_WORKSPACE_PATCH: "user_path_write",
+            WorkbenchAction.COMMIT_WORKSPACE_GIT: "workspace_write",
             WorkbenchAction.COMMIT_WORKSPACE_PATH_OPERATION: "user_path_write",
             WorkbenchAction.PREPARE_EXPORT: "user_path_write",
             WorkbenchAction.STOP_EXECUTION: "execution_control",

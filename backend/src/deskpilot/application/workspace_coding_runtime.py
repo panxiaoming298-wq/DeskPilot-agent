@@ -1,14 +1,16 @@
-"""Project-root constrained search, batch read, and fixed read-only Git inspection."""
+"""Project-root constrained coding reads and fixed, proof-carrying Git operations."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import tempfile
+from datetime import datetime
 from pathlib import Path, PurePath
 from typing import Literal
 
@@ -19,6 +21,9 @@ from deskpilot.application.workspace_file_runtime import (
 )
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.coding_tools import (
+    GitCommitPathProof,
+    GitCommitPreview,
+    GitCommitReceipt,
     GitInspectionRead,
     ProjectBatchRead,
     ProjectSearchMatch,
@@ -345,6 +350,12 @@ class WorkspaceCodingRuntime:
             "-c",
             "core.hooksPath=NUL" if os.name == "nt" else "core.hooksPath=/dev/null",
             "-c",
+            "core.attributesFile=NUL"
+            if os.name == "nt"
+            else "core.attributesFile=/dev/null",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
             "core.fsmonitor=false",
             "-c",
             "diff.external=",
@@ -444,6 +455,625 @@ class WorkspaceCodingRuntime:
         return GitInspectionRead.model_validate(
             {**values, "result_digest": sha256_digest(values)}
         )
+
+    def prepare_git_commit(
+        self,
+        *,
+        task_id: str,
+        project_path: str,
+        paths: tuple[str, ...],
+    ) -> GitCommitPreview:
+        """Seal one clean, exact worktree delta without changing repository state."""
+
+        project, normalized_project, base, environment = self._git_scope(project_path)
+        git_executable = self._git_executable
+        if git_executable is None:  # pragma: no cover - narrowed by _git_scope.
+            raise WorkspaceCodingUnavailableError("Git runtime is unavailable")
+        relative_paths = self._git_relative_paths(normalized_project, paths)
+        head_oid = self._required_head_oid(base, project, environment)
+        original_branch = self._current_branch(base, project, environment)
+        target_branch = f"codex/deskpilot-{task_id.removeprefix('tsk_')[:16]}"
+        if original_branch == target_branch:
+            raise WorkspaceGitRejectedError("Git commit is already on its target branch")
+        target_exists = self._run_git(
+            base,
+            project,
+            environment,
+            ("show-ref", "--verify", "--quiet", f"refs/heads/{target_branch}"),
+            allowed_returncodes=(0, 1),
+        )
+        if target_exists.returncode == 0:
+            raise WorkspaceGitRejectedError("Git commit target branch already exists")
+        status = self._git_status(base, project, environment)
+        backup_paths = self._git_backup_paths(status, relative_paths)
+        expected_status = {
+            **{path: " M" for path in relative_paths},
+            **{path: "??" for path in backup_paths},
+        }
+        if status != expected_status:
+            raise WorkspaceGitRejectedError(
+                "Git commit requires only the exact unstaged Task files to be modified"
+            )
+        proofs = tuple(self._git_path_proof(project, path) for path in relative_paths)
+        backup_proofs = tuple(
+            self._git_path_proof(project, path) for path in backup_paths
+        )
+        repository_digest = self._repository_digest(
+            project,
+            normalized_project,
+            head_oid,
+        )
+        values = {
+            "schema_version": "deskpilot.git-commit-preview.v1",
+            "task_id": task_id,
+            "project_path": normalized_project,
+            "expected_repository_digest": repository_digest,
+            "toolchain_digest": self._file_digest(git_executable),
+            "expected_head_oid": head_oid,
+            "original_branch": original_branch,
+            "target_branch": target_branch,
+            "commit_message": f"完成 DeskPilot 任务 {task_id.removeprefix('tsk_')[:12]}",
+            "paths": [item.model_dump(mode="json") for item in proofs],
+            "excluded_backups": [
+                item.model_dump(mode="json") for item in backup_proofs
+            ],
+            "hooks_disabled": True,
+            "signing_disabled": True,
+            "push_disabled": True,
+        }
+        return GitCommitPreview.model_validate(
+            {**values, "confirmation_digest": sha256_digest(values)}
+        )
+
+    def commit_git(self, preview: GitCommitPreview) -> GitCommitReceipt:
+        """Create or exactly reconcile the server-owned branch and commit."""
+
+        project, normalized_project, base, environment = self._git_scope(
+            preview.project_path
+        )
+        git_executable = self._git_executable
+        if git_executable is None:  # pragma: no cover - narrowed by _git_scope.
+            raise WorkspaceCodingUnavailableError("Git runtime is unavailable")
+        if (
+            normalized_project != preview.project_path
+            or self._file_digest(git_executable) != preview.toolchain_digest
+        ):
+            raise WorkspaceGitRejectedError("Git commit toolchain or project scope changed")
+        current_head = self._required_head_oid(base, project, environment)
+        current_branch = self._current_branch(base, project, environment)
+        if current_head != preview.expected_head_oid:
+            if current_branch != preview.target_branch:
+                raise WorkspaceGitRejectedError("Git HEAD changed outside the approved commit")
+            return self._git_commit_receipt(
+                preview,
+                project,
+                base,
+                environment,
+                current_head,
+            )
+        expected_repository_digest = self._repository_digest(
+            project,
+            normalized_project,
+            current_head,
+        )
+        if expected_repository_digest != preview.expected_repository_digest:
+            raise WorkspaceGitRejectedError("Git repository identity changed after approval")
+        expected_paths = tuple(item.relative_path for item in preview.paths)
+        for item in preview.paths:
+            if self._git_path_proof(project, item.relative_path) != item:
+                raise WorkspaceGitRejectedError("Git commit file content changed after approval")
+        for item in preview.excluded_backups:
+            if self._git_path_proof(project, item.relative_path) != item:
+                raise WorkspaceGitRejectedError("Git rollback backup changed after approval")
+        status = self._git_status(base, project, environment)
+        backup_status = {
+            item.relative_path: "??" for item in preview.excluded_backups
+        }
+        unstaged = {**{path: " M" for path in expected_paths}, **backup_status}
+        staged = {**{path: "M " for path in expected_paths}, **backup_status}
+        if current_branch == preview.original_branch:
+            if status != unstaged:
+                raise WorkspaceGitRejectedError("Git worktree changed after approval")
+            target_exists = self._run_git(
+                base,
+                project,
+                environment,
+                (
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    f"refs/heads/{preview.target_branch}",
+                ),
+                allowed_returncodes=(0, 1),
+            )
+            if target_exists.returncode == 0:
+                raise WorkspaceGitRejectedError("Git target branch appeared after approval")
+            self._run_git(
+                base,
+                project,
+                environment,
+                ("switch", "--no-guess", "--create", preview.target_branch),
+            )
+            current_branch = preview.target_branch
+        if current_branch != preview.target_branch or (
+            status != unstaged and status != staged
+        ):
+            raise WorkspaceGitRejectedError("Git commit partial state is not reconcilable")
+        if status == unstaged:
+            self._run_git(
+                base,
+                project,
+                environment,
+                ("add", "--", *expected_paths),
+            )
+            if self._git_status(base, project, environment) != staged:
+                raise WorkspaceGitRejectedError("Git index did not stage the exact approved files")
+        commit_environment = dict(environment)
+        commit_environment.update(
+            {
+                "GIT_AUTHOR_NAME": "DeskPilot",
+                "GIT_AUTHOR_EMAIL": "deskpilot@localhost.invalid",
+                "GIT_COMMITTER_NAME": "DeskPilot",
+                "GIT_COMMITTER_EMAIL": "deskpilot@localhost.invalid",
+            }
+        )
+        self._run_git(
+            base,
+            project,
+            commit_environment,
+            (
+                "-c",
+                "commit.gpgSign=false",
+                "commit",
+                "--no-verify",
+                "--no-gpg-sign",
+                "--cleanup=verbatim",
+                "-m",
+                preview.commit_message,
+            ),
+        )
+        commit_oid = self._required_head_oid(base, project, environment)
+        return self._git_commit_receipt(
+            preview,
+            project,
+            base,
+            environment,
+            commit_oid,
+        )
+
+    def _git_scope(
+        self,
+        project_path: str,
+    ) -> tuple[Path, str, tuple[str, ...], dict[str, str]]:
+        if not self.git_enabled or self._git_executable is None:
+            raise WorkspaceCodingUnavailableError("Git runtime is unavailable")
+        project, normalized_project = self._workspace.resolve_project_directory(project_path)
+        git_dir = project / ".git"
+        self._validate_git_directory(git_dir)
+        base = (
+            str(self._git_executable),
+            "--no-pager",
+            "-c",
+            "core.hooksPath=NUL" if os.name == "nt" else "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=NUL"
+            if os.name == "nt"
+            else "core.attributesFile=/dev/null",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "diff.external=",
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "pager.status=false",
+            "-c",
+            "pager.diff=false",
+            "-c",
+            "pager.log=false",
+            "-C",
+            str(project),
+        )
+        environment = self._git_environment()
+        scope = self._run_git(
+            base,
+            project,
+            environment,
+            (
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--git-dir",
+                "--git-common-dir",
+                "--show-object-format",
+            ),
+        )
+        try:
+            lines = scope.stdout.decode("utf-8").splitlines()
+            top_level = Path(lines[0]).resolve(strict=True)
+            resolved_git_dir = Path(lines[1]).resolve(strict=True)
+            common_dir = Path(lines[2]).resolve(strict=True)
+            object_format = lines[3].strip()
+        except (IndexError, OSError, UnicodeDecodeError) as error:
+            raise WorkspaceGitRejectedError("Git repository scope is invalid") from error
+        if (
+            top_level != project
+            or resolved_git_dir != git_dir
+            or common_dir != git_dir
+            or object_format not in {"sha1", "sha256"}
+        ):
+            raise WorkspaceGitRejectedError(
+                "Git worktree, common directory, or object store escaped the project"
+            )
+        if (git_dir / "info" / "attributes").exists():
+            raise WorkspaceGitRejectedError("Git repository-local attributes are rejected")
+        tracked_attributes = self._run_git(
+            base,
+            project,
+            environment,
+            (
+                "ls-files",
+                "-z",
+                "--",
+                ".gitattributes",
+                ":(glob)**/.gitattributes",
+            ),
+        )
+        if tracked_attributes.stdout:
+            raise WorkspaceGitRejectedError("Git attributes and content filters are rejected")
+        return project, normalized_project, base, environment
+
+    def _git_relative_paths(
+        self,
+        normalized_project: str,
+        paths: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        if not 2 <= len(paths) <= 8:
+            raise WorkspaceGitRejectedError("Git commit requires 2 to 8 exact paths")
+        project_parts = PurePath(normalized_project).parts
+        resolved: list[str] = []
+        for raw in paths:
+            safe = self._safe_relative(raw)
+            parts = safe.parts
+            if parts[: len(project_parts)] == project_parts:
+                parts = parts[len(project_parts) :]
+            if not parts:
+                raise WorkspaceGitRejectedError("Git commit path resolves to the project root")
+            relative = PurePath(*parts).as_posix()
+            if (
+                any(value in relative for value in ("\x00", "\r", "\n", ":"))
+                or Path(relative).suffix.casefold() not in CODING_SUFFIXES
+            ):
+                raise WorkspaceGitRejectedError("Git commit path type is not allowed")
+            resolved.append(relative)
+        normalized = tuple(sorted(resolved, key=str.casefold))
+        if len({item.casefold() for item in normalized}) != len(normalized):
+            raise WorkspaceGitRejectedError("Git commit paths must be unique")
+        return normalized
+
+    def _git_status(
+        self,
+        base: tuple[str, ...],
+        project: Path,
+        environment: dict[str, str],
+    ) -> dict[str, str]:
+        result = self._run_git(
+            base,
+            project,
+            environment,
+            ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+        )
+        entries = result.stdout.split(b"\x00")
+        status: dict[str, str] = {}
+        for raw in entries:
+            if not raw:
+                continue
+            try:
+                decoded = raw.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise WorkspaceGitRejectedError("Git status path is not UTF-8") from error
+            if len(decoded) < 4 or decoded[2] != " ":
+                raise WorkspaceGitRejectedError("Git status output is not canonical")
+            state, path = decoded[:2], decoded[3:].replace("\\", "/")
+            if state[0] in {"R", "C"} or state[1] in {"R", "C"} or path in status:
+                raise WorkspaceGitRejectedError("Git rename/copy status is not supported")
+            status[path] = state
+        return status
+
+    @staticmethod
+    def _git_backup_paths(
+        status: dict[str, str],
+        expected_paths: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        backups: list[str] = []
+        for expected in expected_paths:
+            pure = PurePath(expected)
+            prefix = (
+                PurePath(*pure.parts[:-1]).as_posix() + "/"
+                if len(pure.parts) > 1
+                else ""
+            )
+            pattern = re.compile(
+                rf"^{re.escape(prefix)}\.{re.escape(pure.name)}\.deskpilot-"
+                r"[0-9a-f]{16}\.backup$"
+            )
+            matches = tuple(
+                path
+                for path, state in status.items()
+                if state == "??" and pattern.fullmatch(path)
+            )
+            if len(matches) != 1:
+                raise WorkspaceGitRejectedError(
+                    "Git commit requires one exact rollback backup per Task file"
+                )
+            backups.append(matches[0])
+        normalized = tuple(sorted(backups, key=str.casefold))
+        expected_status_paths = set(expected_paths) | set(normalized)
+        if set(status) != expected_status_paths:
+            raise WorkspaceGitRejectedError(
+                "Git commit contains worktree changes outside its Task and rollback proofs"
+            )
+        return normalized
+
+    def _git_path_proof(self, project: Path, relative_path: str) -> GitCommitPathProof:
+        pure = PurePath(relative_path)
+        if (
+            pure.is_absolute()
+            or any(part in {"", ".", ".."} for part in pure.parts)
+            or any(value in relative_path for value in ("\x00", "\r", "\n", ":"))
+        ):
+            raise WorkspaceGitRejectedError("Git commit proof path escaped its project")
+        path = project.joinpath(*pure.parts)
+        try:
+            cursor = path
+            while cursor != project:
+                if cursor == cursor.parent:
+                    raise WorkspaceGitRejectedError(
+                        "Git commit path escaped its project"
+                    )
+                cursor_stat = cursor.stat(follow_symlinks=False)
+                if self._is_reparse_point(cursor, cursor_stat):
+                    raise WorkspaceGitRejectedError(
+                        "Git commit path contains a link or reparse point"
+                    )
+                cursor = cursor.parent
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(project)
+            value = resolved.stat(follow_symlinks=False)
+            content = resolved.read_bytes()
+            after = resolved.stat(follow_symlinks=False)
+        except (OSError, ValueError) as error:
+            raise WorkspaceGitRejectedError("Git commit file cannot be read") from error
+        if (
+            self._is_reparse_point(resolved, value)
+            or not stat.S_ISREG(value.st_mode)
+            or len(content) > 262_144
+            or self._stat_identity(value) != self._stat_identity(after)
+        ):
+            raise WorkspaceGitRejectedError("Git commit file is outside the bounded file policy")
+        values = {
+            "relative_path": relative_path,
+            "content_digest": hashlib.sha256(content).hexdigest(),
+            "byte_count": len(content),
+        }
+        return GitCommitPathProof.model_validate(
+            {**values, "proof_digest": sha256_digest(values)}
+        )
+
+    def _git_commit_receipt(
+        self,
+        preview: GitCommitPreview,
+        project: Path,
+        base: tuple[str, ...],
+        environment: dict[str, str],
+        commit_oid: str,
+    ) -> GitCommitReceipt:
+        current_branch = self._current_branch(base, project, environment)
+        details = self._run_git(
+            base,
+            project,
+            environment,
+            ("show", "-s", "--format=%P%x00%T%x00%cI%x00%B", commit_oid),
+        ).stdout
+        parts = details.split(b"\x00", 3)
+        if len(parts) != 4:
+            raise WorkspaceGitRejectedError("Git commit receipt details are invalid")
+        parents = parts[0].decode("ascii", errors="ignore").strip().split()
+        tree_oid = parts[1].decode("ascii", errors="ignore").strip().casefold()
+        try:
+            committed_at = datetime.fromisoformat(
+                parts[2].decode("ascii").strip().replace("Z", "+00:00")
+            )
+            message = parts[3].decode("utf-8").rstrip("\r\n")
+        except (UnicodeDecodeError, ValueError) as error:
+            raise WorkspaceGitRejectedError("Git commit receipt encoding is invalid") from error
+        changed = self._run_git(
+            base,
+            project,
+            environment,
+            ("diff-tree", "--no-commit-id", "--name-only", "-r", "-z", commit_oid),
+        ).stdout
+        try:
+            changed_paths = tuple(
+                sorted(
+                    (item.decode("utf-8") for item in changed.split(b"\x00") if item),
+                    key=str.casefold,
+                )
+            )
+        except UnicodeDecodeError as error:
+            raise WorkspaceGitRejectedError("Git commit path receipt is not UTF-8") from error
+        original_ref = self._run_git(
+            base,
+            project,
+            environment,
+            ("rev-parse", "--verify", f"refs/heads/{preview.original_branch}"),
+        ).stdout.decode("ascii", errors="ignore").strip().casefold()
+        expected_paths = tuple(item.relative_path for item in preview.paths)
+        if (
+            current_branch != preview.target_branch
+            or parents != [preview.expected_head_oid]
+            or message != preview.commit_message
+            or changed_paths != expected_paths
+            or original_ref != preview.expected_head_oid
+            or self._git_status(base, project, environment)
+            != {
+                item.relative_path: "??" for item in preview.excluded_backups
+            }
+        ):
+            raise WorkspaceGitRejectedError("Git commit does not match its approved preview")
+        for proof in preview.paths:
+            content = self._run_git(
+                base,
+                project,
+                environment,
+                ("show", f"{commit_oid}:{proof.relative_path}"),
+            ).stdout
+            if (
+                len(content) != proof.byte_count
+                or hashlib.sha256(content).hexdigest() != proof.content_digest
+            ):
+                raise WorkspaceGitRejectedError("Git committed blob changed from its preview")
+        values = {
+            "schema_version": "deskpilot.git-commit-receipt.v1",
+            "task_id": preview.task_id,
+            "project_path": preview.project_path,
+            "confirmation_digest": preview.confirmation_digest,
+            "expected_head_oid": preview.expected_head_oid,
+            "commit_oid": commit_oid,
+            "tree_oid": tree_oid,
+            "original_branch": preview.original_branch,
+            "target_branch": preview.target_branch,
+            "commit_message_digest": sha256_digest({"message": preview.commit_message}),
+            "paths": [item.model_dump(mode="json") for item in preview.paths],
+            "excluded_backups": [
+                item.model_dump(mode="json") for item in preview.excluded_backups
+            ],
+            "committed_at": committed_at,
+            "hooks_disabled": True,
+            "signing_disabled": True,
+            "push_disabled": True,
+            "rollback_available": True,
+        }
+        return GitCommitReceipt.model_validate(
+            {**values, "receipt_digest": sha256_digest(values)}
+        )
+
+    def _repository_digest(
+        self,
+        project: Path,
+        normalized_project: str,
+        head_oid: str,
+    ) -> str:
+        git_dir = project / ".git"
+        objects_dir = git_dir / "objects"
+        config_path = git_dir / "config"
+        try:
+            git_stat = git_dir.stat(follow_symlinks=False)
+            objects_stat = objects_dir.stat(follow_symlinks=False)
+            config_stat = config_path.stat(follow_symlinks=False)
+        except OSError as error:
+            raise WorkspaceGitRejectedError(
+                "Git repository identity cannot be inspected"
+            ) from error
+        if (
+            self._is_reparse_point(git_dir, git_stat)
+            or self._is_reparse_point(objects_dir, objects_stat)
+            or self._is_reparse_point(config_path, config_stat)
+            or not stat.S_ISDIR(git_stat.st_mode)
+            or not stat.S_ISDIR(objects_stat.st_mode)
+            or not stat.S_ISREG(config_stat.st_mode)
+        ):
+            raise WorkspaceGitRejectedError("Git repository identity is outside its boundary")
+        try:
+            config = config_path.read_bytes()
+            config_after = config_path.stat(follow_symlinks=False)
+        except OSError as error:
+            raise WorkspaceGitRejectedError(
+                "Git repository config cannot be read"
+            ) from error
+        if (
+            len(config) > 262_144
+            or self._stat_identity(config_stat) != self._stat_identity(config_after)
+        ):
+            raise WorkspaceGitRejectedError("Git repository config changed during inspection")
+        return sha256_digest(
+            {
+                "project_path": normalized_project,
+                "git_directory_identity": self._stable_stat_identity(git_stat),
+                "object_directory_identity": self._stable_stat_identity(objects_stat),
+                "config_digest": hashlib.sha256(config).hexdigest(),
+                "head_oid": head_oid,
+            }
+        )
+
+    def _required_head_oid(
+        self,
+        base: tuple[str, ...],
+        project: Path,
+        environment: dict[str, str],
+    ) -> str:
+        value = self._head_oid(base, project, environment)
+        if value is None:
+            raise WorkspaceGitRejectedError("Git commit requires an existing HEAD")
+        return value
+
+    def _current_branch(
+        self,
+        base: tuple[str, ...],
+        project: Path,
+        environment: dict[str, str],
+    ) -> str:
+        result = self._run_git(
+            base,
+            project,
+            environment,
+            ("symbolic-ref", "--quiet", "--short", "HEAD"),
+        )
+        try:
+            branch = result.stdout.decode("utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise WorkspaceGitRejectedError("Git branch name is not UTF-8") from error
+        if (
+            not branch
+            or len(branch) > 240
+            or any(value in branch for value in ("\x00", "\r", "\n"))
+        ):
+            raise WorkspaceGitRejectedError("Git branch name is invalid")
+        return branch
+
+    def _run_git(
+        self,
+        base: tuple[str, ...],
+        project: Path,
+        environment: dict[str, str],
+        arguments: tuple[str, ...],
+        *,
+        allowed_returncodes: tuple[int, ...] = (0,),
+    ) -> subprocess.CompletedProcess[bytes]:
+        try:
+            completed = subprocess.run(  # noqa: S603 - exact server-owned command
+                (*base, *arguments),
+                cwd=project,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=False,
+                timeout=GIT_TIMEOUT_SECONDS,
+                close_fds=True,
+                creationflags=(
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+                ),
+            )
+        except subprocess.TimeoutExpired as error:
+            raise WorkspaceGitTimeoutError("Git operation exceeded its time limit") from error
+        if completed.returncode not in allowed_returncodes:
+            raise WorkspaceGitRejectedError(
+                self._safe_error(completed.stderr[:4_097], project)
+                or "Git operation failed"
+            )
+        return completed
 
     def _coding_paths(self, project: Path) -> tuple[list[Path], int]:
         result: list[Path] = []
@@ -551,6 +1181,7 @@ class WorkspaceCodingRuntime:
                 "GIT_CONFIG_GLOBAL": null_path,
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_EXTERNAL_DIFF": "",
+                "GIT_NO_REPLACE_OBJECTS": "1",
                 "GIT_OPTIONAL_LOCKS": "0",
                 "GIT_PAGER": "cat",
                 "LC_ALL": "C.UTF-8",
@@ -586,6 +1217,14 @@ class WorkspaceCodingRuntime:
             "mode": value.st_mode,
             "size": value.st_size,
             "modified_ns": value.st_mtime_ns,
+        }
+
+    @staticmethod
+    def _stable_stat_identity(value: os.stat_result) -> dict[str, int]:
+        return {
+            "device": value.st_dev,
+            "inode": value.st_ino,
+            "mode": value.st_mode,
         }
 
     @staticmethod

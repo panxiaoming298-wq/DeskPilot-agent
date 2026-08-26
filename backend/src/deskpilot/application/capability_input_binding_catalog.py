@@ -155,6 +155,16 @@ class WorkspaceGitInspectExecutorInput(BaseModel):
     operation: Literal["status", "diff", "log"]
 
 
+class WorkspaceGitCommitExecutorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-git-commit-executor-input.v1"] = (
+        "deskpilot.workspace-git-commit-executor-input.v1"
+    )
+    project_path: str = Field(min_length=1, max_length=32_767)
+    paths: tuple[str, ...] = Field(min_length=2, max_length=8)
+
+
 class WorkspaceCommandExecutorInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -212,6 +222,7 @@ CapabilityExecutorInput = Annotated[
     | WorkspaceProjectSearchExecutorInput
     | WorkspaceProjectBatchReadExecutorInput
     | WorkspaceGitInspectExecutorInput
+    | WorkspaceGitCommitExecutorInput
     | WorkspaceCommandExecutorInput
     | WorkspacePatchBundleExecutorInput
     | ArtifactHtmlExecutorInput
@@ -373,6 +384,7 @@ _INPUT_SCHEMA_BY_CAPABILITY = {
         "deskpilot.workspace-project-batch-read-executor-input.v1"
     ),
     "workspace.git.inspect.v1": "deskpilot.workspace-git-inspect-executor-input.v1",
+    "workspace.git.commit.v1": "deskpilot.workspace-git-commit-executor-input.v1",
     "workspace.command.run.v1": "deskpilot.workspace-command-executor-input.v1",
     "workspace.patch.bundle.v1": "deskpilot.workspace-patch-bundle-executor-input.v1",
     "artifact.html.v1": "deskpilot.artifact-html-executor-input.v1",
@@ -536,6 +548,16 @@ class CapabilityInputBindingCatalog:
                 "run_fixed_test",
                 ("project_path", "test_path"),
                 WorkspaceNodeTestExecutorInput,
+                frozenset(),
+                (),
+                frozenset({"test_kind"}),
+            ),
+            (
+                "workspace_coding_loop",
+                "workspace.git.commit.v1",
+                "commit_git",
+                ("project_path", "changes_json"),
+                WorkspaceGitCommitExecutorInput,
                 frozenset(),
                 (),
                 frozenset({"test_kind"}),
@@ -822,6 +844,26 @@ class CapabilityInputBindingCatalog:
                     "Workspace patch changes must be one JSON list"
                 )
             result = {"changes": decoded}
+        elif profile.route_id == "workspace_coding_loop" and (
+            profile.capability.capability_id == "workspace.git.commit.v1"
+        ):
+            try:
+                decoded = json.loads(normalized["changes_json"])
+            except (TypeError, json.JSONDecodeError) as error:
+                raise CapabilityInputLineageRejectedError(
+                    "Git commit changes are not valid JSON"
+                ) from error
+            if not isinstance(decoded, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("path"), str)
+                for item in decoded
+            ):
+                raise CapabilityInputLineageRejectedError(
+                    "Git commit changes must contain exact paths"
+                )
+            result = {
+                "project_path": normalized["project_path"],
+                "paths": [item["path"] for item in decoded],
+            }
         elif profile.route_id == "workspace_project_batch_read":
             try:
                 decoded = json.loads(normalized["paths_json"])
@@ -874,6 +916,7 @@ __all__ = [
     "WorkspaceNodeTestExecutorInput",
     "WorkspaceCommandExecutorInput",
     "WorkspaceGitInspectExecutorInput",
+    "WorkspaceGitCommitExecutorInput",
     "WorkspacePatchBundleExecutorInput",
     "WorkspacePatchChangeExecutorInput",
     "WorkspacePythonTestExecutorInput",

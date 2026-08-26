@@ -125,6 +125,7 @@ def test_research_to_html_fixture_is_sealed_deterministic_and_not_runnable() -> 
         ("workspace.project.search.v1", "1.0.0"),
         ("workspace.project.read_many.v1", "1.0.0"),
         ("workspace.git.inspect.v1", "1.0.0"),
+        ("workspace.git.commit.v1", "1.0.0"),
         ("workspace.command.run.v1", "1.0.0"),
         ("workspace.dynamic.coordinate.v1", "1.0.0"),
     }
@@ -464,6 +465,7 @@ def test_capability_api_is_read_only_and_only_registered_runtimes_are_enabled(
         "workspace.project.search.v1",
         "workspace.project.read_many.v1",
         "workspace.git.inspect.v1",
+        "workspace.git.commit.v1",
         "workspace.command.run.v1",
         "workspace.dynamic.coordinate.v1",
     }
@@ -471,10 +473,10 @@ def test_capability_api_is_read_only_and_only_registered_runtimes_are_enabled(
         (item["capability_id"], item["version"])
         for item in response.json()["capabilities"]
         if item["runtime_enabled"]
-        } == {
-            ("artifact.html.v1", "1.1.0"),
-            ("artifact.html.v1", "1.2.0"),
-            ("browser.verify.v1", "1.1.0"),
+    } == {
+        ("artifact.html.v1", "1.1.0"),
+        ("artifact.html.v1", "1.2.0"),
+        ("browser.verify.v1", "1.1.0"),
         ("knowledge.local.v1", "1.0.0"),
         ("mcp.text.metrics.v1", "1.0.0"),
         ("workspace.file.read.v1", "1.0.0"),
@@ -490,6 +492,7 @@ def test_capability_api_is_read_only_and_only_registered_runtimes_are_enabled(
         ("workspace.project.search.v1", "1.0.0"),
         ("workspace.project.read_many.v1", "1.0.0"),
         ("workspace.git.inspect.v1", "1.0.0"),
-            ("workspace.command.run.v1", "1.0.0"),
-            ("workspace.dynamic.coordinate.v1", "1.0.0"),
-        }
+        ("workspace.git.commit.v1", "1.0.0"),
+        ("workspace.command.run.v1", "1.0.0"),
+        ("workspace.dynamic.coordinate.v1", "1.0.0"),
+    }

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -35,7 +38,9 @@ from deskpilot.application.task_loop_agent_runtime import (
 )
 from deskpilot.application.task_loop_execution_coordinator import (
     TaskLoopExecutionCoordinator,
+    TaskLoopExecutionCoordinatorProofRejectedError,
 )
+from deskpilot.application.workspace_coding_runtime import WorkspaceCodingRuntime
 from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.workspace_files import (
@@ -145,12 +150,12 @@ def _propose_bound_patch(request: Any) -> dict[str, Any]:
 
 def _confirm_bound_coding_graph(request: Any) -> dict[str, Any]:
     nodes = request.metadata["task_graph_allowed_capabilities"]
-    assert isinstance(nodes, list) and len(nodes) == 6
+    assert isinstance(nodes, list) and len(nodes) == 7
     return {
         "schema_version": "deskpilot.agent-decision.v1",
         "kind": "propose_task_graph",
         "nodes": nodes,
-        "output_node_key": "run_fixed_test",
+        "output_node_key": "commit_git",
         "decision_summary": "Confirm the exact server-sealed coding graph.",
     }
 
@@ -165,6 +170,33 @@ def _tamper_bound_coding_graph(request: Any) -> dict[str, Any]:
 class _PassThroughContextMemory:
     async def build_for_turn(self, *args: Any) -> tuple[None, Any]:
         return None, args[-1]
+
+
+def _git(project: Path, *arguments: str) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git is unavailable")
+    subprocess.run(  # noqa: S603 - test uses fixed Git setup arguments.
+        (executable, *arguments),
+        cwd=project,
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=(
+            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        ),
+    )
+
+
+def _initialize_repository(project: Path) -> None:
+    _git(project, "init")
+    _git(project, "config", "user.email", "deskpilot-test@example.invalid")
+    _git(project, "config", "user.name", "DeskPilot Test")
+    _git(project, "config", "core.autocrlf", "false")
+    _git(project, "add", "--", ".")
+    _git(project, "commit", "-m", "initial")
 
 
 class _ParallelWorkspace(WorkspaceFileRuntime):
@@ -243,6 +275,7 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
         "def test_one():\n    assert True\n",
         encoding="utf-8",
     )
+    _initialize_repository(backend)
     workspace = _ParallelWorkspace(
         str(workspace_root),
         str(tmp_path / "staging"),
@@ -253,6 +286,7 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
         workspace=workspace,
         python_tests=python_tests,
         workspace_patches=workspace,
+        workspace_coding=WorkspaceCodingRuntime(workspace, shutil.which("git")),
     )
     execution = AgentExecutionRuntime(
         database,
@@ -438,6 +472,32 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
         assert passed_test.command.kind == "execute_capability"
         assert python_tests.calls == 2
 
+        git_waiting = await restarted.advance(task_id, "git-prepare-worker")
+        assert git_waiting.command.kind == "execute_capability"
+        assert git_waiting.read.git_commit is not None
+        assert git_waiting.read.execution is not None
+        assert git_waiting.read.execution.status == "awaiting_user"
+        with pytest.raises(
+            TaskLoopExecutionCoordinatorProofRejectedError,
+            match="another preview Schema",
+        ):
+            await restarted.approve_workspace_patch(
+                task_id,
+                git_waiting.read.git_commit.confirmation_digest,
+                expected_execution_revision=git_waiting.read.execution.revision,
+            )
+        await restarted.approve_git_commit(
+            task_id,
+            git_waiting.read.git_commit.confirmation_digest,
+            expected_execution_revision=git_waiting.read.execution.revision,
+        )
+        committed = await restarted.advance(task_id, "git-commit-worker")
+        assert committed.command.kind == "execute_capability"
+        assert committed.read.git_commit is not None
+        assert committed.read.git_commit.schema_version == (
+            "deskpilot.git-commit-receipt.v1"
+        )
+
         final_verify = await restarted.advance(task_id, "final-verifier")
         delivered = await restarted.advance(task_id, "delivery-worker")
         assert final_verify.command.kind == "reduce_control_node"
@@ -461,8 +521,8 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
         assert public_payload["coordinator_evidence"] == {
             "agent_id": "builtin.workspace_coordinator",
             "agent_version": "1.1.0",
-            "node_count": 6,
-            "output_node_key": "run_fixed_test",
+            "node_count": 7,
+            "output_node_key": "commit_git",
             "graph_digest": public_payload["coordinator_evidence"]["graph_digest"],
             "decision_digest": public_payload["coordinator_evidence"][
                 "decision_digest"
@@ -492,31 +552,38 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
                     )
                 ).all()
             )
-            approval = await session.scalar(select(TaskLoopCapabilityApprovalRecord))
+            approvals = tuple(
+                (await session.scalars(select(TaskLoopCapabilityApprovalRecord))).all()
+            )
             coding_delivery = await session.scalar(
                 select(WorkspaceCodingDeliveryRecord)
             )
             model_turns = tuple(
                 (await session.scalars(select(AgentModelTurnRecord))).all()
             )
-        assert approval is not None and approval.status == "consumed"
+        assert len(approvals) == 2
+        assert all(item.status == "consumed" for item in approvals)
         assert coding_delivery is not None
         assert coding_delivery.changed_file_count == 2
         assert coding_delivery.test_run_count == 2
         assert coding_delivery.failure_count == 1
         assert coding_delivery.rollback_available is True
+        assert coding_delivery.manifest["schema_version"] == (
+            "deskpilot.workspace-coding-delivery.v2"
+        )
         assert coding_delivery.manifest["changed_files"] == [
             "backend/one.py",
             "backend/two.py",
         ]
         assert coding_delivery.manifest["remaining_risks"] == [
             "local_fake_model_quality_unproven",
-            "git_commit_not_created",
         ]
+        assert coding_delivery.manifest["git_commit"]["push_disabled"] is True
         assert len(model_turns) == 3
         assert all(item.status == "succeeded" for item in model_turns)
         assert sorted(item.result_kind for item in results) == [
             "coordination_plan",
+            "git_commit",
             "patch_proposal",
             "patch_proposal",
             "patch_receipt",
@@ -540,6 +607,36 @@ async def test_coding_loop_parallel_join_patch_repair_restart_and_delivery(
             for item in results
             if item.attempt_id == test_attempts[0].attempt_id
         )
+
+        async with database.session() as session, session.begin():
+            legacy_record = await session.scalar(
+                select(WorkspaceCodingDeliveryRecord).with_for_update()
+            )
+            assert legacy_record is not None
+            legacy_material = json.loads(json.dumps(legacy_record.manifest))
+            legacy_material.pop("delivery_id")
+            legacy_material["schema_version"] = (
+                "deskpilot.workspace-coding-delivery.v1"
+            )
+            legacy_material.pop("git_commit")
+            legacy_material["remaining_risks"].append("git_commit_not_created")
+            legacy_material["coordinator_evidence"]["node_count"] = 6
+            legacy_material["coordinator_evidence"]["output_node_key"] = (
+                "run_fixed_test"
+            )
+            legacy_delivery_id = f"wcd_{sha256_digest(legacy_material)}"
+            legacy_manifest = {
+                **legacy_material,
+                "delivery_id": legacy_delivery_id,
+            }
+            legacy_record.delivery_id = legacy_delivery_id
+            legacy_record.manifest = legacy_manifest
+            legacy_record.delivery_digest = sha256_digest(legacy_manifest)
+        legacy_read = await activation.get(task_id)
+        assert legacy_read is not None
+        assert legacy_read.coding_delivery is not None
+        assert legacy_read.coding_delivery.coordinator_evidence.node_count == 6
+        assert legacy_read.coding_delivery.git_commit is None
     finally:
         await database.dispose()
 
@@ -579,6 +676,7 @@ async def test_coding_coordinator_rejects_graph_drift_before_readers(
         workspace=workspace,
         python_tests=_RepairingPythonRuntime(),
         workspace_patches=workspace,
+        workspace_coding=WorkspaceCodingRuntime(workspace, shutil.which("git")),
     )
     execution = AgentExecutionRuntime(
         database,
@@ -706,6 +804,8 @@ def test_coding_loop_recipe_has_two_parallel_readers_and_verified_patch_join() -
         "plan_secondary_patch",
     }
     assert by_key["run_fixed_test"].budget.retries == 1
+    assert by_key["commit_git"].depends_on == ("run_fixed_test",)
+    assert by_key["final_acceptance"].depends_on == ("commit_git",)
     assert tuple(
         item.value for item in contract.privacy_policy.allowed_provider_locations
     ) == ("local",)
@@ -813,6 +913,7 @@ async def test_coding_loop_amendment_fences_old_claim_and_late_result(
         workspace=workspace,
         python_tests=_RepairingPythonRuntime(),
         workspace_patches=workspace,
+        workspace_coding=WorkspaceCodingRuntime(workspace, shutil.which("git")),
     )
     execution = AgentExecutionRuntime(
         database,

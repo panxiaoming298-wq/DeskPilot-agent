@@ -38,8 +38,12 @@ from deskpilot.application.workspace_command_plan_binder import (
 )
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.capability_execution import VerifiedCapabilityResultRef
+from deskpilot.domain.coding_tools import GitCommitPreview, GitCommitReceipt
 from deskpilot.domain.task_loop import ModelPlannerDraft, TaskLoop
-from deskpilot.domain.task_loop_approvals import TaskLoopCapabilityApproval
+from deskpilot.domain.task_loop_approvals import (
+    TaskLoopCapabilityApproval,
+    parse_task_loop_capability_preview,
+)
 from deskpilot.domain.task_loop_cycle import TaskLoopCycleEvent, TaskLoopCycleRead
 from deskpilot.domain.task_loop_execution import (
     ModelPlannerNodeBinding,
@@ -53,6 +57,7 @@ from deskpilot.domain.task_loop_execution import (
     WorkspaceCodingCoordinatorEvidenceRead,
     WorkspaceCodingDeliveryWorkbenchRead,
     WorkspaceCodingFailureRepairRead,
+    WorkspaceCodingGitCommitEvidenceRead,
     WorkspaceCodingPlannerEvidenceRead,
     WorkspaceCodingRollbackPointRead,
     WorkspaceCodingTestRunRead,
@@ -1218,19 +1223,26 @@ class TaskLoopActivationRuntime:
             *(item.updated_at for item in approvals_by_node.values()),
         )
         workspace_patch: WorkspacePatchPreview | WorkspacePatchReceipt | None = None
-        if approvals_by_node:
-            latest_approval = max(
-                approvals_by_node.values(),
-                key=lambda item: (item.updated_at, item.approval_id),
-            )
-            workspace_patch = WorkspacePatchPreview.model_validate(
-                latest_approval.preview_manifest
-            )
-            attempt = attempts_by_id[latest_approval.attempt_id]
-            if latest_approval.status == "consumed":
+        git_commit: GitCommitPreview | GitCommitReceipt | None = None
+        for approval in sorted(
+            approvals_by_node.values(),
+            key=lambda item: (item.updated_at, item.approval_id),
+        ):
+            try:
+                preview = parse_task_loop_capability_preview(
+                    approval.preview_manifest,
+                    expected_schema_digest=approval.preview_schema_digest,
+                )
+            except ValueError as error:
+                raise TaskLoopActivationProofRejectedError(
+                    "Capability approval preview proof changed"
+                ) from error
+            attempt = attempts_by_id[approval.attempt_id]
+            receipt: object | None = None
+            if approval.status == "consumed":
                 if attempt.candidate_manifest is None:
                     raise TaskLoopActivationProofRejectedError(
-                        "Consumed patch approval has no durable candidate"
+                        "Consumed capability approval has no durable candidate"
                     )
                 candidate_output = attempt.candidate_manifest.get("output_manifest")
                 receipt = (
@@ -1238,11 +1250,25 @@ class TaskLoopActivationRuntime:
                     if isinstance(candidate_output, dict)
                     else None
                 )
+            if isinstance(preview, WorkspacePatchPreview):
+                workspace_patch = preview
+                if approval.status != "consumed":
+                    continue
                 try:
                     workspace_patch = WorkspacePatchReceipt.model_validate(receipt)
                 except ValidationError as error:
                     raise TaskLoopActivationProofRejectedError(
                         "Consumed patch approval receipt proof changed"
+                    ) from error
+            elif isinstance(preview, GitCommitPreview):
+                git_commit = preview
+                if approval.status != "consumed":
+                    continue
+                try:
+                    git_commit = GitCommitReceipt.model_validate(receipt)
+                except ValidationError as error:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Consumed Git approval receipt proof changed"
                     ) from error
         delivery_record = await session.scalar(
             select(WorkspaceCodingDeliveryRecord).where(
@@ -1275,6 +1301,7 @@ class TaskLoopActivationRuntime:
             execution=execution,
             cycle=cycle,
             workspace_patch=workspace_patch,
+            git_commit=git_commit,
             coding_delivery=coding_delivery,
             nodes=tuple(node_reads),
             recoverable=execution.status in {"active", "paused", "awaiting_user", "repairing"},
@@ -1296,7 +1323,10 @@ class TaskLoopActivationRuntime:
             or record.plan_id != execution.plan_id
             or record.plan_manifest_digest != execution.plan_manifest_digest
             or manifest.get("schema_version")
-            != "deskpilot.workspace-coding-delivery.v1"
+            not in {
+                "deskpilot.workspace-coding-delivery.v1",
+                "deskpilot.workspace-coding-delivery.v2",
+            }
             or manifest.get("delivery_id") != record.delivery_id
             or record.delivery_digest != sha256_digest(manifest)
         ):
@@ -1309,6 +1339,7 @@ class TaskLoopActivationRuntime:
             raw_planners = manifest["patch_planner_evidence"]
             raw_tests = manifest["test_runs"]
             raw_failures = manifest["failure_repair_history"]
+            raw_git = manifest.get("git_commit")
             raw_rollbacks = manifest["rollback_points"]
             changed_files = tuple(str(item) for item in manifest["changed_files"])
             risks = tuple(str(item) for item in manifest["remaining_risks"])
@@ -1380,6 +1411,24 @@ class TaskLoopActivationRuntime:
                 for item in raw_failures
                 if isinstance(item, dict)
             )
+            delivery_version = manifest["schema_version"]
+            if delivery_version == "deskpilot.workspace-coding-delivery.v1":
+                if raw_git is not None:
+                    raise ValueError("Legacy coding delivery cannot contain Git evidence")
+                git_commit_evidence = None
+            else:
+                if not isinstance(raw_git, dict):
+                    raise ValueError("Git coding delivery lost its commit evidence")
+                git_commit_evidence = WorkspaceCodingGitCommitEvidenceRead.model_validate(
+                    {
+                        "target_branch": raw_git["target_branch"],
+                        "expected_head_oid": raw_git["expected_head_oid"],
+                        "commit_oid": raw_git["commit_oid"],
+                        "receipt_digest": raw_git["receipt_digest"],
+                        "push_disabled": raw_git["push_disabled"],
+                        "rollback_available": raw_git["rollback_available"],
+                    }
+                )
             rollbacks = tuple(
                 WorkspaceCodingRollbackPointRead(
                     path=str(item["path"]),
@@ -1416,6 +1465,7 @@ class TaskLoopActivationRuntime:
             failure_repair_history=tuple(
                 sorted(failures, key=lambda item: item.attempt)
             ),
+            git_commit=git_commit_evidence,
             remaining_risks=risks,
             rollback_points=tuple(sorted(rollbacks, key=lambda item: item.path)),
             rollback_available=record.rollback_available,

@@ -253,6 +253,19 @@ def create_builtin_capability_catalog(
                 workspace_write=False,
             ),
             _pack(
+                capability_id="workspace.git.commit.v1",
+                runtime_enabled=True,
+                description=(
+                    "经精确摘要确认后，只把 2–8 个任务文件提交到服务器命名的新分支；"
+                    "关闭 hooks、签名和 push，并保留可对账回执。"
+                ),
+                allowed_operations=("conversation-workspace.git.commit",),
+                max_risk_level=ToolRiskLevel.R1,
+                external_ingress=True,
+                external_egress=False,
+                workspace_write=True,
+            ),
+            _pack(
                 capability_id="workspace.command.run.v1",
                 runtime_enabled=True,
                 description=(

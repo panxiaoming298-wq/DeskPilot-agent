@@ -19,6 +19,7 @@ from deskpilot.domain.artifact_runtime import (
     TaskWorkspaceRead,
     VerificationRunRead,
 )
+from deskpilot.domain.coding_tools import GitCommitPreview, GitCommitReceipt
 from deskpilot.domain.context_memory import ConversationMessageRead
 from deskpilot.domain.knowledge import KnowledgeSearchRead
 from deskpilot.domain.mcp import McpToolCallRead
@@ -118,6 +119,7 @@ class WorkbenchAction(StrEnum):
     REPLAN_FAILED_EXECUTION = "replan_failed_execution"
     COMMIT_WORKSPACE_EDIT = "commit_workspace_edit"
     COMMIT_WORKSPACE_PATCH = "commit_workspace_patch"
+    COMMIT_WORKSPACE_GIT = "commit_workspace_git"
     COMMIT_WORKSPACE_PATH_OPERATION = "commit_workspace_path_operation"
     PREPARE_EXPORT = "prepare_export"
     STOP_EXECUTION = "stop_execution"
@@ -337,6 +339,7 @@ class TaskWorkbenchRead(BaseModel):
     workspace_file: WorkspaceFileRead | None
     workspace_edit: WorkspaceEditPreview | WorkspaceEditReceipt | None
     workspace_patch: WorkspacePatchPreview | WorkspacePatchReceipt | None
+    workspace_git_commit: GitCommitPreview | GitCommitReceipt | None = None
     workspace_path_operation: WorkspacePathOperationPreview | WorkspacePathOperationReceipt | None
     workspace_directory: WorkspaceDirectoryRead | None
     workspace_check: WorkspaceCheckRead | None
@@ -347,7 +350,10 @@ class TaskWorkbenchRead(BaseModel):
 
     @model_validator(mode="after")
     def digest_matches(self) -> Self:
-        material = self.model_dump(mode="json", exclude={"projection_digest"})
+        excluded = {"projection_digest"}
+        if "workspace_git_commit" not in self.model_fields_set:
+            excluded.add("workspace_git_commit")
+        material = self.model_dump(mode="json", exclude=excluded)
         if self.projection_digest != sha256_digest(material):
             raise ValueError("Task Workbench projection digest does not match")
         return self

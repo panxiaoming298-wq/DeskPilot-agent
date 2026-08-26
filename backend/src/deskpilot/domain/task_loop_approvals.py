@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import DIGEST_PATTERN
 from deskpilot.domain.agent_runtime import RUN_ID_PATTERN
+from deskpilot.domain.coding_tools import GitCommitPreview
 from deskpilot.domain.task_loop_execution import (
     MODEL_PLANNER_NODE_BINDING_ID_PATTERN,
     TASK_LOOP_EXECUTION_ID_PATTERN,
@@ -20,6 +21,28 @@ from deskpilot.domain.workspace_files import WorkspacePatchPreview
 
 TASK_LOOP_CAPABILITY_APPROVAL_ID_PATTERN = r"^tlca_[0-9a-f]{64}$"
 TaskLoopCapabilityApprovalStatus = Literal["pending", "approved", "consumed"]
+TaskLoopCapabilityApprovalPreview = WorkspacePatchPreview | GitCommitPreview
+
+
+def parse_task_loop_capability_preview(
+    manifest: dict[str, Any],
+    *,
+    expected_schema_digest: str | None = None,
+) -> TaskLoopCapabilityApprovalPreview:
+    """Parse only one registered approval Schema; never infer from loose fields."""
+
+    schema_version = manifest.get("schema_version")
+    model: type[WorkspacePatchPreview] | type[GitCommitPreview]
+    if schema_version == "deskpilot.workspace-patch-preview.v1":
+        model = WorkspacePatchPreview
+    elif schema_version == "deskpilot.git-commit-preview.v1":
+        model = GitCommitPreview
+    else:
+        raise ValueError("Task-loop approval preview Schema is not registered")
+    schema_digest = sha256_digest(model.model_json_schema())
+    if expected_schema_digest is not None and expected_schema_digest != schema_digest:
+        raise ValueError("Task-loop approval preview Schema digest changed")
+    return model.model_validate(manifest)
 
 
 class TaskLoopCapabilityApproval(BaseModel):
@@ -56,12 +79,13 @@ class TaskLoopCapabilityApproval(BaseModel):
 
     @model_validator(mode="after")
     def lifecycle_and_digest_match(self) -> Self:
-        preview = WorkspacePatchPreview.model_validate(self.preview_manifest)
+        preview = parse_task_loop_capability_preview(
+            self.preview_manifest,
+            expected_schema_digest=self.preview_schema_digest,
+        )
         if (
             preview.task_id != self.task_id
             or preview.confirmation_digest != self.confirmation_digest
-            or self.preview_schema_digest
-            != sha256_digest(WorkspacePatchPreview.model_json_schema())
         ):
             raise ValueError("Task-loop approval preview proof changed")
         expected_revision = {"pending": 1, "approved": 2, "consumed": 3}[self.status]
@@ -121,7 +145,7 @@ class TaskLoopCapabilityApproval(BaseModel):
         plan_generation: int,
         input_binding_digest: str,
         executor_manifest_digest: str,
-        preview: WorkspacePatchPreview,
+        preview: TaskLoopCapabilityApprovalPreview,
         requested_execution_revision: int,
         created_at: datetime,
     ) -> Self:
@@ -144,7 +168,7 @@ class TaskLoopCapabilityApproval(BaseModel):
             "plan_generation": plan_generation,
             "input_binding_digest": input_binding_digest,
             "executor_manifest_digest": executor_manifest_digest,
-            "preview_schema_digest": sha256_digest(WorkspacePatchPreview.model_json_schema()),
+            "preview_schema_digest": sha256_digest(type(preview).model_json_schema()),
             "preview_manifest": preview.model_dump(mode="json"),
             "confirmation_digest": preview.confirmation_digest,
             "requested_execution_revision": requested_execution_revision,
@@ -197,5 +221,7 @@ class TaskLoopCapabilityApproval(BaseModel):
 __all__ = [
     "TASK_LOOP_CAPABILITY_APPROVAL_ID_PATTERN",
     "TaskLoopCapabilityApproval",
+    "TaskLoopCapabilityApprovalPreview",
     "TaskLoopCapabilityApprovalStatus",
+    "parse_task_loop_capability_preview",
 ]

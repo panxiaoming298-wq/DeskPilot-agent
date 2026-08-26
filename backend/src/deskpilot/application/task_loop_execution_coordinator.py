@@ -23,6 +23,7 @@ from deskpilot.application.artifact_delivery_runtime import (
     ArtifactDeliveryRuntime,
 )
 from deskpilot.application.builtin_capability_executors import (
+    WorkspaceGitCommitCapabilityOutput,
     WorkspacePatchCapabilityOutput,
 )
 from deskpilot.application.capability_execution_runtime import (
@@ -31,6 +32,7 @@ from deskpilot.application.capability_execution_runtime import (
 )
 from deskpilot.application.capability_input_binding_catalog import (
     BoundCapabilityInput,
+    WorkspaceGitCommitExecutorInput,
     WorkspacePatchBundleExecutorInput,
 )
 from deskpilot.application.task_loop_activation_runtime import (
@@ -51,6 +53,7 @@ from deskpilot.application.turn_planner_runtime import TurnPlannerRuntime
 from deskpilot.application.verified_edges import mark_verified_and_unlock
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.capability_execution import CapabilityResultKind
+from deskpilot.domain.coding_tools import GitCommitPreview
 from deskpilot.domain.task_loop_cycle import TaskLoopCycleEvent, TaskLoopCycleEventKind
 from deskpilot.domain.task_loop_execution import (
     TaskLoopExecution,
@@ -222,6 +225,26 @@ class TaskLoopExecutionCoordinator:
             )
         try:
             return await self._capabilities.approve_workspace_patch(
+                task_id,
+                confirmation_digest,
+                expected_execution_revision=expected_execution_revision,
+            )
+        except CapabilityExecutionRuntimeError as error:
+            raise TaskLoopExecutionCoordinatorProofRejectedError(str(error)) from error
+
+    async def approve_git_commit(
+        self,
+        task_id: str,
+        confirmation_digest: str,
+        *,
+        expected_execution_revision: int,
+    ) -> GitCommitPreview:
+        if self._capabilities is None:
+            raise TaskLoopExecutionCoordinatorUnavailableError(
+                "Capability Task Loop runtime is unavailable"
+            )
+        try:
+            return await self._capabilities.approve_git_commit(
                 task_id,
                 confirmation_digest,
                 expected_execution_revision=expected_execution_revision,
@@ -694,7 +717,7 @@ class TaskLoopExecutionCoordinator:
         )
         if not coding_bindings:
             return
-        if len(coding_bindings) != 7 or len(coding_bindings) != len(bindings):
+        if len(coding_bindings) != 8 or len(coding_bindings) != len(bindings):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery has an incomplete Route binding set"
             )
@@ -766,12 +789,18 @@ class TaskLoopExecutionCoordinator:
                 CapabilityResultKind.NODE_TEST.value,
             }
         )
+        git_results = tuple(
+            item
+            for item in results
+            if item.result_kind == CapabilityResultKind.GIT_COMMIT.value
+        )
         if (
             len(coordinator_results) != 1
             or len(reader_results) != 2
             or len(proposal_results) != 2
             or len(patch_results) != 1
             or not 1 <= len(test_results) <= 2
+            or len(git_results) != 1
         ):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery evidence cardinality changed"
@@ -820,8 +849,8 @@ class TaskLoopExecutionCoordinator:
                 for item in reader_nodes
             )
             or not isinstance(raw_graph_nodes, list)
-            or len(raw_graph_nodes) != 6
-            or output_node_key != "run_fixed_test"
+            or len(raw_graph_nodes) != 7
+            or output_node_key != "commit_git"
             or not isinstance(graph_digest, str)
             or graph_digest
             != sha256_digest(
@@ -862,6 +891,12 @@ class TaskLoopExecutionCoordinator:
             bound_patch = BoundCapabilityInput.model_validate(
                 patch_attempt.input_manifest
             )
+            git_result = git_results[0]
+            git_output = WorkspaceGitCommitCapabilityOutput.model_validate(
+                git_result.output_manifest
+            )
+            git_attempt = attempts[git_result.attempt_id]
+            bound_git = BoundCapabilityInput.model_validate(git_attempt.input_manifest)
         except (KeyError, ValidationError) as error:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery evidence Schema changed"
@@ -875,6 +910,17 @@ class TaskLoopExecutionCoordinator:
         ):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery has no committed exact Patch"
+            )
+        if (
+            git_attempt.status != "verified"
+            or not isinstance(bound_git.arguments, WorkspaceGitCommitExecutorInput)
+            or git_output.receipt.task_id != execution.task_id
+            or git_output.receipt.project_path != bound_git.arguments.project_path
+            or not git_output.receipt.push_disabled
+            or not git_output.receipt.rollback_available
+        ):
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding delivery has no exact controlled Git commit"
             )
         changes = tuple(bound_patch.arguments.changes)
         change_receipts = {
@@ -999,6 +1045,39 @@ class TaskLoopExecutionCoordinator:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery has no unique successful fixed test"
             )
+        project_prefix = f"{git_output.receipt.project_path.rstrip('/')}/"
+        expected_git_paths = tuple(
+            sorted(
+                (
+                    item.path.removeprefix(project_prefix)
+                    for item in changes
+                ),
+                key=str.casefold,
+            )
+        )
+        if (
+            tuple(item.relative_path for item in git_output.receipt.paths)
+            != expected_git_paths
+            or tuple(sorted(bound_git.arguments.paths, key=str.casefold))
+            != tuple(sorted((item.path for item in changes), key=str.casefold))
+        ):
+            raise TaskLoopExecutionCoordinatorProofRejectedError(
+                "Workspace coding Git commit differs from the approved Patch scope"
+            )
+        git_evidence = {
+            "target_branch": git_output.receipt.target_branch,
+            "expected_head_oid": git_output.receipt.expected_head_oid,
+            "commit_oid": git_output.receipt.commit_oid,
+            "tree_oid": git_output.receipt.tree_oid,
+            "path_proof_digests": [
+                item.proof_digest for item in git_output.receipt.paths
+            ],
+            "result_ref_digest": git_result.result_ref_digest,
+            "verification_digest": git_result.verification_digest,
+            "receipt_digest": git_output.receipt.receipt_digest,
+            "push_disabled": True,
+            "rollback_available": True,
+        }
 
         structured_diff = [
             {
@@ -1034,7 +1113,7 @@ class TaskLoopExecutionCoordinator:
             for reader in sorted(readers, key=lambda item: item.relative_path)
         ]
         delivery_material: dict[str, Any] = {
-            "schema_version": "deskpilot.workspace-coding-delivery.v1",
+            "schema_version": "deskpilot.workspace-coding-delivery.v2",
             "task_id": execution.task_id,
             "execution_id": execution.execution_id,
             "run_id": execution.run_id,
@@ -1054,9 +1133,9 @@ class TaskLoopExecutionCoordinator:
             "changed_files": sorted(changed_paths),
             "test_runs": sorted(test_evidence, key=lambda item: int(item["attempt"])),
             "failure_repair_history": failure_history,
+            "git_commit": git_evidence,
             "remaining_risks": [
                 "local_fake_model_quality_unproven",
-                "git_commit_not_created",
             ],
             "rollback_points": rollback_points,
             "rollback_available": all(

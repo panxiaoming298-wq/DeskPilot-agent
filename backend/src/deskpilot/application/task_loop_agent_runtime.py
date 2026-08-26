@@ -679,6 +679,7 @@ class TaskLoopAgentRuntime:
             "plan_secondary_patch",
             "apply_patch",
             "run_fixed_test",
+            "commit_git",
         )
         prefix = f"s{binding.step_ordinal:02d}_"
         by_key = {
@@ -705,6 +706,7 @@ class TaskLoopAgentRuntime:
                 ),
                 "fixed_test",
             ),
+            "commit_git": ("route_patch_test_spec", "git_commit"),
         }
         expected_capabilities = {
             "inspect_primary": "workspace.file.read.v1",
@@ -717,6 +719,7 @@ class TaskLoopAgentRuntime:
                 if binding.bound_input_manifest.get("test_kind") == "python"
                 else "workspace.node.test.v1"
             ),
+            "commit_git": "workspace.git.commit.v1",
         }
         expected_dependencies: dict[str, tuple[str, ...]] = {
             "inspect_primary": (),
@@ -725,6 +728,7 @@ class TaskLoopAgentRuntime:
             "plan_secondary_patch": ("inspect_secondary",),
             "apply_patch": ("plan_primary_patch", "plan_secondary_patch"),
             "run_fixed_test": ("apply_patch",),
+            "commit_git": ("run_fixed_test",),
         }
         if binding.bound_input_manifest.get("test_kind") not in {"python", "node"}:
             raise TaskLoopAgentProofRejectedError(
@@ -766,7 +770,7 @@ class TaskLoopAgentRuntime:
             )
         return AgentProposeTaskGraphDecision(
             nodes=tuple(proposals),
-            output_node_key="run_fixed_test",
+            output_node_key="commit_git",
             decision_summary="Confirm the exact server-sealed coding graph.",
         )
 

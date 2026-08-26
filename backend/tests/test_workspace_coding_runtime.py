@@ -18,7 +18,8 @@ from deskpilot.application.workspace_file_runtime import (
     WorkspaceFilePathRejectedError,
     WorkspaceFileRuntime,
 )
-from deskpilot.domain.coding_tools import ProjectSearchRead
+from deskpilot.core.canonical_json import sha256_digest
+from deskpilot.domain.coding_tools import GitCommitPreview, ProjectSearchRead
 
 
 def _runtime(root: Path) -> WorkspaceCodingRuntime:
@@ -46,6 +47,7 @@ def _repository(project: Path) -> None:
     _git(project, "init")
     _git(project, "config", "user.email", "deskpilot-test@example.invalid")
     _git(project, "config", "user.name", "DeskPilot Test")
+    _git(project, "config", "core.autocrlf", "false")
     (project / "README.md").write_text("alpha\n", encoding="utf-8")
     _git(project, "add", "README.md")
     _git(project, "commit", "-m", "initial")
@@ -176,3 +178,187 @@ def test_git_inspection_rejects_worktree_pointer_file(tmp_path: Path) -> None:
 
     with pytest.raises(WorkspaceGitRejectedError, match="worktree"):
         _runtime(tmp_path).inspect_git("project", "status")
+
+
+def test_git_commit_is_exact_hook_free_and_reconcilable(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _repository(project)
+    (project / "notes.md").write_text("before\n", encoding="utf-8")
+    _git(project, "add", "notes.md")
+    _git(project, "commit", "-m", "add notes")
+    (project / "README.md").write_text("alpha\nafter\n", encoding="utf-8")
+    (project / "notes.md").write_text("after\n", encoding="utf-8")
+    (project / ".README.md.deskpilot-1111111111111111.backup").write_text(
+        "alpha\n", encoding="utf-8"
+    )
+    (project / ".notes.md.deskpilot-2222222222222222.backup").write_text(
+        "before\n", encoding="utf-8"
+    )
+    hook_marker = tmp_path / "hook-ran"
+    hook = project / ".git" / "hooks" / "pre-commit"
+    hook.write_text(f"#!/bin/sh\nprintf ran > '{hook_marker.as_posix()}'\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _git(project, "config", "commit.gpgSign", "true")
+    _git(project, "config", "user.signingKey", "not-a-real-key")
+    runtime = _runtime(tmp_path)
+    task_id = f"tsk_{'a' * 32}"
+
+    preview = runtime.prepare_git_commit(
+        task_id=task_id,
+        project_path="project",
+        paths=("project/notes.md", "project/README.md"),
+    )
+    receipt = runtime.commit_git(preview)
+    reconciled = runtime.commit_git(preview)
+
+    assert receipt == reconciled
+    assert receipt.target_branch == f"codex/deskpilot-{'a' * 16}"
+    assert receipt.commit_oid != receipt.expected_head_oid
+    assert [item.relative_path for item in receipt.paths] == ["notes.md", "README.md"]
+    assert receipt.push_disabled is True
+    assert receipt.rollback_available is True
+    assert not hook_marker.exists()
+
+
+@pytest.mark.parametrize("partial_state", ["branch_created", "files_staged"])
+def test_git_commit_reconciles_exact_partial_state(
+    tmp_path: Path,
+    partial_state: str,
+) -> None:
+    project = tmp_path / "project"
+    _repository(project)
+    for name in ("a.py", "b.py"):
+        (project / name).write_text("before\n", encoding="utf-8")
+    _git(project, "add", "a.py", "b.py")
+    _git(project, "commit", "-m", "add files")
+    for name in ("a.py", "b.py"):
+        (project / name).write_text("after\n", encoding="utf-8")
+        (project / f".{name}.deskpilot-8888888888888888.backup").write_text(
+            "before\n", encoding="utf-8"
+        )
+    runtime = _runtime(tmp_path)
+    preview = runtime.prepare_git_commit(
+        task_id=f"tsk_{'e' * 32}",
+        project_path="project",
+        paths=("project/a.py", "project/b.py"),
+    )
+    _git(project, "switch", "--create", preview.target_branch)
+    if partial_state == "files_staged":
+        _git(project, "add", "--", "a.py", "b.py")
+
+    receipt = runtime.commit_git(preview)
+
+    assert receipt.target_branch == preview.target_branch
+    assert receipt.expected_head_oid == preview.expected_head_oid
+    assert receipt.commit_oid != preview.expected_head_oid
+
+
+def test_git_commit_rejects_extra_changes_and_post_approval_drift(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _repository(project)
+    for name in ("a.py", "b.py", "extra.py"):
+        (project / name).write_text("before\n", encoding="utf-8")
+    _git(project, "add", "a.py", "b.py", "extra.py")
+    _git(project, "commit", "-m", "add files")
+    (project / "a.py").write_text("after\n", encoding="utf-8")
+    (project / "b.py").write_text("after\n", encoding="utf-8")
+    (project / "extra.py").write_text("unexpected\n", encoding="utf-8")
+    (project / ".a.py.deskpilot-3333333333333333.backup").write_text(
+        "before\n", encoding="utf-8"
+    )
+    (project / ".b.py.deskpilot-4444444444444444.backup").write_text(
+        "before\n", encoding="utf-8"
+    )
+    runtime = _runtime(tmp_path)
+
+    with pytest.raises(WorkspaceGitRejectedError, match="outside"):
+        runtime.prepare_git_commit(
+            task_id=f"tsk_{'b' * 32}",
+            project_path="project",
+            paths=("project/a.py", "project/b.py"),
+        )
+
+    _git(project, "restore", "extra.py")
+    preview = runtime.prepare_git_commit(
+        task_id=f"tsk_{'b' * 32}",
+        project_path="project",
+        paths=("project/a.py", "project/b.py"),
+    )
+    wrong_branch = preview.model_dump(mode="json")
+    wrong_branch["target_branch"] = f"codex/deskpilot-{'c' * 16}"
+    wrong_branch["confirmation_digest"] = sha256_digest(
+        {key: value for key, value in wrong_branch.items() if key != "confirmation_digest"}
+    )
+    with pytest.raises(ValidationError, match="Task authority"):
+        GitCommitPreview.model_validate(wrong_branch)
+    escaped_backup = preview.model_dump(mode="json")
+    escaped_proof = escaped_backup["excluded_backups"][0]
+    escaped_proof["relative_path"] = "../outside.backup"
+    escaped_proof["proof_digest"] = sha256_digest(
+        {key: value for key, value in escaped_proof.items() if key != "proof_digest"}
+    )
+    escaped_backup["confirmation_digest"] = sha256_digest(
+        {key: value for key, value in escaped_backup.items() if key != "confirmation_digest"}
+    )
+    with pytest.raises(ValidationError, match="beneath its project"):
+        GitCommitPreview.model_validate(escaped_backup)
+    (project / "a.py").write_text("drift\n", encoding="utf-8")
+    with pytest.raises(WorkspaceGitRejectedError, match="content changed"):
+        runtime.commit_git(preview)
+
+
+def test_git_commit_rejects_repository_content_filters(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _repository(project)
+    (project / ".gitattributes").write_text("*.py filter=unsafe\n", encoding="utf-8")
+    (project / "a.py").write_text("before\n", encoding="utf-8")
+    (project / "b.py").write_text("before\n", encoding="utf-8")
+    _git(project, "add", ".gitattributes", "a.py", "b.py")
+    _git(project, "commit", "-m", "add filtered files")
+    (project / "a.py").write_text("after\n", encoding="utf-8")
+    (project / "b.py").write_text("after\n", encoding="utf-8")
+    (project / ".a.py.deskpilot-5555555555555555.backup").write_text(
+        "before\n", encoding="utf-8"
+    )
+    (project / ".b.py.deskpilot-6666666666666666.backup").write_text(
+        "before\n", encoding="utf-8"
+    )
+
+    with pytest.raises(WorkspaceGitRejectedError, match="content filters"):
+        _runtime(tmp_path).prepare_git_commit(
+            task_id=f"tsk_{'c' * 32}",
+            project_path="project",
+            paths=("project/a.py", "project/b.py"),
+        )
+
+
+def test_git_commit_disables_repository_configured_external_attributes(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _repository(project)
+    for name in ("a.py", "b.py"):
+        (project / name).write_text("before\n", encoding="utf-8")
+    _git(project, "add", "a.py", "b.py")
+    _git(project, "commit", "-m", "add files")
+    attributes = tmp_path / "external.attributes"
+    attributes.write_text("*.py filter=unsafe\n", encoding="utf-8")
+    _git(project, "config", "core.attributesFile", str(attributes))
+    _git(project, "config", "filter.unsafe.required", "true")
+    _git(project, "config", "filter.unsafe.clean", "missing-deskpilot-filter-command")
+    for name in ("a.py", "b.py"):
+        (project / name).write_text("after\n", encoding="utf-8")
+        (project / f".{name}.deskpilot-7777777777777777.backup").write_text(
+            "before\n", encoding="utf-8"
+        )
+    runtime = _runtime(tmp_path)
+
+    preview = runtime.prepare_git_commit(
+        task_id=f"tsk_{'d' * 32}",
+        project_path="project",
+        paths=("project/a.py", "project/b.py"),
+    )
+    receipt = runtime.commit_git(preview)
+
+    assert receipt.target_branch == f"codex/deskpilot-{'d' * 16}"
+    assert [item.relative_path for item in receipt.paths] == ["a.py", "b.py"]

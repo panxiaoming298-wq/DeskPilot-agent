@@ -39,6 +39,7 @@ class CapabilityResultKind(StrEnum):
     PROJECT_SEARCH = "project_search"
     PROJECT_BATCH_READ = "project_batch_read"
     GIT_INSPECTION = "git_inspection"
+    GIT_COMMIT = "git_commit"
     COMMAND_PROFILE = "command_profile"
     COORDINATION_PLAN = "coordination_plan"
     PATCH_PROPOSAL = "patch_proposal"

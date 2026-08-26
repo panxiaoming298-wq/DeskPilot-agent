@@ -183,6 +183,23 @@ async def commit_workspace_patch(
 
 
 @router.post(
+    "/tasks/{task_id}/workspace-git:commit",
+    response_model=TaskWorkbenchRead,
+)
+async def commit_workspace_git(
+    task_id: TaskId,
+    command: CommitWorkspacePatch,
+    service: WorkbenchDependency,
+    response: Response,
+) -> TaskWorkbenchRead:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await service.commit_workspace_git(task_id, command.confirmation_digest)
+    except TaskWorkbenchError as error:
+        raise _workbench_problem(error) from error
+
+
+@router.post(
     "/tasks/{task_id}/workspace-path-operation:commit",
     response_model=TaskWorkbenchRead,
 )

@@ -803,6 +803,19 @@ export function commitWorkspacePatch(
   )
 }
 
+export function commitWorkspaceGit(
+  taskId: string,
+  confirmationDigest: string,
+): Promise<TaskWorkbench> {
+  return request<TaskWorkbench>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/workspace-git:commit`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ confirmation_digest: confirmationDigest }),
+    },
+  )
+}
+
 export function commitWorkspacePathOperation(
   taskId: string,
   confirmationDigest: string,

@@ -600,7 +600,7 @@ def test_catalog_consumes_only_exact_server_selected_artifact_dependencies() -> 
         assert bound.consumed_result_refs == (result_ref,)
 
 
-def test_catalog_exposes_twelve_exact_runtime_capability_refs() -> None:
+def test_catalog_exposes_thirteen_exact_runtime_capability_refs() -> None:
     catalog = CapabilityInputBindingCatalog(create_builtin_capability_catalog())
 
     refs = catalog.capabilities()
@@ -615,6 +615,7 @@ def test_catalog_exposes_twelve_exact_runtime_capability_refs() -> None:
         ("workspace.project.search.v1", "1.0.0"),
         ("workspace.project.read_many.v1", "1.0.0"),
         ("workspace.git.inspect.v1", "1.0.0"),
+        ("workspace.git.commit.v1", "1.0.0"),
         ("workspace.command.run.v1", "1.0.0"),
         ("artifact.html.v1", "1.2.0"),
         ("browser.verify.v1", "1.1.0"),

@@ -45,7 +45,11 @@ from deskpilot.domain.capability_execution import (
     CapabilityResultKind,
     VerifiedCapabilityResultRef,
 )
-from deskpilot.domain.task_loop_approvals import TaskLoopCapabilityApproval
+from deskpilot.domain.coding_tools import GitCommitPreview
+from deskpilot.domain.task_loop_approvals import (
+    TaskLoopCapabilityApproval,
+    TaskLoopCapabilityApprovalPreview,
+)
 from deskpilot.domain.task_loop_execution import (
     ModelPlannerNodeBinding,
     TaskLoopExecution,
@@ -230,9 +234,21 @@ class CapabilityExecutionRuntime:
                                 work.context,
                                 work.bound_input,
                             )
-                            preview = WorkspacePatchPreview.model_validate(
+                            approval_model = work.registration.approval_model
+                            if approval_model is None:
+                                raise CapabilityExecutionRuntimeProofRejectedError(
+                                    "Approval capability lost its registered preview Schema"
+                                )
+                            preview = approval_model.model_validate(
                                 raw_preview.model_dump(mode="json")
                             )
+                            if not isinstance(
+                                preview,
+                                (WorkspacePatchPreview, GitCommitPreview),
+                            ):
+                                raise CapabilityExecutionRuntimeProofRejectedError(
+                                    "Approval preview Schema is not registered for persistence"
+                                )
                             return await self._persist_approval(work, preview)
                         candidate = await self._engine.execute_approved_candidate(
                             work.context,
@@ -780,14 +796,14 @@ class CapabilityExecutionRuntime:
     async def _persist_approval(
         self,
         work: _CapabilityWork,
-        preview: WorkspacePatchPreview,
+        preview: TaskLoopCapabilityApprovalPreview,
     ) -> CapabilityRuntimeOutcome:
         now = self._now()
         approval_model = work.registration.approval_model
         if (
             work.registration.manifest.approval_requirement
             is not CapabilityApprovalRequirement.EXACT_CONFIRMATION_DIGEST
-            or approval_model is not WorkspacePatchPreview
+            or approval_model is not type(preview)
             or preview.task_id != work.execution.task_id
         ):
             raise CapabilityExecutionRuntimeProofRejectedError(
@@ -892,6 +908,48 @@ class CapabilityExecutionRuntime:
     ) -> WorkspacePatchPreview:
         """Consume no effect; only resume the exact revision carrying the preview."""
 
+        preview = await self._approve_capability_preview(
+            task_id,
+            confirmation_digest,
+            expected_execution_revision=expected_execution_revision,
+            preview_model=WorkspacePatchPreview,
+        )
+        if not isinstance(preview, WorkspacePatchPreview):  # pragma: no cover - exact model.
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Workspace patch approval returned another preview Schema"
+            )
+        return preview
+
+    async def approve_git_commit(
+        self,
+        task_id: str,
+        confirmation_digest: str,
+        *,
+        expected_execution_revision: int,
+    ) -> GitCommitPreview:
+        """Resume only the exact waiting Git commit preview revision."""
+
+        preview = await self._approve_capability_preview(
+            task_id,
+            confirmation_digest,
+            expected_execution_revision=expected_execution_revision,
+            preview_model=GitCommitPreview,
+        )
+        if not isinstance(preview, GitCommitPreview):  # pragma: no cover - exact model.
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Git commit approval returned another preview Schema"
+            )
+        return preview
+
+    async def _approve_capability_preview(
+        self,
+        task_id: str,
+        confirmation_digest: str,
+        *,
+        expected_execution_revision: int,
+        preview_model: type[WorkspacePatchPreview] | type[GitCommitPreview],
+    ) -> TaskLoopCapabilityApprovalPreview:
+
         now = self._now()
         async with self._database.session() as session, session.begin():
             execution_record = await self._execution_record_for_task(session, task_id)
@@ -911,10 +969,16 @@ class CapabilityExecutionRuntime:
             )
             if len(approval_records) != 1:
                 raise CapabilityExecutionRuntimeConflictError(
-                    "Task Loop has no unique pending workspace patch approval"
+                    "Task Loop has no unique pending capability approval"
                 )
             approval_record = approval_records[0]
             approval = self._approval_from_record(approval_record)
+            try:
+                preview = preview_model.model_validate(approval.preview_manifest)
+            except ValidationError as error:
+                raise CapabilityExecutionRuntimeConflictError(
+                    "Task Loop pending approval has another preview Schema"
+                ) from error
             node = await session.scalar(
                 select(TaskExecutionNodeRecord)
                 .where(TaskExecutionNodeRecord.node_id == approval.node_id)
@@ -927,7 +991,7 @@ class CapabilityExecutionRuntime:
             )
             if node is None or attempt_record is None:
                 raise CapabilityExecutionRuntimeNotFoundError(
-                    "Task Loop workspace patch approval scope disappeared"
+                    "Task Loop capability approval scope disappeared"
                 )
             attempt = self._attempt_from_record(attempt_record)
             if (
@@ -946,7 +1010,7 @@ class CapabilityExecutionRuntime:
                 or attempt.input_digest != approval.input_binding_digest
             ):
                 raise CapabilityExecutionRuntimeStaleFenceError(
-                    "Task Loop workspace patch approval revision is stale"
+                    "Task Loop capability approval revision is stale"
                 )
             try:
                 approved = approval.approve(
@@ -956,7 +1020,7 @@ class CapabilityExecutionRuntime:
                 )
             except ValueError as error:
                 raise CapabilityExecutionRuntimeProofRejectedError(
-                    "Workspace patch confirmation digest or revision changed"
+                    "Capability confirmation digest or revision changed"
                 ) from error
             self._apply_approval(approval_record, approved)
             self._transition_execution(
@@ -971,7 +1035,7 @@ class CapabilityExecutionRuntime:
             node.revision += 1
             node.updated_at = now
             await session.flush()
-            return WorkspacePatchPreview.model_validate(approved.preview_manifest)
+            return preview
 
     async def _persist_candidate(
         self,

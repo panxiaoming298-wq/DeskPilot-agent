@@ -18,6 +18,7 @@ from deskpilot.application.capability_input_binding_catalog import (
     KnowledgeLocalExecutorInput,
     McpTextMetricsExecutorInput,
     WorkspaceCommandExecutorInput,
+    WorkspaceGitCommitExecutorInput,
     WorkspaceGitInspectExecutorInput,
     WorkspaceNodeTestExecutorInput,
     WorkspacePatchBundleExecutorInput,
@@ -40,7 +41,13 @@ from deskpilot.domain.capability_execution import (
     CapabilityResultKind,
     VerifiedCapabilityResultRef,
 )
-from deskpilot.domain.coding_tools import GitInspectionRead, ProjectBatchRead, ProjectSearchRead
+from deskpilot.domain.coding_tools import (
+    GitCommitPreview,
+    GitCommitReceipt,
+    GitInspectionRead,
+    ProjectBatchRead,
+    ProjectSearchRead,
+)
 from deskpilot.domain.command_profiles import (
     CommandProfile,
     CommandProfileId,
@@ -198,6 +205,16 @@ class WorkspaceCodingPort(Protocol):
         operation: Literal["status", "diff", "log"],
     ) -> GitInspectionRead: ...
 
+    def prepare_git_commit(
+        self,
+        *,
+        task_id: str,
+        project_path: str,
+        paths: tuple[str, ...],
+    ) -> GitCommitPreview: ...
+
+    def commit_git(self, preview: GitCommitPreview) -> GitCommitReceipt: ...
+
 
 class WorkspaceCommandSnapshotPort(Protocol):
     def prepare_command_snapshot(
@@ -284,6 +301,23 @@ class WorkspacePatchCapabilityOutput(BaseModel):
         material = self.model_dump(mode="json", exclude={"result_digest"})
         if self.result_digest != sha256_digest(material):
             raise ValueError("Workspace patch capability output digest does not match")
+        return self
+
+
+class WorkspaceGitCommitCapabilityOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-git-commit-capability-output.v1"] = (
+        "deskpilot.workspace-git-commit-capability-output.v1"
+    )
+    receipt: GitCommitReceipt
+    result_digest: str = Field(pattern=DIGEST_PATTERN)
+
+    @model_validator(mode="after")
+    def digest_matches(self) -> WorkspaceGitCommitCapabilityOutput:
+        material = self.model_dump(mode="json", exclude={"result_digest"})
+        if self.result_digest != sha256_digest(material):
+            raise ValueError("Git commit capability output digest does not match")
         return self
 
 
@@ -806,6 +840,96 @@ class WorkspaceGitInspectExecutor(_BuiltinExecutor):
         )
 
 
+class WorkspaceGitCommitExecutor(_BuiltinExecutor):
+    """R1 adapter limited to one exact server-named branch and commit."""
+
+    def __init__(self, capability: CapabilityRef, runtime: WorkspaceCodingPort) -> None:
+        super().__init__(capability, CapabilityResultKind.GIT_COMMIT)
+        self._runtime = runtime
+
+    async def execute(self, context: CapabilityExecutionContext, arguments: BaseModel) -> BaseModel:
+        self._require_context(context)
+        raise BuiltinCapabilityExecutionError(
+            "Git commit execution requires an exact persisted approval"
+        )
+
+    async def prepare_approval(
+        self,
+        context: CapabilityExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        self._require_context(context)
+        if not isinstance(arguments, WorkspaceGitCommitExecutorInput):
+            raise BuiltinCapabilityExecutionError("Git commit input type changed")
+        if not self._runtime.git_enabled:
+            raise BuiltinCapabilityRuntimeUnavailableError("Git commit runtime is disabled")
+        return await asyncio.to_thread(
+            self._runtime.prepare_git_commit,
+            task_id=context.task_id,
+            project_path=arguments.project_path,
+            paths=arguments.paths,
+        )
+
+    async def execute_approved(
+        self,
+        context: CapabilityExecutionContext,
+        arguments: BaseModel,
+        preview: BaseModel,
+    ) -> BaseModel:
+        self._require_context(context)
+        if (
+            not isinstance(arguments, WorkspaceGitCommitExecutorInput)
+            or not isinstance(preview, GitCommitPreview)
+            or preview.task_id != context.task_id
+            or preview.project_path != arguments.project_path
+        ):
+            raise BuiltinCapabilityExecutionError(
+                "Git commit approval changed its exact Task or project binding"
+            )
+        receipt = await asyncio.to_thread(self._runtime.commit_git, preview)
+        values = {
+            "schema_version": "deskpilot.workspace-git-commit-capability-output.v1",
+            "receipt": receipt.model_dump(mode="json"),
+        }
+        return WorkspaceGitCommitCapabilityOutput.model_validate(
+            {**values, "result_digest": sha256_digest(values)}
+        )
+
+    async def verify(
+        self,
+        context: CapabilityExecutionContext,
+        candidate: BaseModel,
+    ) -> BaseModel:
+        if (
+            not isinstance(candidate, WorkspaceGitCommitCapabilityOutput)
+            or candidate.receipt.task_id != context.task_id
+            or not candidate.receipt.hooks_disabled
+            or not candidate.receipt.signing_disabled
+            or not candidate.receipt.push_disabled
+            or not candidate.receipt.rollback_available
+        ):
+            raise BuiltinCapabilityCandidateRejectedError(
+                "Git commit receipt lost a fixed execution guard"
+            )
+        return self._verification(
+            context=context,
+            candidate=candidate,
+            verifier_id="builtin.workspace.git.commit.verifier.v1",
+            evidence={
+                "confirmation_digest": candidate.receipt.confirmation_digest,
+                "expected_head_oid": candidate.receipt.expected_head_oid,
+                "commit_oid": candidate.receipt.commit_oid,
+                "tree_oid": candidate.receipt.tree_oid,
+                "target_branch": candidate.receipt.target_branch,
+                "path_proof_digests": [
+                    item.proof_digest for item in candidate.receipt.paths
+                ],
+                "receipt_digest": candidate.receipt.receipt_digest,
+                "result_digest": candidate.result_digest,
+            },
+        )
+
+
 class WorkspaceCommandExecutor(_BuiltinExecutor):
     def __init__(
         self,
@@ -1101,6 +1225,22 @@ def create_builtin_capability_executor_registry(
                 result_kind=CapabilityResultKind.GIT_INSPECTION,
                 executor=WorkspaceGitInspectExecutor(_ref(git_pack), workspace_coding),
             )
+            commit_pack = capabilities.resolve_preferred("workspace.git.commit.v1")
+            _register(
+                registry,
+                commit_pack,
+                executor_id="builtin.workspace.git.commit.v1",
+                input_model=WorkspaceGitCommitExecutorInput,
+                output_model=WorkspaceGitCommitCapabilityOutput,
+                approval_model=GitCommitPreview,
+                result_kind=CapabilityResultKind.GIT_COMMIT,
+                effect_class=CapabilityEffectClass.WORKSPACE_WRITE,
+                approval_requirement=(
+                    CapabilityApprovalRequirement.EXACT_CONFIRMATION_DIGEST
+                ),
+                recovery_policy=CapabilityRecoveryPolicy.RECEIPT_RECONCILE,
+                executor=WorkspaceGitCommitExecutor(_ref(commit_pack), workspace_coding),
+            )
     if (
         command_profiles is not None
         and command_snapshots is not None
@@ -1210,6 +1350,8 @@ __all__ = [
     "McpTextMetricsExecutor",
     "WorkspaceNodeTestExecutor",
     "WorkspaceGitInspectExecutor",
+    "WorkspaceGitCommitExecutor",
+    "WorkspaceGitCommitCapabilityOutput",
     "WorkspacePatchBundleExecutor",
     "WorkspacePatchCapabilityOutput",
     "WorkspacePatchPort",

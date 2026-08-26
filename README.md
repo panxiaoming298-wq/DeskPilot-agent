@@ -4,7 +4,7 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint 已完成；116A 固定命令链已闭合，116B 第三检查点已将受服务器约束的 Dynamic Coordinator Model Turn/Handoff 接入同一持久 TaskLoop，下一纵切是更真实的有界多文件仓库任务与受控 Git branch/commit receipt。** 阶段 115 已具备 Release、Calibration v3 和 Production Admission 代码底座，但真实 115B 仍缺 Candidate/Judge、代码出站、费用、真人评审和激活授权。依据 [ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)，这些外部事实继续阻塞 cloud 生产激活与 116C 真实模型质量结论，但不再阻塞 LOCAL-only 的受控编码工具面和持久多 Agent 长循环开发。所有 cloud-only 候选继续默认 disabled。详细进度见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint 已完成；116A 固定命令链已闭合，116B 第四检查点已将两次 exact approval、服务器命名新分支、受控 commit receipt 与重启对账接入同一持久 TaskLoop，下一纵切是把恰好双文件图推广为服务器封存的 2～8 文件仓库任务。** 阶段 115 已具备 Release、Calibration v3 和 Production Admission 代码底座，但真实 115B 仍缺 Candidate/Judge、代码出站、费用、真人评审和激活授权。依据 [ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)，这些外部事实继续阻塞 cloud 生产激活与 116C 真实模型质量结论，但不再阻塞 LOCAL-only 的受控编码工具面和持久多 Agent 长循环开发。所有 cloud-only 候选继续默认 disabled。详细进度见[项目进度](项目进度.md)。
 
 产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物。通用规划、持久执行/验证/修复循环、首版安全代码工具面和三任务桌面后台已经闭合；当前最大缺口是真实仓库长循环和真实模型生产闭环。后续路线保持 **Codex 优先、Marvis 后置**：先完成 116A/116B 的用户可感知纵切，再补齐 115B/116C 的真实模型质量门，最后进入桌面 Operator。
 
@@ -201,6 +201,7 @@ flowchart LR
 134. [阶段 116B：持久并行编码循环第一检查点](doc/116B-持久并行编码循环第一检查点.md)
 135. [阶段 116B：持久并行编码循环第二检查点](doc/116B-持久并行编码循环第二检查点.md)
 136. [阶段 116B：持久并行编码循环第三检查点](doc/116B-持久并行编码循环第三检查点.md)
+137. [阶段 116B：持久并行编码循环第四检查点](doc/116B-持久并行编码循环第四检查点.md)
 
 ## 目标 MVP 与当前边界
 
@@ -259,7 +260,7 @@ flowchart LR
 - 当前 TaskProcessor 的磁盘容量任务通过离线 Fake Provider 获得结构化分类和计划，不调用网络模型；显式 `file.move` 请求使用受信任应用计划模板，路径只来自本地用户表单并强制进入 R1 一次性审批，不从自然语言或模型输出提取。
 - 统一对话入口已接入研究、本地知识、固定 MCP、Workspace 读写/检查/固定测试及 HTML/Markdown/PDF Artifact；阶段 111 已为确定性 Route 未命中接入受服务器 Offer 约束的 Turn Planner，阶段 112 已建立不重放 Provider 的通用 TaskLoop。阶段 113 新增项目根限定的递归搜索/批读、Git `status/diff/log` 和六个服务器 Command Profile，Python pytest/Ruff/mypy 与 Node/pnpm test/type-check/build 只在断网临时快照中执行，模型不能提供 executable、argv、cwd 或环境变量。
 - 阶段 116A 第二个检查点已将服务器编译的 `WorkspaceCommandPlan` 持久绑定到 exact Task/ModelPlanner Draft/Step/Offer/TaskLoop node：计划、映射和步骤证明内容寻址，Activation 与每次 command claim 都重验路径、Catalog、Profile 和 node proof。非 `passed` 结果保存失败回执并停止后续步骤，已知失败允许一次有界 Repair，重启不重放已通过或 outcome-unknown 命令。这已闭合固定命令链，但尚不是完整 116B 多 Agent 真实仓库长循环。
-- 阶段 116B 第一检查点新增 LOCAL-only `workspace_coding_loop`：两个独立 Workspace Reader 在同一 TaskLoop 中并行执行，只有两个 ResultRef 分别验证后才解锁精确双文件 Patch，随后执行服务器固定测试、一次已知失败 Repair、独立验收和结构化交付证据持久化。第二检查点又在 Reader 与写入间接入两个真实持久 Patch Planner Model Turn/Handoff，并完成同会话 amendment fencing 与公开 Delivery。第三检查点在 Reader 前接入受约束 `workspace_coordinator@1.1.0`：模型只能逐项确认服务器封存的六节点图，独立 `coordination_plan` ResultRef 验证后才解锁 Reader；Schema 合法但图内容漂移会终止 ModelTurn/Invocation/Attempt/Node/Run。当前仍是固定双文件纵切，尚无受控 Git branch/commit。
+- 阶段 116B 第一检查点新增 LOCAL-only `workspace_coding_loop`：两个独立 Workspace Reader 在同一 TaskLoop 中并行执行，只有两个 ResultRef 分别验证后才解锁精确双文件 Patch，随后执行服务器固定测试、一次已知失败 Repair、独立验收和结构化交付证据持久化。第二检查点又在 Reader 与写入间接入两个真实持久 Patch Planner Model Turn/Handoff，并完成同会话 amendment fencing 与公开 Delivery。第三检查点在 Reader 前接入受约束 `workspace_coordinator@1.1.0`，用独立 `coordination_plan` ResultRef 先确认服务器封存图。第四检查点又在测试与 Final 之间加入第二次 exact approval、服务器命名新分支、hook/signing/push-disabled commit、内容寻址回执与中间态重启对账，Coordinator 现只能确认七节点图并以 `commit_git` 为唯一输出。当前仍是恰好双文件纵切，下一步才是服务器封存的 2～8 文件动态图。
 - `web.search`/`web.page.read` 在显式开关与 SearchProvider 配置下可用，默认仍关闭；Task Workspace、ArtifactRevision/PatchReceipt、同源 HTML/Markdown/PDF Builder、PDF 全页 render evidence 和 HTML BrowserRenderRun 已实现。未验证研究结果仍只能停在 `awaiting_verification`。
 
 受保护 checkpoint 只恢复能与任务事件、Tool 账本、Policy、审批记录和 effect graph 当前节点同时对上的阶段；密文损坏或任一绑定错配都会 fail closed。
@@ -270,7 +271,7 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-26 校准）
 
-阶段 77～114 与 115A 已完成。116A 的固定命令链已闭合；116B 第三检查点已完成服务器封存六节点图的真实 Coordinator Model Turn/Handoff、持久 `coordination_plan` 证明与图漂移失败收敛。下一步把固定双文件任务推广为更真实的有界多文件仓库循环，并单独建立受控 Git branch/commit receipt；自由 Shell、依赖安装与自动 push 继续禁止。阶段 115B 的真实 Provider/Judge、数据出站、费用、真人评审和激活授权仍缺失，候选继续默认 disabled，阶段 115 和整个 116B 都不能标记完成；115B 完成后再执行 116C 真实模型黄金任务与生产质量验收。完整边界见[项目进度](项目进度.md)、[第三检查点](doc/116B-持久并行编码循环第三检查点.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+阶段 77～114 与 115A 已完成。116A 的固定命令链已闭合；116B 第四检查点已完成两次 exact approval、服务器命名新分支、固定 commit、可对账 receipt 和 v1 历史 Delivery 只读兼容。下一步把恰好双文件 Route 推广为服务器封存的 2～8 文件仓库循环；自由 Shell、依赖安装与自动 push 继续禁止。阶段 115B 的真实 Provider/Judge、数据出站、费用、真人评审和激活授权仍缺失，候选继续默认 disabled，阶段 115 和整个 116B 都不能标记完成；115B 完成后再执行 116C 真实模型黄金任务与生产质量验收。完整边界见[项目进度](项目进度.md)、[第四检查点](doc/116B-持久并行编码循环第四检查点.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
 
@@ -285,6 +286,8 @@ flowchart LR
 阶段 116B 第二个代码 checkpoint：默认后端 800 项，`788 passed + 12 skipped`；Ruff 全仓、严格 mypy 293 个生产源码、Alembic 唯一 head `0059_workspace_coding_amendments`、lock/pip 门禁通过。Evaluation Windows v2 与 Phase75 v17 compare 通过且 baseline 未改；前端 24 文件 / 165 项、type-check/build 通过。本 checkpoint 完成 LOCAL-only/Fake 条件下的真实持久 Patch Planner Handoff、同会话 amendment fencing 和公开 Delivery 投影，不宣称 Dynamic Coordinator、真实 cloud 模型质量或生产激活已经完成。
 
 阶段 116B 第三个代码 checkpoint：默认后端 801 项，第二轮统一运行 `789 passed + 12 skipped`；Ruff 全仓、严格 mypy 293 个生产源码、fresh SQLite/Alembic 唯一 head `0059_workspace_coding_amendments`、lock/pip、wheel Prompt 29/29 通过。Evaluation Windows v2 与 Phase75 v17 compare 通过且 baseline 未改；前端 24 文件 / 165 项、type-check/build 通过。本 checkpoint 完成 LOCAL-only/Fake 条件下的受约束 Coordinator 图确认、持久 ResultRef、图漂移失败收敛和公开证据投影，不宣称自由模型图、受控 Git 写入、真实 cloud 模型质量或生产激活已经完成。
+
+阶段 116B 第四个代码 checkpoint：默认后端 807 项，最终单进程统一运行 `795 passed + 12 skipped`、失败/错误为 0；116B/Workspace coding 专项 20/20、Ruff 全仓、严格 mypy 293 个生产源码、fresh SQLite/Alembic 唯一 head `0059_workspace_coding_amendments`、lock/pip、wheel Prompt 29/29 通过。Evaluation Windows v2 与 Phase75 v17 compare 通过且 baseline 未改；前端 24 文件 / 165 项、type-check/build 通过。本 checkpoint 完成 LOCAL-only/Fake 条件下的第二次 Git 确认、固定 branch/commit、receipt reconcile、中间态恢复和旧 v1 Delivery 只读兼容，不宣称动态多文件图、自动 push、真实 cloud 模型质量或生产激活已经完成。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 
