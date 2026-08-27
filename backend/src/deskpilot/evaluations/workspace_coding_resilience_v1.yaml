@@ -1,0 +1,17 @@
+schema_version: deskpilot.workspace-coding-resilience-suite.v1
+suite_id: deskpilot.workspace-coding-public-api-resilience
+version: 1
+workspace_suite_digest: 2873b3fd086a0b281b7d6c20e72637823a7de42aad685988cb9f747c236adb47
+scenario:
+  scenario_id: python.command-plan.process-faults
+  workspace_case_id: python.public-api.restart-delivery
+  command_project_path: backend
+  command_profile_ids: [python.ruff.v1, python.mypy.v1]
+  stable_restart_cycles: 3
+  known_failure_count: 1
+  expected_repaired_attempt: 2
+  proof_drift_scopes: [catalog, profile, project_path, node, input]
+  interrupted_profile_id: python.ruff.v1
+  expected_unknown_error_code: CAPABILITY_OUTCOME_UNKNOWN_AFTER_LEASE
+  no_automatic_replay: true
+  max_advances: 24

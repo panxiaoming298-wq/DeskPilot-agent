@@ -5,8 +5,17 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from deskpilot.domain.command_profiles import CommandProfileId
+
 WorkspaceCodingGoldenEcosystem = Literal["python", "node"]
 WorkspaceCodingRestartCheckpoint = Literal["patch_approval", "git_approval"]
+WorkspaceCodingProofDriftScope = Literal[
+    "catalog",
+    "profile",
+    "project_path",
+    "node",
+    "input",
+]
 
 
 def _strict_relative_path(value: str) -> str:
@@ -115,3 +124,64 @@ class WorkspaceCodingGoldenSuite(BaseModel):
         if {case.ecosystem for case in self.cases} != {"python", "node"}:
             raise ValueError("Workspace Coding golden suite must cover Python and Node")
         return self
+
+
+class WorkspaceCommandGoldenResilienceScenario(BaseModel):
+    """Versioned fault plan; it grants no authority to execute a command."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    workspace_case_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    command_project_path: str = Field(min_length=1, max_length=500)
+    command_profile_ids: tuple[CommandProfileId, ...] = Field(min_length=2, max_length=6)
+    stable_restart_cycles: int = Field(ge=2, le=8)
+    known_failure_count: Literal[1] = 1
+    expected_repaired_attempt: Literal[2] = 2
+    proof_drift_scopes: tuple[WorkspaceCodingProofDriftScope, ...] = Field(
+        min_length=5,
+        max_length=5,
+    )
+    interrupted_profile_id: CommandProfileId
+    expected_unknown_error_code: Literal["CAPABILITY_OUTCOME_UNKNOWN_AFTER_LEASE"] = (
+        "CAPABILITY_OUTCOME_UNKNOWN_AFTER_LEASE"
+    )
+    no_automatic_replay: Literal[True] = True
+    max_advances: int = Field(default=24, ge=8, le=60)
+
+    _project_path_is_relative = field_validator("command_project_path")(
+        _strict_relative_path
+    )
+
+    @model_validator(mode="after")
+    def exact_fault_matrix(self) -> Self:
+        if len(set(self.command_profile_ids)) != len(self.command_profile_ids):
+            raise ValueError("Resilience command profiles must be unique")
+        ecosystems = {
+            profile_id.split(".", maxsplit=1)[0]
+            for profile_id in self.command_profile_ids
+        }
+        if ecosystems != {"python"}:
+            raise ValueError("The v1 resilience scenario requires one Python command chain")
+        expected_scopes: tuple[WorkspaceCodingProofDriftScope, ...] = (
+            "catalog",
+            "profile",
+            "project_path",
+            "node",
+            "input",
+        )
+        if self.proof_drift_scopes != expected_scopes:
+            raise ValueError("Resilience proof drift scopes must preserve the complete v1 matrix")
+        if self.interrupted_profile_id != self.command_profile_ids[0]:
+            raise ValueError("Interrupted Profile must be the first command step")
+        return self
+
+
+class WorkspaceCodingGoldenResilienceSuite(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-coding-resilience-suite.v1"]
+    suite_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    version: Literal[1] = 1
+    workspace_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scenario: WorkspaceCommandGoldenResilienceScenario

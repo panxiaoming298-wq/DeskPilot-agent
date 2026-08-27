@@ -51,6 +51,7 @@ from deskpilot.application.browser_verifier import (
     IsolatedChromiumVerifier,
 )
 from deskpilot.application.builtin_capability_executors import (
+    WorkspaceCommandPort,
     create_builtin_capability_executor_registry,
 )
 from deskpilot.application.capability_catalog import create_builtin_capability_catalog
@@ -192,6 +193,8 @@ def create_app(
     workspace_check_runtime: WorkspaceCheckPort | None = None,
     workspace_python_test_runtime: WorkspacePythonTestPort | None = None,
     workspace_node_test_runtime: WorkspaceNodeTestPort | None = None,
+    command_profile_catalog: CommandProfileCatalog | None = None,
+    workspace_command_runtime: WorkspaceCommandPort | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings()
     instance_id = f"api_{uuid4().hex}"
@@ -408,16 +411,21 @@ def create_app(
             capability_catalog,
             plan_compilation_service,
         )
-        command_profile_catalog = CommandProfileCatalog()
+        resolved_command_profile_catalog = (
+            command_profile_catalog or CommandProfileCatalog()
+        )
         workspace_command_plan_binder = WorkspaceCommandPlanBinder(
             WorkspaceCommandPlanCompiler(
-                command_profile_catalog,
+                resolved_command_profile_catalog,
                 workspace_file_runtime,
             )
         )
-        workspace_command_runtime = WorkspaceCommandRuntime(
-            resolved_settings.runner_worker_runtime_root,
-            resolved_settings.runner_appcontainer_profile_journal_path,
+        resolved_workspace_command_runtime = (
+            workspace_command_runtime
+            or WorkspaceCommandRuntime(
+                resolved_settings.runner_worker_runtime_root,
+                resolved_settings.runner_appcontainer_profile_journal_path,
+            )
         )
         agent_model_loop_runtime = AgentModelLoopRuntime(
             database,
@@ -513,9 +521,9 @@ def create_app(
             node_tests=resolved_workspace_node_test_runtime,
             workspace_patches=workspace_file_runtime,
             workspace_coding=workspace_coding_runtime,
-            command_profiles=command_profile_catalog,
+            command_profiles=resolved_command_profile_catalog,
             command_snapshots=workspace_coding_runtime,
-            command_runtime=workspace_command_runtime,
+            command_runtime=resolved_workspace_command_runtime,
             artifacts=artifact_delivery_runtime,
         )
         task_loop_agent_adapters = create_task_loop_agent_adapter_registry(
@@ -580,7 +588,7 @@ def create_app(
             task_loop_runtime,
             task_loop_activation_runtime,
             task_loop_execution_runtime,
-            command_profile_ids=workspace_command_runtime.enabled_profile_ids,
+            command_profile_ids=resolved_workspace_command_runtime.enabled_profile_ids,
             workspace_coding_explorations=workspace_coding_explorations,
             workspace_coding_changes=workspace_coding_change_runtime,
             workspace_coding_explorer=workspace_coding_explorer_runtime,
@@ -712,8 +720,8 @@ def create_app(
         app.state.workspace_coding_explorations = workspace_coding_explorations
         app.state.workspace_coding_explorer_runtime = workspace_coding_explorer_runtime
         app.state.workspace_coding_change_runtime = workspace_coding_change_runtime
-        app.state.command_profile_catalog = command_profile_catalog
-        app.state.workspace_command_runtime = workspace_command_runtime
+        app.state.command_profile_catalog = resolved_command_profile_catalog
+        app.state.workspace_command_runtime = resolved_workspace_command_runtime
         app.state.workspace_agent_runtime = workspace_agent_runtime
         app.state.workspace_check_runtime = resolved_workspace_check_runtime
         app.state.workspace_python_test_runtime = resolved_workspace_python_test_runtime

@@ -4,7 +4,7 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint 已完成；116A 固定命令链已闭合，116B 第十三检查点已把三 Task 编码主链固化为版本化 Python/Node 黄金任务，并在真实 Uvicorn OS 进程间闭合 Patch/Git 审批恢复、真实 AppContainer pytest 和最终 Delivery。** Activation 与每次 claim 仍重验 Proposal、确认、Catalog、project/snapshot、Plan/node 和 Agent/Capability proof；启动恢复可找回未派发 Explorer，verified 步骤不重复，存在 Invocation 或 outcome unknown 时不透明重放。阶段 115 已具备 Release、Calibration v3 和 Production Admission 代码底座，但真实 115B 仍缺 Candidate/Judge、代码出站、费用、真人评审和激活授权。依据 [ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)，这些外部事实继续阻塞 cloud 生产激活与 116C 真实模型质量结论，但不再阻塞 LOCAL-only 的黄金任务与长循环开发。所有 cloud-only 候选继续默认 disabled。详细进度见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint 已完成；116A 固定命令链已闭合，116B 第十四检查点已把 WorkspaceCommandPlan 的已知失败 Repair、三轮重启 soak、五类 proof 漂移和运行中强杀后的 outcome unknown 禁止重放提升为真实 Uvicorn/公共 API 证据。** 第十三检查点的版本化 Python/Node 黄金任务、Patch/Git 审批恢复、真实 AppContainer pytest 和 Delivery 继续通过；Activation 与每次 claim 仍重验 Catalog、Profile、project/snapshot、Plan/node/input 和 Agent/Capability proof。阶段 115 已具备 Release、Calibration v3 和 Production Admission 代码底座，但真实 115B 仍缺 Candidate/Judge、代码出站、费用、真人评审和激活授权。依据 [ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)，这些外部事实继续阻塞 cloud 生产激活与 116C 真实模型质量结论，但不再阻塞 LOCAL-only 的黄金任务与长循环开发。所有 cloud-only 候选继续默认 disabled。详细进度见[项目进度](项目进度.md)。
 
 产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物。通用规划、持久执行/验证/修复循环、首版安全代码工具面和三任务桌面后台已经闭合；当前最大缺口是真实仓库长循环和真实模型生产闭环。后续路线保持 **Codex 优先、Marvis 后置**：先完成 116A/116B 的用户可感知纵切，再补齐 115B/116C 的真实模型质量门，最后进入桌面 Operator。
 
@@ -211,6 +211,7 @@ flowchart LR
 144. [阶段 116B：持久多 Agent 编码循环第十一检查点](doc/116B-持久多Agent编码循环第十一检查点.md)
 145. [阶段 116B：持久多 Agent 编码循环第十二检查点](doc/116B-持久多Agent编码循环第十二检查点.md)
 146. [阶段 116B：持久多 Agent 编码循环第十三检查点](doc/116B-持久多Agent编码循环第十三检查点.md)
+147. [阶段 116B：持久多 Agent 编码循环第十四检查点](doc/116B-持久多Agent编码循环第十四检查点.md)
 
 ## 目标 MVP 与当前边界
 
@@ -269,7 +270,7 @@ flowchart LR
 - 当前 TaskProcessor 的磁盘容量任务通过离线 Fake Provider 获得结构化分类和计划，不调用网络模型；显式 `file.move` 请求使用受信任应用计划模板，路径只来自本地用户表单并强制进入 R1 一次性审批，不从自然语言或模型输出提取。
 - 统一对话入口已接入研究、本地知识、固定 MCP、Workspace 读写/检查/固定测试及 HTML/Markdown/PDF Artifact；阶段 111 已为确定性 Route 未命中接入受服务器 Offer 约束的 Turn Planner，阶段 112 已建立不重放 Provider 的通用 TaskLoop。阶段 113 新增项目根限定的递归搜索/批读、Git `status/diff/log` 和六个服务器 Command Profile，Python pytest/Ruff/mypy 与 Node/pnpm test/type-check/build 只在断网临时快照中执行，模型不能提供 executable、argv、cwd 或环境变量。
 - 阶段 116A 第二个检查点已将服务器编译的 `WorkspaceCommandPlan` 持久绑定到 exact Task/ModelPlanner Draft/Step/Offer/TaskLoop node：计划、映射和步骤证明内容寻址，Activation 与每次 command claim 都重验路径、Catalog、Profile 和 node proof。非 `passed` 结果保存失败回执并停止后续步骤，已知失败允许一次有界 Repair，重启不重放已通过或 outcome-unknown 命令。这已闭合固定命令链，但尚不是完整 116B 多 Agent 真实仓库长循环。
-- 阶段 116B 第一至第四检查点依次闭合了并行 Reader、持久 Patch Planner Handoff、受约束 Coordinator、同会话 amendment、两次 exact approval、服务器命名新分支、hook/signing/push-disabled commit、内容寻址回执与中间态重启对账。第五检查点将该链推广为 Python/Node 各 2～8 文件的服务器预编译图；第六检查点完成 Node 八文件全链和跨批恢复/失败终态；第七至第九检查点闭合 snapshot→持久 Explorer→文件集确认→可恢复 Reader TaskLoop；第十检查点将完整 Reader ResultRef 集绑定到零工具 Change Proposer，并只在新的 exact 用户确认后持久化第三个 Task 的写 Plan。第十一检查点把该 binding 作为第三种受信来源接入同一 TaskLoop；第十二检查点把这条链接到结构化 Conversation/Workbench 入口，闭合公共 API 用户纵切。第十三检查点将其固化为严格、内容寻址的 Python/Node 黄金套件，并用三个真实 Uvicorn 进程证明 Patch/Git 审批恢复、verified 步骤不重复和真实 AppContainer pytest 到 Delivery。
+- 阶段 116B 第一至第四检查点依次闭合了并行 Reader、持久 Patch Planner Handoff、受约束 Coordinator、同会话 amendment、两次 exact approval、服务器命名新分支、hook/signing/push-disabled commit、内容寻址回执与中间态重启对账。第五检查点将该链推广为 Python/Node 各 2～8 文件的服务器预编译图；第六检查点完成 Node 八文件全链和跨批恢复/失败终态；第七至第九检查点闭合 snapshot→持久 Explorer→文件集确认→可恢复 Reader TaskLoop；第十检查点将完整 Reader ResultRef 集绑定到零工具 Change Proposer，并只在新的 exact 用户确认后持久化第三个 Task 的写 Plan。第十一检查点把该 binding 作为第三种受信来源接入同一 TaskLoop；第十二检查点把这条链接到结构化 Conversation/Workbench 入口，闭合公共 API 用户纵切。第十三检查点将其固化为严格、内容寻址的 Python/Node 黄金套件，并用三个真实 Uvicorn 进程证明 Patch/Git 审批恢复、verified 步骤不重复和真实 AppContainer pytest 到 Delivery。第十四检查点新增与基础 suite digest 精确绑定的韧性资产，经公共 API 闭合一次失败后的跨进程 Repair、三轮稳定重启、Catalog/Profile/path/node/input 漂移启动前拒绝，以及 Command Profile 运行中断后的 outcome unknown 不透明重放。
 - `web.search`/`web.page.read` 在显式开关与 SearchProvider 配置下可用，默认仍关闭；Task Workspace、ArtifactRevision/PatchReceipt、同源 HTML/Markdown/PDF Builder、PDF 全页 render evidence 和 HTML BrowserRenderRun 已实现。未验证研究结果仍只能停在 `awaiting_verification`。
 
 受保护 checkpoint 只恢复能与任务事件、Tool 账本、Policy、审批记录和 effect graph 当前节点同时对上的阶段；密文损坏或任一绑定错配都会 fail closed。
@@ -278,9 +279,9 @@ flowchart LR
 
 ## 下一步
 
-### 当前实施顺序（2026-08-27 校准）
+### 当前实施顺序（2026-08-28 校准）
 
-阶段 77～114 与 115A 已完成。116A 的固定命令链已闭合；116B 第十三检查点已将现有 Conversation/Workbench 编码流程固化为版本化 Python/Node 黄金任务，并在 Patch/Git 两个审批边界跨真实 API 进程恢复后完成真实 AppContainer pytest 与 Delivery。下一步在同一 harness 上增加长时间 soak、一次 Repair 续接、proof 漂移启动前拒绝与强制终止后 outcome unknown 不透明重放；不增加旁路状态机。自由 Shell、依赖安装与自动 push 继续禁止。阶段 115B 的真实 Provider/Judge、数据出站、费用、真人评审和激活授权仍缺失，候选继续默认 disabled；115B 完成后再执行 116C 真实模型黄金任务与生产质量验收。完整边界见[项目进度](项目进度.md)、[第十三检查点](doc/116B-持久多Agent编码循环第十三检查点.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+阶段 77～114 与 115A 已完成。116A 的固定命令链已闭合；116B 第十四检查点已在版本化韧性资产约束下，用真实 Uvicorn/公共 API 闭合已知失败 Repair、三轮重启 soak、五类 proof 漂移和 Command Profile 强杀后的 outcome unknown 禁止重放。下一步转向真实墙钟 soak、受监督 sidecar 强杀恢复、更多可抛弃中型 Python/Node 仓库，以及多任务并发公平性与资源上限；不增加旁路状态机。自由 Shell、依赖安装与自动 push 继续禁止。阶段 115B 的真实 Provider/Judge、数据出站、费用、真人评审和激活授权仍缺失，候选继续默认 disabled；115B 完成后再执行 116C 真实模型黄金任务与生产质量验收。完整边界见[项目进度](项目进度.md)、[第十四检查点](doc/116B-持久多Agent编码循环第十四检查点.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
 
@@ -315,6 +316,8 @@ flowchart LR
 阶段 116B 第十二个代码 checkpoint：结构化 `workspace_coding` 已接入现有 Conversation/Workbench 公共入口，用户可经持久 Explorer、两次 exact 对话确认和唯一 TaskLoop 完成 Python Patch/Test/Git/Delivery；Node 三轮写计划与无浏览器调度下的 Explorer 启动恢复也已闭合。默认后端实际收集 830 项，代码冻结后的单进程统一运行 `818 passed + 12 skipped`、失败/错误为 0；Ruff 全仓、strict mypy 305 个生产源码、lock/pip、Alembic/SQLite `0065`、wheel Prompt 33/33、Windows Evaluation v2、Phase75 v21 与 23 份 immutable baseline hash 门禁通过。前端 24 文件 / 165 项、type-check/build 通过。PostgreSQL/RabbitMQ 外部 cohort 未配置时继续安全 skip；本 checkpoint 不宣称真库、真消息队列、真实模型质量或生产激活。
 
 阶段 116B 第十三个代码 checkpoint：新增严格 `workspace_coding_v1.yaml` 黄金套件与内容寻址加载器，Python/Node case 仅经现有 Conversation/Workbench 公共 API 执行。Python case 在 Patch/Git 审批前两次销毁并重建真实 Uvicorn 进程，保持 exact confirmation/node proof，再以真实断网 AppContainer pytest 和受控 Git commit 到达 Delivery。冷启动暴露的 60 秒 claim 过期已以同步 Workbench 600 秒 fencing 窗口修复，底层 outcome unknown 禁止重放语义不变。默认后端 833 项，`821 passed + 12 skipped`；黄金套件 3/3、Ruff、strict mypy 307 个生产源码、lock/pip、Evaluation/Phase75 v21、wheel Prompt 33/33 与黄金 YAML 资源门禁通过，baseline 未改。完整数据见[第十三检查点](doc/116B-持久多Agent编码循环第十三检查点.md)。本 checkpoint 仍只证明 LOCAL-only/Fake 与隔离仓库的持久语义，不宣称 115B/116C 或 Codex 等价完成。
+
+阶段 116B 第十四个代码 checkpoint：新增与第十三检查点 suite digest 精确绑定的 `workspace_coding_resilience_v1.yaml`，普通对话经公共 Workbench 形成两步 WorkspaceCommandPlan；首步已知失败后跨进程保持失败 ResultRef，三轮 restart soak 不重放 Planner/Runtime，再由 Repair 的第二 Attempt 通过并解锁后续 Profile。Catalog、选中 Profile、project path、node spec、bound input 五类漂移均在 Runtime 调用前返回 409；运行中强杀 Uvicorn 后，过期 Attempt 收敛为 outcome unknown，三轮重启仍不重放。专项 8/8 与第十三检查点 3/3 已通过；默认后端 110 文件 / 841 项，完整运行 `829 passed + 12 skipped`，Ruff、strict mypy 307 个生产源码、lock/pip、Evaluation/Phase75 v21、Alembic/SQLite `0065` current/check、wheel Prompt 33/33 与两个 Workspace YAML 唯一资源、diff whitespace 全部通过。完整数据见[第十四检查点](doc/116B-持久多Agent编码循环第十四检查点.md)。本 checkpoint 是 LOCAL-only/recorded 故障注入，不宣称真实墙钟 soak、真实命令质量、115B/116C 或 Codex 等价完成。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 
