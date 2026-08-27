@@ -65,6 +65,10 @@ from deskpilot.domain.research import (
 from deskpilot.domain.task_plans import PlanNodeBudget
 from deskpilot.domain.tool_contracts import ToolRiskLevel
 from deskpilot.domain.turn_planning import TurnPlannerUnsupportedDecision
+from deskpilot.domain.workspace_coding_changes import (
+    WorkspaceCodingChange,
+    WorkspaceCodingChangeDecision,
+)
 from deskpilot.domain.workspace_coding_explorations import (
     WorkspaceCodingExplorationCandidateFile,
     WorkspaceCodingExplorationDecision,
@@ -84,6 +88,7 @@ WORKSPACE_BOUNDED_CODING_COORDINATOR_DECISION_SCHEMA = (
 CITATION_VERIFICATION_DECISION_SCHEMA = "citation_verification_decision"
 TURN_PLANNER_DECISION_SCHEMA = "turn_planner_decision"
 WORKSPACE_CODING_EXPLORATION_DECISION_SCHEMA = "workspace_coding_exploration_decision"
+WORKSPACE_CODING_CHANGE_DECISION_SCHEMA = "workspace_coding_change_decision"
 
 
 class FakeModelProvider:
@@ -256,6 +261,63 @@ class FakeModelProvider:
                     if isinstance(item, dict)
                 ),
                 decision_summary="选择两个与目标相关的候选实现文件。",
+            ).model_dump(mode="json")
+        if request.output_schema.name == WORKSPACE_CODING_CHANGE_DECISION_SCHEMA:
+            raw_readers = request.metadata.get("workspace_change_readers")
+            binding_id = request.metadata.get("workspace_change_file_set_binding_id")
+            execution_id = request.metadata.get("workspace_change_reader_execution_id")
+            execution_digest = request.metadata.get("workspace_change_reader_execution_digest")
+            result_set_digest = request.metadata.get("workspace_change_reader_result_set_digest")
+            ecosystem = request.metadata.get("workspace_change_ecosystem")
+            if (
+                not isinstance(raw_readers, list)
+                or not 2 <= len(raw_readers) <= 8
+                or not all(isinstance(item, dict) for item in raw_readers)
+            ):
+                raise ValueError("Fake Change Proposer requires exact Reader evidence")
+            reader_items = cast(list[dict[str, JsonValue]], raw_readers)
+            if (
+                not all(
+                    isinstance(item.get("content"), str) and item["content"]
+                    for item in reader_items
+                )
+                or not all(
+                    isinstance(value, str)
+                    for value in (
+                        binding_id,
+                        execution_id,
+                        execution_digest,
+                        result_set_digest,
+                    )
+                )
+            ):
+                raise ValueError("Fake Change Proposer requires exact Reader evidence")
+            comment = " # DeskPilot proposed change" if ecosystem == "python" else " // proposed"
+            changes = []
+            for item in reader_items:
+                content = str(item["content"])
+                old_text = next((line for line in content.splitlines() if line), content)
+                changes.append(
+                    WorkspaceCodingChange(
+                        relative_path=str(item["relative_path"]),
+                        old_text=old_text,
+                        new_text=f"{old_text}{comment}",
+                        source_result_ref_digest=str(item["result_ref_digest"]),
+                        source_result_digest=str(item["result_digest"]),
+                        source_version_digest=str(item["version_digest"]),
+                        rationale=(
+                            f"基于 {item['relative_path']} 的已验证 Reader 内容"
+                            "提出精确替换。"
+                        ),
+                    )
+                )
+            return WorkspaceCodingChangeDecision(
+                file_set_binding_id=cast(str, binding_id),
+                reader_execution_id=cast(str, execution_id),
+                reader_execution_digest=cast(str, execution_digest),
+                reader_result_set_digest=cast(str, result_set_digest),
+                changes=tuple(changes),
+                decision_summary="为确认文件集逐一形成无写权限精确替换提案。",
             ).model_dump(mode="json")
         if request.output_schema.name == TASK_PLAN_SCHEMA:
             return TaskPlan(

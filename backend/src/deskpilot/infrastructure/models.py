@@ -1862,6 +1862,195 @@ class WorkspaceCodingFileSetPlanBindingRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class WorkspaceCodingChangeRunBindingRecord(Base):
+    """Immutable successful Reader evidence to generation-2 proposer Run binding."""
+
+    __tablename__ = "workspace_coding_change_run_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "contract_version = 2 AND plan_generation = 2 AND result_count BETWEEN 2 AND 8",
+            name="ck_workspace_coding_change_run_scope",
+        ),
+        UniqueConstraint("file_set_binding_id", name="uq_workspace_coding_change_run_file_set"),
+        UniqueConstraint("reader_execution_id", name="uq_workspace_coding_change_run_execution"),
+        UniqueConstraint("reader_task_id", name="uq_workspace_coding_change_run_task"),
+        UniqueConstraint("run_id", name="uq_workspace_coding_change_run_run"),
+        UniqueConstraint("proposer_node_id", name="uq_workspace_coding_change_run_node"),
+        UniqueConstraint("binding_digest", name="uq_workspace_coding_change_run_digest"),
+        ForeignKeyConstraint(
+            ["reader_task_id", "contract_version"],
+            ["task_contract_versions.task_id", "task_contract_versions.version"],
+            name="fk_workspace_coding_change_run_contract",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["reader_task_id", "plan_generation"],
+            ["task_plan_generations.task_id", "task_plan_generations.generation"],
+            name="fk_workspace_coding_change_run_plan",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_workspace_coding_change_run_created", "created_at"),
+    )
+
+    binding_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    file_set_binding_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_coding_file_set_plan_bindings.binding_id", ondelete="RESTRICT")
+    )
+    file_set_binding_digest: Mapped[str] = mapped_column(String(64))
+    reader_execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_loop_executions.execution_id", ondelete="RESTRICT")
+    )
+    reader_execution_digest: Mapped[str] = mapped_column(String(64))
+    reader_terminal_event_digest: Mapped[str] = mapped_column(String(64))
+    reader_result_set_digest: Mapped[str] = mapped_column(String(64))
+    result_count: Mapped[int] = mapped_column(Integer)
+    reader_task_id: Mapped[str] = mapped_column(String(40))
+    contract_version: Mapped[int] = mapped_column(Integer)
+    contract_digest: Mapped[str] = mapped_column(String(64))
+    plan_generation: Mapped[int] = mapped_column(Integer)
+    plan_id: Mapped[str] = mapped_column(String(68))
+    plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_runs.run_id", ondelete="RESTRICT")
+    )
+    proposer_node_id: Mapped[str] = mapped_column(
+        ForeignKey("task_execution_nodes.node_id", ondelete="RESTRICT")
+    )
+    proposer_node_spec_digest: Mapped[str] = mapped_column(String(64))
+    proposer_agent_id: Mapped[str] = mapped_column(String(128))
+    proposer_agent_version: Mapped[str] = mapped_column(String(32))
+    proposer_agent_contract_digest: Mapped[str] = mapped_column(String(64))
+    proposer_prompt_package_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    binding_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WorkspaceCodingChangeProposalRecord(Base):
+    """Immutable verified no-write change proposal."""
+
+    __tablename__ = "workspace_coding_change_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "change_count BETWEEN 2 AND 8",
+            name="ck_workspace_coding_change_proposal_count",
+        ),
+        UniqueConstraint("run_binding_id", name="uq_workspace_coding_change_proposal_run"),
+        UniqueConstraint("proposal_digest", name="uq_workspace_coding_change_proposal_digest"),
+        Index("ix_workspace_coding_change_proposal_created", "created_at"),
+    )
+
+    proposal_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    run_binding_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_coding_change_run_bindings.binding_id", ondelete="RESTRICT")
+    )
+    run_binding_digest: Mapped[str] = mapped_column(String(64))
+    reader_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="RESTRICT"))
+    reader_execution_id: Mapped[str] = mapped_column(String(68))
+    reader_result_set_digest: Mapped[str] = mapped_column(String(64))
+    proposer_agent_id: Mapped[str] = mapped_column(String(128))
+    proposer_agent_version: Mapped[str] = mapped_column(String(32))
+    proposer_agent_contract_digest: Mapped[str] = mapped_column(String(64))
+    proposer_prompt_package_digest: Mapped[str] = mapped_column(String(64))
+    change_count: Mapped[int] = mapped_column(Integer)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    proposal_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WorkspaceCodingChangeTurnProofRecord(Base):
+    """Immutable succeeded Model Turn proof for one change proposal."""
+
+    __tablename__ = "workspace_coding_change_turn_proofs"
+    __table_args__ = (
+        UniqueConstraint("proposal_id", name="uq_workspace_coding_change_turn_proposal"),
+        UniqueConstraint("invocation_id", name="uq_workspace_coding_change_turn_invocation"),
+        UniqueConstraint("turn_id", name="uq_workspace_coding_change_turn_turn"),
+        UniqueConstraint("agent_decision_id", name="uq_workspace_coding_change_turn_decision"),
+        UniqueConstraint("proof_digest", name="uq_workspace_coding_change_turn_digest"),
+        Index("ix_workspace_coding_change_turn_created", "created_at"),
+    )
+
+    proof_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_coding_change_proposals.proposal_id", ondelete="RESTRICT")
+    )
+    proposal_digest: Mapped[str] = mapped_column(String(64))
+    run_binding_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_coding_change_run_bindings.binding_id", ondelete="RESTRICT")
+    )
+    run_binding_digest: Mapped[str] = mapped_column(String(64))
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_invocations.invocation_id", ondelete="RESTRICT")
+    )
+    turn_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_model_turns.turn_id", ondelete="RESTRICT")
+    )
+    agent_decision_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_decisions.decision_id", ondelete="RESTRICT")
+    )
+    agent_decision_digest: Mapped[str] = mapped_column(String(64))
+    model_request_digest: Mapped[str] = mapped_column(String(64))
+    model_response_digest: Mapped[str] = mapped_column(String(64))
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    proof_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WorkspaceCodingWritePlanBindingRecord(Base):
+    """Fresh confirmation to an immutable generation-1 coding write Plan."""
+
+    __tablename__ = "workspace_coding_write_plan_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "contract_version = 1 AND plan_generation = 1 AND change_count BETWEEN 2 AND 8",
+            name="ck_workspace_coding_write_plan_scope",
+        ),
+        UniqueConstraint("proposal_id", name="uq_workspace_coding_write_plan_proposal"),
+        UniqueConstraint("successor_task_id", name="uq_workspace_coding_write_plan_task"),
+        UniqueConstraint("confirmation_message_id", name="uq_workspace_coding_write_plan_message"),
+        UniqueConstraint("binding_digest", name="uq_workspace_coding_write_plan_digest"),
+        ForeignKeyConstraint(
+            ["successor_task_id", "contract_version"],
+            ["task_contract_versions.task_id", "task_contract_versions.version"],
+            name="fk_workspace_coding_write_plan_contract",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["successor_task_id", "plan_generation"],
+            ["task_plan_generations.task_id", "task_plan_generations.generation"],
+            name="fk_workspace_coding_write_plan_plan",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_workspace_coding_write_plan_created", "created_at"),
+    )
+
+    binding_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_coding_change_proposals.proposal_id", ondelete="RESTRICT")
+    )
+    proposal_digest: Mapped[str] = mapped_column(String(64))
+    successor_task_id: Mapped[str] = mapped_column(String(40))
+    confirmation_message_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="RESTRICT")
+    )
+    confirmation_message_digest: Mapped[str] = mapped_column(String(64))
+    route_id: Mapped[str] = mapped_column(String(64))
+    route_version: Mapped[str] = mapped_column(String(8))
+    recipe_digest: Mapped[str] = mapped_column(String(64))
+    parameter_binding_digest: Mapped[str] = mapped_column(String(64))
+    parameters_digest: Mapped[str] = mapped_column(String(64))
+    contract_version: Mapped[int] = mapped_column(Integer)
+    contract_digest: Mapped[str] = mapped_column(String(64))
+    plan_generation: Mapped[int] = mapped_column(Integer)
+    plan_id: Mapped[str] = mapped_column(String(68))
+    plan_manifest_digest: Mapped[str] = mapped_column(String(64))
+    change_count: Mapped[int] = mapped_column(Integer)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
+    binding_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class TaskLoopCapabilityApprovalRecord(Base):
     """Exact Task/revision-bound authority for one capability side effect."""
 

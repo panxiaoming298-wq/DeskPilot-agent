@@ -2034,13 +2034,25 @@ class TaskLoopActivationRuntime:
             raise TaskLoopActivationProofRejectedError(
                 "Task Loop execution Plan manifest is invalid"
             ) from error
+        current_plan = bool(
+            state is not None
+            and state.active_plan_generation == execution.plan_generation
+            and state.active_plan_digest == execution.plan_manifest_digest
+            and plan is not None
+            and plan.status == "active"
+        )
+        historical_terminal_plan = bool(
+            state is not None
+            and state.active_plan_generation > execution.plan_generation
+            and plan is not None
+            and plan.status == "superseded"
+            and execution.status in {"failed", "succeeded", "cancelled"}
+        )
         if (
             state is None
             or plan is None
             or run is None
-            or state.active_plan_generation != 1
-            or state.active_plan_digest != execution.plan_manifest_digest
-            or plan.status != "active"
+            or not (current_plan or historical_terminal_plan)
             or plan.plan_id != execution.plan_id
             or plan.plan_manifest_digest != execution.plan_manifest_digest
             or run.task_id != execution.task_id

@@ -1,0 +1,1 @@
+{"schema_version":"deskpilot.prompt-package.v1","package_id":"builtin.workspace_change_proposer","version":"1.0.0","renderer_version":1,"instruction_file":"workspace_change_proposer.txt","variables":["objective_ref","context_refs"]}

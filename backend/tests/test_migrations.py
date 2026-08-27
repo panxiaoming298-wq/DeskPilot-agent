@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0063_confirmed_reader_task_loop"
+CURRENT_REVISION = "0064_workspace_coding_change_proposals"
 
 
 def _sync_url(path: Path) -> str:
@@ -1268,6 +1268,150 @@ def test_stage_116b_workspace_coding_explorer_turn_migration_is_guarded(
         }
     engine.dispose()
     assert "propose_file_set" not in decision_constraints["ck_agent_decision_kind"]
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_stage_116b_workspace_coding_change_proposal_migration_is_guarded(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-116b-workspace-coding-change-proposal.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        assert {
+            "workspace_coding_change_run_bindings",
+            "workspace_coding_change_proposals",
+            "workspace_coding_change_turn_proofs",
+            "workspace_coding_write_plan_bindings",
+        }.issubset(inspector.get_table_names())
+        run_columns = {
+            item["name"]
+            for item in inspector.get_columns("workspace_coding_change_run_bindings")
+        }
+        write_columns = {
+            item["name"]
+            for item in inspector.get_columns("workspace_coding_write_plan_bindings")
+        }
+    engine.dispose()
+    assert {
+        "binding_id",
+        "file_set_binding_id",
+        "file_set_binding_digest",
+        "reader_execution_id",
+        "reader_execution_digest",
+        "reader_terminal_event_digest",
+        "reader_result_set_digest",
+        "result_count",
+        "reader_task_id",
+        "contract_version",
+        "contract_digest",
+        "plan_generation",
+        "plan_id",
+        "plan_manifest_digest",
+        "run_id",
+        "proposer_node_id",
+        "proposer_node_spec_digest",
+        "proposer_agent_id",
+        "proposer_agent_version",
+        "proposer_agent_contract_digest",
+        "proposer_prompt_package_digest",
+        "manifest",
+        "binding_digest",
+        "created_at",
+    } == run_columns
+    assert {
+        "binding_id",
+        "proposal_id",
+        "proposal_digest",
+        "successor_task_id",
+        "confirmation_message_id",
+        "confirmation_message_digest",
+        "route_id",
+        "route_version",
+        "recipe_digest",
+        "parameter_binding_digest",
+        "parameters_digest",
+        "contract_version",
+        "contract_digest",
+        "plan_generation",
+        "plan_id",
+        "plan_manifest_digest",
+        "change_count",
+        "manifest",
+        "binding_digest",
+        "created_at",
+    } == write_columns
+
+    _assert_populated_downgrade_refused(
+        database_path,
+        config,
+        revision="0064_workspace_coding_change_proposals",
+        target_revision="0063_confirmed_reader_task_loop",
+        insert_statement="""
+            INSERT INTO workspace_coding_change_run_bindings (
+                binding_id, file_set_binding_id, file_set_binding_digest,
+                reader_execution_id, reader_execution_digest,
+                reader_terminal_event_digest, reader_result_set_digest,
+                result_count, reader_task_id, contract_version,
+                contract_digest, plan_generation, plan_id,
+                plan_manifest_digest, run_id, proposer_node_id,
+                proposer_node_spec_digest, proposer_agent_id,
+                proposer_agent_version, proposer_agent_contract_digest,
+                proposer_prompt_package_digest, manifest, binding_digest,
+                created_at
+            ) VALUES (
+                :binding_id, :file_set_binding_id, :file_set_binding_digest,
+                :execution_id, :execution_digest, :event_digest,
+                :result_set_digest, 2, :task_id, 2, :contract_digest,
+                2, :plan_id, :plan_digest, :run_id, :node_id,
+                :node_digest, 'builtin.workspace_change_proposer', '1.0.0',
+                :agent_digest, :prompt_digest, :empty_object,
+                :binding_digest, :created_at
+            )
+        """,
+        parameters={
+            "binding_id": "wcr_" + "1" * 64,
+            "file_set_binding_id": "wxb_" + "2" * 64,
+            "file_set_binding_digest": "3" * 64,
+            "execution_id": "tlx_" + "4" * 64,
+            "execution_digest": "5" * 64,
+            "event_digest": "6" * 64,
+            "result_set_digest": "7" * 64,
+            "task_id": "tsk_" + "8" * 32,
+            "contract_digest": "9" * 64,
+            "plan_id": "epl_" + "a" * 64,
+            "plan_digest": "b" * 64,
+            "run_id": "run_" + "c" * 64,
+            "node_id": "pnd_" + "d" * 64,
+            "node_digest": "e" * 64,
+            "agent_digest": "f" * 64,
+            "prompt_digest": "0" * 64,
+            "empty_object": "{}",
+            "binding_digest": "1" * 64,
+            "created_at": "2026-08-27 00:00:00+00:00",
+        },
+        snapshot_statement="""
+            SELECT binding_id, binding_digest
+            FROM workspace_coding_change_run_bindings
+            WHERE binding_id = :binding_id
+        """,
+        cleanup_statement=(
+            "DELETE FROM workspace_coding_change_run_bindings WHERE binding_id = :binding_id"
+        ),
+    )
+
+    command.downgrade(config, "0063_confirmed_reader_task_loop")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = inspect(connection).get_table_names()
+    engine.dispose()
+    assert "workspace_coding_change_run_bindings" not in tables
+    assert "workspace_coding_write_plan_bindings" not in tables
     command.upgrade(config, "head")
     command.check(config)
 

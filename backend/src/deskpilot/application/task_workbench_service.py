@@ -93,6 +93,10 @@ from deskpilot.application.workspace_agent_runtime import (
     WorkspaceAgentRuntime,
     WorkspaceAgentRuntimeError,
 )
+from deskpilot.application.workspace_coding_change_runtime import (
+    WorkspaceCodingChangeRuntime,
+    WorkspaceCodingChangeRuntimeError,
+)
 from deskpilot.application.workspace_coding_exploration_binder import (
     WorkspaceCodingExplorationBinder,
     WorkspaceCodingExplorationBindingError,
@@ -158,6 +162,7 @@ from deskpilot.domain.task_workbench import (
     WorkbenchStage,
 )
 from deskpilot.domain.turn_planning import TurnPlanningRead, TurnPlanningWorkbenchRead
+from deskpilot.domain.workspace_coding_changes import WorkspaceCodingChangeWorkbenchRead
 from deskpilot.domain.workspace_files import (
     WorkspaceDirectoryRead,
     WorkspaceEditReceipt,
@@ -218,6 +223,7 @@ class TaskWorkbenchService:
         task_loop_execution: TaskLoopExecutionCoordinator | None = None,
         command_profile_ids: frozenset[CommandProfileId] = frozenset(),
         workspace_coding_explorations: WorkspaceCodingExplorationBinder | None = None,
+        workspace_coding_changes: WorkspaceCodingChangeRuntime | None = None,
     ) -> None:
         self._database = database
         self._tasks = tasks
@@ -237,6 +243,7 @@ class TaskWorkbenchService:
         self._task_loop_execution = task_loop_execution
         self._command_profile_ids = command_profile_ids
         self._workspace_coding_explorations = workspace_coding_explorations
+        self._workspace_coding_changes = workspace_coding_changes
         self._auto_advance: WorkbenchAutoAdvancePort | None = None
 
     def bind_auto_advance(self, auto_advance: WorkbenchAutoAdvancePort) -> None:
@@ -268,7 +275,12 @@ class TaskWorkbenchService:
             if self._task_loop is not None
             else ()
         )
-        return tuple(dict.fromkeys((*planned, *deferred)))[:limit]
+        changes = (
+            await self._workspace_coding_changes.recoverable_task_ids(limit=limit)
+            if self._workspace_coding_changes is not None
+            else ()
+        )
+        return tuple(dict.fromkeys((*planned, *deferred, *changes)))[:limit]
 
     @staticmethod
     def automatic_action(workbench: TaskWorkbenchRead) -> WorkbenchAction | None:
@@ -278,6 +290,7 @@ class TaskWorkbenchService:
             WorkbenchAction.INTERPRET_TURN,
             WorkbenchAction.PLAN_TASK_LOOP,
             WorkbenchAction.ADVANCE_TASK_LOOP,
+            WorkbenchAction.PROPOSE_WORKSPACE_CHANGE,
             WorkbenchAction.START_EXECUTION,
             WorkbenchAction.RUN_RESEARCH,
             WorkbenchAction.VERIFY_CLAIMS,
@@ -349,6 +362,51 @@ class TaskWorkbenchService:
                 "Task privacy mode is incompatible with the research conversation"
             )
         privacy_mode = cast(Literal["local_preferred", "balanced"], previous.task.privacy_mode)
+        if self._workspace_coding_changes is not None:
+            try:
+                change = await self._workspace_coding_changes.get_workbench(task_id)
+            except WorkspaceCodingChangeRuntimeError as error:
+                raise TaskWorkbenchConflictError(
+                    "Workspace coding change proof drifted"
+                ) from error
+            if (
+                change is not None
+                and change.phase == "proposal_ready"
+                and change.confirmation_text == command.message
+                and change.proposal_id is not None
+            ):
+                successor = await self._tasks.create_task(
+                    TaskCreate(
+                        conversation_id=conversation_id,
+                        goal=command.message,
+                        privacy_mode=privacy_mode,
+                        constraints=list(previous.task.constraints),
+                    )
+                )
+                confirmation = await self._context.add_message(
+                    conversation_id,
+                    CreateConversationMessageRequest(
+                        role="user",
+                        content=command.message,
+                        task_id=successor.task_id,
+                        classification=DataClassification.INTERNAL,
+                    ),
+                )
+                try:
+                    await self._workspace_coding_changes.confirm(
+                        change.proposal_id,
+                        successor_task_id=successor.task_id,
+                        confirmation_message_id=confirmation.message_id,
+                    )
+                except WorkspaceCodingChangeRuntimeError as error:
+                    raise TaskWorkbenchConflictError(
+                        "Workspace coding change confirmation was rejected"
+                    ) from error
+                await self._add_assistant_message(
+                    successor.task_id,
+                    "已将新的精确确认绑定为后继写计划；文件尚未修改，写计划也尚未激活。",
+                )
+                return await self._schedule_automatic(await self.get(successor.task_id))
         continuation_code = classify_agent_replan_continuation(command.message)
         if (
             continuation_code is not None
@@ -875,6 +933,19 @@ class TaskWorkbenchService:
                     f"workbench:{task_id}",
                 )
             except TaskLoopExecutionCoordinatorError as error:
+                raise TaskWorkbenchConflictError(str(error)) from error
+            return await self.get(task_id)
+        if any(
+            item.action is WorkbenchAction.PROPOSE_WORKSPACE_CHANGE and item.enabled
+            for item in workbench.actions
+        ):
+            if self._workspace_coding_changes is None:
+                raise TaskWorkbenchConflictError(
+                    "Workspace coding Change Proposer is unavailable"
+                )
+            try:
+                await self._workspace_coding_changes.run(task_id)
+            except WorkspaceCodingChangeRuntimeError as error:
                 raise TaskWorkbenchConflictError(str(error)) from error
             return await self.get(task_id)
         if any(
@@ -1956,6 +2027,16 @@ class TaskWorkbenchService:
                 "Workspace coding exploration proof drifted"
             ) from error
         try:
+            workspace_coding_change = (
+                await self._workspace_coding_changes.get_workbench(task_id)
+                if self._workspace_coding_changes is not None
+                else None
+            )
+        except WorkspaceCodingChangeRuntimeError as error:
+            raise TaskWorkbenchConflictError(
+                "Workspace coding change proof drifted"
+            ) from error
+        try:
             (
                 knowledge,
                 mcp,
@@ -1994,6 +2075,7 @@ class TaskWorkbenchService:
             turn_planning,
             task_loop,
             task_loop_execution,
+            workspace_coding_change,
         )
         repair_loop = self._repair_loop_status(executions, contract, route)
         actions = self._actions(
@@ -2006,6 +2088,7 @@ class TaskWorkbenchService:
             turn_planning,
             task_loop,
             task_loop_execution,
+            workspace_coding_change,
         )
         material = {
             "schema_version": "deskpilot.task-workbench.v1",
@@ -2054,6 +2137,7 @@ class TaskWorkbenchService:
             "workspace_python_test": workspace_python_test,
             "workspace_node_test": workspace_node_test,
             "workspace_coding_exploration": workspace_coding_exploration,
+            "workspace_coding_change": workspace_coding_change,
             "exports": exports,
         }
         return TaskWorkbenchRead.model_validate(
@@ -2153,7 +2237,16 @@ class TaskWorkbenchService:
         turn_planning: TurnPlanningRead | None,
         task_loop: TaskLoop | None,
         task_loop_execution: TaskLoopExecutionRead | None,
+        workspace_coding_change: WorkspaceCodingChangeWorkbenchRead | None,
     ) -> WorkbenchStage:
+        if workspace_coding_change is not None:
+            if workspace_coding_change.phase == "proposal_ready":
+                return WorkbenchStage.NEEDS_USER_ACTION
+            if workspace_coding_change.phase == "proposal_blocked":
+                return WorkbenchStage.BLOCKED
+            if workspace_coding_change.phase == "confirmed_write_plan":
+                return WorkbenchStage.PLANNED
+            return WorkbenchStage.EXECUTING
         if task_loop_execution is not None:
             execution = task_loop_execution.execution
             if task_loop_execution.loop_status == "observed":
@@ -2325,6 +2418,7 @@ class TaskWorkbenchService:
         turn_planning: TurnPlanningRead | None,
         task_loop: TaskLoop | None,
         task_loop_execution: TaskLoopExecutionRead | None,
+        workspace_coding_change: WorkspaceCodingChangeWorkbenchRead | None,
     ) -> tuple[WorkbenchActionRead, ...]:
         run = executions.runs[-1] if executions.runs else None
         nodes = {item.local_key: item for item in run.nodes} if run else {}
@@ -2389,6 +2483,19 @@ class TaskWorkbenchService:
                 ),
                 "TASK_LOOP_NOT_RECOVERABLE",
             ),
+            WorkbenchAction.PROPOSE_WORKSPACE_CHANGE: (
+                bool(
+                    workspace_coding_change is not None
+                    and (
+                        workspace_coding_change.phase == "reader_succeeded"
+                        or (
+                            workspace_coding_change.phase == "proposal_turn_ready"
+                            and workspace_coding_change.invocation_id is None
+                        )
+                    )
+                ),
+                "VERIFIED_READER_RESULT_SET_NOT_READY",
+            ),
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: (
                 not uses_generic_task_loop and is_research and route is None and not has_plan,
                 "TASK_ALREADY_PLANNED_OR_NOT_RESEARCH",
@@ -2399,6 +2506,10 @@ class TaskWorkbenchService:
                     and run is None
                     and not uses_generic_task_loop
                     and not planner_only_single
+                    and not (
+                        workspace_coding_change is not None
+                        and workspace_coding_change.phase == "confirmed_write_plan"
+                    )
                     and (
                         route is None
                         or (
@@ -2662,6 +2773,9 @@ class TaskWorkbenchService:
             WorkbenchAction.ADVANCE_TASK_LOOP: (
                 "按持久 reducer 只推进一个已绑定节点，并在重启后从证明状态恢复。"
             ),
+            WorkbenchAction.PROPOSE_WORKSPACE_CHANGE: (
+                "运行一次本地无工具 Change Proposer；输出仅是待确认提案，不获得写权限。"
+            ),
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: "启用受信 research_to_html 计划。",
             WorkbenchAction.START_EXECUTION: "创建绑定当前计划的执行运行。",
             WorkbenchAction.RUN_RESEARCH: "运行受控搜索与页面读取。",
@@ -2688,6 +2802,7 @@ class TaskWorkbenchService:
             WorkbenchAction.INTERPRET_TURN: "read_only",
             WorkbenchAction.PLAN_TASK_LOOP: "read_only",
             WorkbenchAction.ADVANCE_TASK_LOOP: "execution_control",
+            WorkbenchAction.PROPOSE_WORKSPACE_CHANGE: "read_only",
             WorkbenchAction.ACTIVATE_RESEARCH_PLAN: "read_only",
             WorkbenchAction.START_EXECUTION: "read_only",
             WorkbenchAction.RUN_RESEARCH: "read_only",

@@ -36,6 +36,7 @@ from deskpilot.domain.task_plans import (
     TaskContractVersionRead,
 )
 from deskpilot.domain.turn_planning import TurnPlanningWorkbenchRead
+from deskpilot.domain.workspace_coding_changes import WorkspaceCodingChangeWorkbenchRead
 from deskpilot.domain.workspace_coding_explorations import (
     WorkspaceCodingExplorationWorkbenchRead,
 )
@@ -111,6 +112,7 @@ class WorkbenchAction(StrEnum):
     INTERPRET_TURN = "interpret_turn"
     PLAN_TASK_LOOP = "plan_task_loop"
     ADVANCE_TASK_LOOP = "advance_task_loop"
+    PROPOSE_WORKSPACE_CHANGE = "propose_workspace_change"
     ACTIVATE_RESEARCH_PLAN = "activate_research_plan"
     START_EXECUTION = "start_execution"
     RUN_RESEARCH = "run_research"
@@ -349,6 +351,7 @@ class TaskWorkbenchRead(BaseModel):
     workspace_python_test: WorkspacePythonTestRead | None = None
     workspace_node_test: WorkspaceNodeTestRead | None = None
     workspace_coding_exploration: WorkspaceCodingExplorationWorkbenchRead | None = None
+    workspace_coding_change: WorkspaceCodingChangeWorkbenchRead | None = None
     exports: tuple[ArtifactExportRead, ...]
     projection_digest: str = Field(pattern=DIGEST_PATTERN)
 
@@ -359,6 +362,8 @@ class TaskWorkbenchRead(BaseModel):
             excluded.add("workspace_git_commit")
         if "workspace_coding_exploration" not in self.model_fields_set:
             excluded.add("workspace_coding_exploration")
+        if "workspace_coding_change" not in self.model_fields_set:
+            excluded.add("workspace_coding_change")
         material = self.model_dump(mode="json", exclude=excluded)
         if self.projection_digest != sha256_digest(material):
             raise ValueError("Task Workbench projection digest does not match")

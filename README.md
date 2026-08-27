@@ -4,7 +4,7 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint 已完成；116A 固定命令链已闭合，116B 第九检查点已将确认后的 exact Reader Plan 接入现有持久 TaskLoop，可自动恢复且不重复已完成文件读取。** 下一纵切在 Reader verified join 后生成无写权限的变更提案，并通过新的用户确认编译后继写计划；阶段 115 已具备 Release、Calibration v3 和 Production Admission 代码底座，但真实 115B 仍缺 Candidate/Judge、代码出站、费用、真人评审和激活授权。依据 [ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)，这些外部事实继续阻塞 cloud 生产激活与 116C 真实模型质量结论，但不再阻塞 LOCAL-only 的受控编码工具面和持久多 Agent 长循环开发。所有 cloud-only 候选继续默认 disabled。详细进度见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint 已完成；116A 固定命令链已闭合，116B 第十检查点已把 verified Reader 证据转换为持久、无写权限的 Change Proposal，并在新的 exact 用户确认后原子编译第三个 Task 的后继写 Plan。** 该 Plan 当前刻意不自动激活；下一纵切把它接入现有 TaskLoop 并复用 Patch/Test/Repair/Git/Delivery。阶段 115 已具备 Release、Calibration v3 和 Production Admission 代码底座，但真实 115B 仍缺 Candidate/Judge、代码出站、费用、真人评审和激活授权。依据 [ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)，这些外部事实继续阻塞 cloud 生产激活与 116C 真实模型质量结论，但不再阻塞 LOCAL-only 的受控编码工具面和持久多 Agent 长循环开发。所有 cloud-only 候选继续默认 disabled。详细进度见[项目进度](项目进度.md)。
 
 产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物。通用规划、持久执行/验证/修复循环、首版安全代码工具面和三任务桌面后台已经闭合；当前最大缺口是真实仓库长循环和真实模型生产闭环。后续路线保持 **Codex 优先、Marvis 后置**：先完成 116A/116B 的用户可感知纵切，再补齐 115B/116C 的真实模型质量门，最后进入桌面 Operator。
 
@@ -207,6 +207,7 @@ flowchart LR
 140. [阶段 116B：持久多 Agent 编码循环第七检查点](doc/116B-持久多Agent编码循环第七检查点.md)
 141. [阶段 116B：持久多 Agent 编码循环第八检查点](doc/116B-持久多Agent编码循环第八检查点.md)
 142. [阶段 116B：持久多 Agent 编码循环第九检查点](doc/116B-持久多Agent编码循环第九检查点.md)
+143. [阶段 116B：持久多 Agent 编码循环第十检查点](doc/116B-持久多Agent编码循环第十检查点.md)
 
 ## 目标 MVP 与当前边界
 
@@ -265,7 +266,7 @@ flowchart LR
 - 当前 TaskProcessor 的磁盘容量任务通过离线 Fake Provider 获得结构化分类和计划，不调用网络模型；显式 `file.move` 请求使用受信任应用计划模板，路径只来自本地用户表单并强制进入 R1 一次性审批，不从自然语言或模型输出提取。
 - 统一对话入口已接入研究、本地知识、固定 MCP、Workspace 读写/检查/固定测试及 HTML/Markdown/PDF Artifact；阶段 111 已为确定性 Route 未命中接入受服务器 Offer 约束的 Turn Planner，阶段 112 已建立不重放 Provider 的通用 TaskLoop。阶段 113 新增项目根限定的递归搜索/批读、Git `status/diff/log` 和六个服务器 Command Profile，Python pytest/Ruff/mypy 与 Node/pnpm test/type-check/build 只在断网临时快照中执行，模型不能提供 executable、argv、cwd 或环境变量。
 - 阶段 116A 第二个检查点已将服务器编译的 `WorkspaceCommandPlan` 持久绑定到 exact Task/ModelPlanner Draft/Step/Offer/TaskLoop node：计划、映射和步骤证明内容寻址，Activation 与每次 command claim 都重验路径、Catalog、Profile 和 node proof。非 `passed` 结果保存失败回执并停止后续步骤，已知失败允许一次有界 Repair，重启不重放已通过或 outcome-unknown 命令。这已闭合固定命令链，但尚不是完整 116B 多 Agent 真实仓库长循环。
-- 阶段 116B 第一至第四检查点依次闭合了并行 Reader、持久 Patch Planner Handoff、受约束 Coordinator、同会话 amendment、两次 exact approval、服务器命名新分支、hook/signing/push-disabled commit、内容寻址回执与中间态重启对账。第五检查点将该链推广为 Python/Node 各 2～8 文件的服务器预编译图；第六检查点完成 Node 八文件全链和跨批恢复/失败终态；第七检查点新增受控项目快照、2～8 文件 Explorer Proposal、同会话 exact confirmation、原子 generation-1 只读 Reader Plan 及 Workbench 证明投影；第八检查点把 Explorer 接入标准持久 ExecutionRun/Invocation/ModelTurn，新增不可变 Run/Turn/Result 证明并禁止无证明 Proposal 与 outcome-unknown 自动重放；第九检查点将 confirmed Reader Plan 接入同一 TaskLoop FSM，恢复扫描可自动激活，重启不重复已完成文件读取。当前下一缺口是 Reader 证据驱动的无权变更提案、新用户确认和后继写计划。
+- 阶段 116B 第一至第四检查点依次闭合了并行 Reader、持久 Patch Planner Handoff、受约束 Coordinator、同会话 amendment、两次 exact approval、服务器命名新分支、hook/signing/push-disabled commit、内容寻址回执与中间态重启对账。第五检查点将该链推广为 Python/Node 各 2～8 文件的服务器预编译图；第六检查点完成 Node 八文件全链和跨批恢复/失败终态；第七至第九检查点闭合 snapshot→持久 Explorer→文件集确认→可恢复 Reader TaskLoop。第十检查点又将完整 Reader ResultRef 集绑定到零工具 Change Proposer Model Turn，并要求新的 exact 用户确认后才原子持久化第三个 Task 的 `workspace_coding_loop` 写 Plan。该 Plan 当前不自动启动，下一缺口是把确认绑定作为现有 TaskLoop 的受信来源激活。
 - `web.search`/`web.page.read` 在显式开关与 SearchProvider 配置下可用，默认仍关闭；Task Workspace、ArtifactRevision/PatchReceipt、同源 HTML/Markdown/PDF Builder、PDF 全页 render evidence 和 HTML BrowserRenderRun 已实现。未验证研究结果仍只能停在 `awaiting_verification`。
 
 受保护 checkpoint 只恢复能与任务事件、Tool 账本、Policy、审批记录和 effect graph 当前节点同时对上的阶段；密文损坏或任一绑定错配都会 fail closed。
@@ -276,7 +277,7 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-27 校准）
 
-阶段 77～114 与 115A 已完成。116A 的固定命令链已闭合；116B 第九检查点已经把用户确认后的 exact Reader Plan 接入现有持久 TaskLoop，恢复扫描可自动激活，重启不重复已完成文件读取，漂移在新 Attempt 前 fail closed。下一步使用 Reader verified ResultRef 生成无写权限的变更提案，经新的 exact 用户确认后才能编译后继写计划；探索确认不能直接获得 Patch 权限。自由 Shell、依赖安装与自动 push 继续禁止。阶段 115B 的真实 Provider/Judge、数据出站、费用、真人评审和激活授权仍缺失，候选继续默认 disabled，阶段 115 和整个 116B 都不能标记完成；115B 完成后再执行 116C 真实模型黄金任务与生产质量验收。完整边界见[项目进度](项目进度.md)、[第九检查点](doc/116B-持久多Agent编码循环第九检查点.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+阶段 77～114 与 115A 已完成。116A 的固定命令链已闭合；116B 第十检查点已经让成功 Reader 的完整 verified ResultRef 集驱动一次持久、无写权限的 Change Proposal Model Turn，并仅在新的 exact 用户确认后为第三个 Task 编译 generation-1 写 Plan。探索确认不会继承为 Patch 权限，后继 Plan 也不会在本检查点自动启动。下一步把该确认绑定接入现有 TaskLoop，复用既有 Patch/Test/一次 Repair/Git/Delivery 真值链。自由 Shell、依赖安装与自动 push 继续禁止。阶段 115B 的真实 Provider/Judge、数据出站、费用、真人评审和激活授权仍缺失，候选继续默认 disabled，阶段 115 和整个 116B 都不能标记完成；115B 完成后再执行 116C 真实模型黄金任务与生产质量验收。完整边界见[项目进度](项目进度.md)、[第十检查点](doc/116B-持久多Agent编码循环第十检查点.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
 
@@ -303,6 +304,8 @@ flowchart LR
 阶段 116B 第八个代码 checkpoint：默认后端实际收集 820 项，统一运行 `808 passed + 12 skipped`、失败/错误为 0；探索专项 4 项、migration 专项 48 项、相关 Agent/Workbench 回归、Ruff 全仓、严格 mypy 300 个生产源码、lock/pip、wheel Prompt 31/31、SQLite/Alembic `0062_workspace_coding_explorer_turns`、Evaluation Windows v2、Phase75 v20 及前端 24 文件 / 165 项门禁通过。本 checkpoint 将 Explorer 接入标准持久 ExecutionRun/Invocation/ModelTurn/AgentResult 主干，并以不可变 Run/Turn proof 拒绝无证明 Proposal、摘要篡改与 outcome-unknown 自动重放；尚未激活后继 Reader TaskLoop 或接通 Patch 再确认。当前无 Docker 且未配置 PostgreSQL/RabbitMQ 专用 URL，外部 cohort 保持安全 skip。
 
 阶段 116B 第九个代码 checkpoint：默认后端实际收集 821 项，统一运行 `809 passed + 12 skipped`、失败/错误为 0；探索专项 5 项、migration 专项 48 项、Ruff 全仓、严格 mypy 301 个生产源码、lock/pip、wheel Prompt 31/31、SQLite/Alembic `0063_confirmed_reader_task_loop`、Evaluation Windows v2、Phase75 v20 与前端 24 文件 / 165 项门禁通过。本 checkpoint 把用户确认的 generation-1 Reader Plan 作为第二种受信来源接入现有 TaskLoop/Attempt/Invocation/ResultRef 真值链，支持自动激活、重启续接、exact path/proof 重验与已读文件不重放；不伪造 ModelPlanner Offer/Draft，也不授予 Patch、Shell、依赖安装或 push 权限。PostgreSQL/RabbitMQ 外部 cohort 未配置时继续安全 skip，不宣称真库、真模型或生产质量。
+
+阶段 116B 第十个代码 checkpoint：默认后端实际收集 826 项，最终代码冻结后的单进程统一运行 `814 passed + 12 skipped`、失败/错误为 0；阶段专项 9/9、完整 migration 与 Task Workbench 回归、Ruff 全仓、严格 mypy 304 个生产源码、lock/pip、wheel Prompt 33/33、SQLite/Alembic `0064_workspace_coding_change_proposals`、Windows Evaluation v2、链式 Phase75 v21 及前端 24 文件 / 165 项门禁通过。本 checkpoint 把 verified Reader 证据推进为零工具、无写权限的持久 Change Proposal，并只在新的 exact 用户确认后持久化第三个 Task 的写 Plan；该 Plan 当前不自动启动。PostgreSQL/RabbitMQ 外部 cohort 未配置时继续安全 skip，不宣称真库、真消息队列、真模型或生产质量。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 

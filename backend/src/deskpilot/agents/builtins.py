@@ -44,6 +44,7 @@ from deskpilot.domain.model_contracts import (
 from deskpilot.domain.research import ResearchAgentDecision, ResearchLoopDecision
 from deskpilot.domain.tool_contracts import ToolRiskLevel
 from deskpilot.domain.turn_planning import TurnPlannerDecision, TurnPlannerInput
+from deskpilot.domain.workspace_coding_changes import WorkspaceCodingChangeDecision
 from deskpilot.domain.workspace_coding_explorations import (
     WorkspaceCodingExplorationDecision,
 )
@@ -86,6 +87,9 @@ def create_builtin_agent_registry(
     )
     workspace_coding_explorer_prompt = load_prompt_package(
         prompt_root, "workspace_coding_explorer.json"
+    )
+    workspace_change_proposer_prompt = load_prompt_package(
+        prompt_root, "workspace_change_proposer.json"
     )
     turn_planner_prompt = load_prompt_package(prompt_root, "turn_planner.json")
     cloud_turn_planner_prompt = load_prompt_package(
@@ -208,6 +212,42 @@ def create_builtin_agent_registry(
             input_model=AgentReferenceInput,
             output_model=WorkspaceCodingExplorationDecision,
             prompt_package=workspace_coding_explorer_prompt,
+        )
+    )
+    registry.register(
+        AgentRegistration(
+            contract=_contract(
+                agent_id="builtin.workspace_change_proposer",
+                version="1.0.0",
+                kind=AgentKind.WORKER,
+                display_name="Workspace Change Proposer",
+                description=(
+                    "只从完整 verified Reader ResultRef 集提出 2～8 个同路径精确替换；"
+                    "输出不授予 Patch、测试、Git、Shell 或审批权限。"
+                ),
+                provides=("workspace.coding.change.propose.v1",),
+                prompt=workspace_change_proposer_prompt,
+                tool_policy=AgentToolPolicy(max_risk_level=ToolRiskLevel.R0),
+                handoff=AgentHandoffPolicy(),
+                role=ModelRole.PLANNER,
+                budget=AgentBudgetPolicy(
+                    max_model_calls=1,
+                    max_tool_calls=0,
+                    max_input_tokens=64_000,
+                    max_output_tokens=8_000,
+                    max_wall_seconds=60,
+                    max_retries=0,
+                    max_cost_micros=200_000,
+                    max_handoffs=0,
+                ),
+                required_evidence=("verified_workspace_reader_result_set",),
+                output_model=WorkspaceCodingChangeDecision,
+                allowed_sources=("task_contract", "conversation_message", "tool_evidence"),
+                allowed_locations=(ModelLocation.LOCAL,),
+            ),
+            input_model=AgentReferenceInput,
+            output_model=WorkspaceCodingChangeDecision,
+            prompt_package=workspace_change_proposer_prompt,
         )
     )
     registry.register(

@@ -1993,6 +1993,146 @@ def workspace_coding_explorer_draft(
     )
 
 
+def workspace_coding_change_proposer_contract(
+    task_id: str,
+    *,
+    previous_contract_digest: str,
+    file_count: int,
+) -> TaskContract:
+    """Zero-tool generation-2 Contract over verified Reader ResultRefs."""
+
+    if not WORKSPACE_CODING_MIN_FILES <= file_count <= WORKSPACE_CODING_MAX_FILES:
+        raise ValueError("Workspace change proposer file count is outside 2..8")
+    suffix = task_id.removeprefix("tsk_")
+    return TaskContract(
+        contract_id=f"tc_{suffix}",
+        task_id=task_id,
+        version=2,
+        previous_contract_digest=previous_contract_digest,
+        goal_ref=f"artifact://task-input/{task_id}",
+        normalized_objective=(
+            f"只从 {file_count} 个已验证 Reader ResultRef 提出同路径精确替换；"
+            "提案不授予 Patch、测试、Git、Shell、网络或审批权限。"
+        ),
+        acceptance_criteria=(
+            AcceptanceCriterion(
+                criterion_id="ac_workspace_change_proposal",
+                kind=AcceptanceKind.OUTPUT_REQUIREMENT,
+                description=(
+                    f"变更提案必须逐一绑定 {file_count} 个 exact Reader ResultRef，"
+                    "且每个 old_text 在对应内容中恰好出现一次。"
+                ),
+                verification_requirement=VerificationRequirement.DETERMINISTIC,
+                origin="trusted_template",
+            ),
+        ),
+        constraints=(
+            "verified_reader_result_set_v1",
+            "same_file_set_exact_change_proposal_v1",
+            "proposal_has_no_execution_authority",
+            "fresh_change_confirmation_required_v1",
+            "file_set_confirmation_does_not_authorize_patch_v1",
+            "no_patch_authority",
+            "no_test_authority",
+            "no_git_authority",
+            "no_shell",
+            "no_network",
+            "no_dependency_install",
+            "no_automatic_push",
+        ),
+        privacy_policy=PrivacyPolicy(
+            classification="internal",
+            allowed_provider_locations=(ModelLocation.LOCAL,),
+            allowed_privacy_modes=("local_only", "local_preferred", "balanced"),
+            external_egress_allowed=False,
+        ),
+        max_risk_level=ToolRiskLevel.R0,
+        budget=TaskBudget(
+            max_model_calls=1,
+            max_tool_calls=0,
+            max_input_tokens=64_000,
+            max_output_tokens=8_000,
+            max_wall_seconds=90,
+            max_retries=0,
+            max_cost_micros=200_000,
+            max_handoffs=0,
+            max_plan_nodes=3,
+        ),
+        output_contract=OutputContract(
+            media_type="application/json",
+            language="zh-CN",
+        ),
+        capabilities=(),
+        created_by="trusted_template",
+    )
+
+
+def workspace_coding_change_proposer_draft(
+    task_id: str,
+    *,
+    contract_version: int = 2,
+) -> DraftPlan:
+    """Compile one persistent no-write Change Proposal Model Turn."""
+
+    zero = PlanNodeBudget(
+        model_calls=0,
+        tool_calls=0,
+        input_tokens=0,
+        output_tokens=0,
+        wall_seconds=15,
+        retries=0,
+        cost_micros=0,
+        handoffs=0,
+    )
+    return DraftPlan(
+        task_id=task_id,
+        contract_version=contract_version,
+        producer=PlanProducer(
+            kind="trusted_template",
+            producer_ref="workspace_coding_change_proposer.v1",
+        ),
+        nodes=(
+            DraftPlanNode(
+                local_key="propose_change_set",
+                kind=DraftNodeKind.AGENT,
+                objective=(
+                    "消费完整 verified Reader ResultRef 集，仅提出每个已确认文件的"
+                    "精确替换；不得增加路径或申请任何执行权限。"
+                ),
+                agent_selector="builtin.workspace_change_proposer",
+                acceptance_refs=("ac_workspace_change_proposal",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=PlanNodeBudget(
+                    model_calls=1,
+                    tool_calls=0,
+                    input_tokens=64_000,
+                    output_tokens=8_000,
+                    wall_seconds=60,
+                    retries=0,
+                    cost_micros=200_000,
+                    handoffs=0,
+                ),
+            ),
+            DraftPlanNode(
+                local_key="final_acceptance",
+                kind=DraftNodeKind.FINAL_ACCEPTANCE,
+                objective="确定性复核 Change decision 与 Reader ResultRef 集完全一致。",
+                depends_on=("propose_change_set",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+            DraftPlanNode(
+                local_key="delivery",
+                kind=DraftNodeKind.DELIVERY,
+                objective="只投影无写权限变更提案并等待新的精确用户确认。",
+                depends_on=("final_acceptance",),
+                verification_profile=VerificationProfile.DETERMINISTIC,
+                budget=zero,
+            ),
+        ),
+    )
+
+
 def workspace_coding_file_set_draft(
     task_id: str,
     *,

@@ -273,6 +273,7 @@ def test_builtin_registry_is_frozen_redacted_and_supervisor_is_not_an_agent() ->
         "builtin.turn_planner",
         "builtin.web_researcher",
         "builtin.workspace_bounded_coordinator",
+        "builtin.workspace_change_proposer",
         "builtin.workspace_coding_explorer",
         "builtin.workspace_coordinator",
         "builtin.workspace_patch_planner",
@@ -326,6 +327,10 @@ def test_builtin_registry_is_frozen_redacted_and_supervisor_is_not_an_agent() ->
     assert patch_planner.contract.provides == ("workspace.patch.propose.v1",)
     assert patch_planner.contract.tool_policy.grants == ()
     assert patch_planner.contract.model_policy.allowed_locations == (ModelLocation.LOCAL,)
+    change_proposer = registry.resolve_exact("builtin.workspace_change_proposer", "1.0.0")
+    assert change_proposer.contract.provides == ("workspace.coding.change.propose.v1",)
+    assert change_proposer.contract.tool_policy.grants == ()
+    assert change_proposer.contract.model_policy.allowed_locations == (ModelLocation.LOCAL,)
     legacy_bounded_coordinator = registry.resolve_exact(
         "builtin.workspace_bounded_coordinator",
         "1.0.0",

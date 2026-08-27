@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from deskpilot.application.builtin_capability_executors import (
     create_builtin_capability_executor_registry,
 )
 from deskpilot.application.capability_catalog import (
+    CapabilityCatalog,
     create_builtin_capability_catalog,
 )
 from deskpilot.application.model_gateway import ModelGateway
@@ -37,6 +39,12 @@ from deskpilot.application.task_loop_agent_runtime import TaskLoopAgentRuntime
 from deskpilot.application.task_loop_execution_coordinator import (
     TaskLoopExecutionCoordinator,
 )
+from deskpilot.application.task_workbench_service import TaskWorkbenchService
+from deskpilot.application.workspace_coding_change_runtime import (
+    WorkspaceCodingChangeConflictError,
+    WorkspaceCodingChangeProofRejectedError,
+    WorkspaceCodingChangeRuntime,
+)
 from deskpilot.application.workspace_coding_exploration_binder import (
     WorkspaceCodingExplorationBinder,
     WorkspaceCodingExplorationProofRejectedError,
@@ -49,8 +57,10 @@ from deskpilot.application.workspace_coding_explorer_runtime import (
 from deskpilot.application.workspace_coding_runtime import WorkspaceCodingRuntime
 from deskpilot.application.workspace_file_runtime import WorkspaceFileRuntime
 from deskpilot.core.canonical_json import sha256_digest
+from deskpilot.domain.agent_runtime import ExecutionRunPage
 from deskpilot.domain.model_contracts import ModelRequest, ModelResponse
 from deskpilot.domain.model_routing import ModelGatewayPolicy, ModelProviderPricing
+from deskpilot.domain.task_workbench import WorkbenchAction
 from deskpilot.domain.workspace_coding_explorations import (
     WorkspaceCodingExplorationCandidateFile,
     WorkspaceCodingExplorationDecision,
@@ -73,11 +83,15 @@ from deskpilot.infrastructure.models import (
     TaskPlanningStateRecord,
     TaskRecord,
     WorkspaceAgentResultRecord,
+    WorkspaceCodingChangeProposalRecord,
+    WorkspaceCodingChangeRunBindingRecord,
+    WorkspaceCodingChangeTurnProofRecord,
     WorkspaceCodingExplorationProposalRecord,
     WorkspaceCodingExplorationSnapshotRecord,
     WorkspaceCodingExplorerRunBindingRecord,
     WorkspaceCodingExplorerTurnProofRecord,
     WorkspaceCodingFileSetPlanBindingRecord,
+    WorkspaceCodingWritePlanBindingRecord,
 )
 from deskpilot.model_providers.fake import FakeModelProvider
 from deskpilot.tools import create_builtin_registry
@@ -201,6 +215,21 @@ class _CountingFailureProvider(FakeModelProvider):
         return await super().complete(request)
 
 
+class _ChangeOnlyFailureProvider(FakeModelProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.change_calls = 0
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        if (
+            request.output_schema is not None
+            and request.output_schema.name == "workspace_coding_change_decision"
+        ):
+            self.change_calls += 1
+            raise RuntimeError("unknown change proposer outcome")
+        return await super().complete(request)
+
+
 class _NoModelTaskLoops:
     async def get_bundle(self, _task_id: str) -> None:
         return None
@@ -255,6 +284,90 @@ def _confirmed_reader_coordinator(
     )
 
 
+async def _verified_reader_change_fixture(
+    tmp_path: Path,
+    *,
+    suffix: str,
+    provider: FakeModelProvider | None = None,
+) -> tuple[
+    Database,
+    WorkspaceCodingExplorationBinder,
+    PlanCompilationService,
+    WorkspaceCodingExplorerRuntime,
+    WorkspaceCodingChangeRuntime,
+    str,
+    str,
+]:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir(exist_ok=True)
+    _write_python_project(workspace_root)
+    database = Database(
+        f"sqlite+aiosqlite:///{(tmp_path / f'change-{suffix}.db').as_posix()}"
+    )
+    await database.migrate()
+    binder, planning, explorer = _new_binder(database, tmp_path, provider=provider)
+    conversation_id = f"cnv_{suffix * 32}"
+    source_task_id, source_message_id = await _seed_task(
+        database,
+        suffix=suffix,
+        conversation_id=conversation_id,
+        goal="从项目证据形成无写权限变更提案",
+        create_conversation=True,
+    )
+    snapshot = await binder.prepare(
+        task_id=source_task_id,
+        user_message_id=source_message_id,
+        project_path="project",
+        ecosystem="python",
+        test_path="tests/test_app.py",
+    )
+    file_proposal = await explorer.run(snapshot.snapshot_id)
+    reader_suffix = chr(ord(suffix) + 1)
+    reader_task_id, confirmation_id = await _seed_task(
+        database,
+        suffix=reader_suffix,
+        conversation_id=conversation_id,
+        goal=f"确认候选文件集：{file_proposal.proposal_id}",
+        create_conversation=False,
+    )
+    await binder.confirm(
+        file_proposal.proposal_id,
+        successor_task_id=reader_task_id,
+        confirmation_message_id=confirmation_id,
+    )
+    _activation, coordinator = _confirmed_reader_coordinator(
+        database,
+        binder,
+        planning,
+        explorer,
+        WorkspaceFileRuntime(str(workspace_root)),
+    )
+    for index in range(10):
+        advanced = await coordinator.advance(reader_task_id, f"fixture-reader-{index}")
+        if advanced.read.execution is not None and advanced.read.execution.status == "succeeded":
+            break
+    else:
+        pytest.fail("Fixture Reader TaskLoop did not succeed")
+    changes = WorkspaceCodingChangeRuntime(
+        database,
+        binder,
+        binder._agents,  # noqa: SLF001
+        binder._capabilities,  # noqa: SLF001
+        planning,
+        explorer._execution,  # noqa: SLF001
+        explorer._model_loop,  # noqa: SLF001
+    )
+    return (
+        database,
+        binder,
+        planning,
+        explorer,
+        changes,
+        conversation_id,
+        reader_task_id,
+    )
+
+
 async def _seed_task(
     database: Database,
     *,
@@ -262,6 +375,7 @@ async def _seed_task(
     conversation_id: str,
     goal: str,
     create_conversation: bool,
+    created_at: datetime = NOW,
 ) -> tuple[str, str]:
     task_id = f"tsk_{suffix * 32}"
     message_id = f"msg_{suffix * 32}"
@@ -273,7 +387,7 @@ async def _seed_task(
         "content": goal,
         "content_ref": None,
         "classification": "internal",
-        "created_at": NOW,
+        "created_at": created_at,
     }
     async with database.session() as session, session.begin():
         if create_conversation:
@@ -281,7 +395,7 @@ async def _seed_task(
                 ConversationRecord(
                     conversation_id=conversation_id,
                     title="Workspace exploration test",
-                    created_at=NOW,
+                    created_at=created_at,
                 )
             )
         session.add(
@@ -294,8 +408,8 @@ async def _seed_task(
                 privacy_mode="local_only",
                 constraints=[],
                 last_event_seq=0,
-                created_at=NOW,
-                updated_at=NOW,
+                created_at=created_at,
+                updated_at=created_at,
             )
         )
         await session.flush()
@@ -310,7 +424,7 @@ async def _seed_task(
                 classification="internal",
                 status="active",
                 message_digest=sha256_digest(material),
-                created_at=NOW,
+                created_at=created_at,
                 deleted_at=None,
             )
         )
@@ -957,5 +1071,378 @@ async def test_unverified_ingress_is_rejected_and_unknown_turn_is_not_replayed(
                 )
                 == 0
             )
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_verified_readers_produce_no_write_proposal_and_confirmed_successor_plan(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    _write_python_project(workspace_root)
+    database, binder, planning, explorer = await _services(tmp_path)
+    conversation_id = f"cnv_{'a' * 32}"
+    source_task_id, source_message_id = await _seed_task(
+        database,
+        suffix="a",
+        conversation_id=conversation_id,
+        goal="分析并形成有证据的多文件修改提案",
+        create_conversation=True,
+    )
+    workspace = _CountingWorkspaceFileRuntime(str(workspace_root))
+    try:
+        snapshot = await binder.prepare(
+            task_id=source_task_id,
+            user_message_id=source_message_id,
+            project_path="project",
+            ecosystem="python",
+            test_path="tests/test_app.py",
+        )
+        file_proposal = await explorer.run(snapshot.snapshot_id)
+        reader_task_id, file_confirmation_id = await _seed_task(
+            database,
+            suffix="b",
+            conversation_id=conversation_id,
+            goal=f"确认候选文件集：{file_proposal.proposal_id}",
+            create_conversation=False,
+        )
+        file_binding = await binder.confirm(
+            file_proposal.proposal_id,
+            successor_task_id=reader_task_id,
+            confirmation_message_id=file_confirmation_id,
+        )
+        activation, coordinator = _confirmed_reader_coordinator(
+            database,
+            binder,
+            planning,
+            explorer,
+            workspace,
+        )
+        for index in range(10):
+            advanced = await coordinator.advance(reader_task_id, f"reader-{index}")
+            if (
+                advanced.read.execution is not None
+                and advanced.read.execution.status == "succeeded"
+            ):
+                break
+        else:
+            pytest.fail("Reader TaskLoop did not succeed")
+
+        changes = WorkspaceCodingChangeRuntime(
+            database,
+            binder,
+            binder._agents,  # noqa: SLF001
+            binder._capabilities,  # noqa: SLF001
+            planning,
+            explorer._execution,  # noqa: SLF001
+            explorer._model_loop,  # noqa: SLF001
+        )
+        before = await changes.get_workbench(reader_task_id)
+        assert before is not None
+        assert before.phase == "reader_succeeded"
+        change_proposal = await changes.run(reader_task_id)
+        assert len(change_proposal.decision.changes) == 2
+        assert tuple(item.relative_path for item in change_proposal.decision.changes) == (
+            "src/a.py",
+            "src/b.py",
+        )
+        assert all(item.old_text != item.new_text for item in change_proposal.decision.changes)
+        assert (workspace_root / "project" / "src" / "a.py").read_text(
+            encoding="utf-8"
+        ) == "VALUE_A = 1\n"
+        state = await planning.get_state(reader_task_id)
+        assert state.active_contract_version == 2
+        assert state.active_plan_generation == 2
+        historical_reader = await activation.get(reader_task_id)
+        assert historical_reader is not None
+        assert historical_reader.execution is not None
+        assert historical_reader.execution.status == "succeeded"
+        proposal_workbench = await changes.get_workbench(reader_task_id)
+        assert proposal_workbench is not None
+        assert proposal_workbench.phase == "proposal_ready"
+        assert proposal_workbench.confirmation_text == (
+            f"确认变更提案：{change_proposal.proposal_id}"
+        )
+        assert proposal_workbench.requires_user_confirmation is True
+
+        restarted = WorkspaceCodingChangeRuntime(
+            database,
+            binder,
+            binder._agents,  # noqa: SLF001
+            binder._capabilities,  # noqa: SLF001
+            planning,
+            explorer._execution,  # noqa: SLF001
+            explorer._model_loop,  # noqa: SLF001
+        )
+        assert await restarted.run(reader_task_id) == change_proposal
+        write_task_id, write_confirmation_id = await _seed_task(
+            database,
+            suffix="c",
+            conversation_id=conversation_id,
+            goal=f"确认变更提案：{change_proposal.proposal_id}",
+            create_conversation=False,
+            created_at=change_proposal.created_at + timedelta(seconds=1),
+        )
+        write_binding = await restarted.confirm(
+            change_proposal.proposal_id,
+            successor_task_id=write_task_id,
+            confirmation_message_id=write_confirmation_id,
+        )
+        assert write_binding.expected_plan.plan_generation == 1
+        assert write_binding.parameters["project_path"] == "project"
+        assert write_binding.parameters["primary_path"] == "project/src/a.py"
+        assert write_binding.parameters["secondary_path"] == "project/src/b.py"
+        assert json.loads(write_binding.parameters["changes_json"]) == [
+            {
+                "path": "project/src/a.py",
+                "old_text": "VALUE_A = 1",
+                "new_text": "VALUE_A = 1 # DeskPilot proposed change",
+            },
+            {
+                "path": "project/src/b.py",
+                "old_text": "VALUE_B = 2",
+                "new_text": "VALUE_B = 2 # DeskPilot proposed change",
+            },
+        ]
+        assert await restarted.confirm(
+            change_proposal.proposal_id,
+            successor_task_id=write_task_id,
+            confirmation_message_id=write_confirmation_id,
+        ) == write_binding
+        competing_task_id, competing_confirmation_id = await _seed_task(
+            database,
+            suffix="d",
+            conversation_id=conversation_id,
+            goal=f"确认变更提案：{change_proposal.proposal_id}",
+            create_conversation=False,
+            created_at=change_proposal.created_at + timedelta(seconds=2),
+        )
+        with pytest.raises(
+            WorkspaceCodingChangeConflictError,
+            match="different successor Plan",
+        ):
+            await restarted.confirm(
+                change_proposal.proposal_id,
+                successor_task_id=competing_task_id,
+                confirmation_message_id=competing_confirmation_id,
+            )
+        successor_workbench = await restarted.get_workbench(write_task_id)
+        assert successor_workbench is not None
+        assert successor_workbench.phase == "confirmed_write_plan"
+        assert successor_workbench.requires_user_confirmation is False
+        successor_actions = TaskWorkbenchService._actions(  # noqa: SLF001
+            ExecutionRunPage(runs=()),
+            await planning.get_current_contract(write_task_id),
+            None,
+            None,
+            False,
+            None,
+            None,
+            None,
+            None,
+            successor_workbench,
+        )
+        start_execution = next(
+            item for item in successor_actions if item.action is WorkbenchAction.START_EXECUTION
+        )
+        assert start_execution.enabled is False
+        drifted_catalog_runtime = WorkspaceCodingChangeRuntime(
+            database,
+            binder,
+            binder._agents,  # noqa: SLF001
+            CapabilityCatalog(()),
+            planning,
+            explorer._execution,  # noqa: SLF001
+            explorer._model_loop,  # noqa: SLF001
+        )
+        with pytest.raises(
+            WorkspaceCodingChangeProofRejectedError,
+            match="current Catalog",
+        ):
+            await drifted_catalog_runtime.get_write_plan_binding(
+                successor_task_id=write_task_id
+            )
+        assert file_binding.expected_plan.plan_generation == 1
+        async with database.session() as session:
+            for record_type in (
+                WorkspaceCodingChangeRunBindingRecord,
+                WorkspaceCodingChangeProposalRecord,
+                WorkspaceCodingChangeTurnProofRecord,
+                WorkspaceCodingWritePlanBindingRecord,
+            ):
+                assert await session.scalar(select(func.count()).select_from(record_type)) == 1
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(TaskPlanGenerationRecord)
+                    .where(TaskPlanGenerationRecord.task_id == reader_task_id)
+                )
+                == 2
+            )
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(TaskExecutionRunRecord)
+                    .where(TaskExecutionRunRecord.task_id == write_task_id)
+                )
+                == 0
+            )
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_change_confirmation_is_fresh_and_failure_rolls_back_successor_plan(
+    tmp_path: Path,
+) -> None:
+    (
+        database,
+        _binder,
+        _planning,
+        _explorer,
+        changes,
+        conversation_id,
+        reader_task_id,
+    ) = await _verified_reader_change_fixture(tmp_path, suffix="d")
+    try:
+        proposal = await changes.run(reader_task_id)
+        successor_task_id, wrong_message_id = await _seed_task(
+            database,
+            suffix="f",
+            conversation_id=conversation_id,
+            goal=f"确认变更提案：{proposal.proposal_id}",
+            create_conversation=False,
+        )
+        with pytest.raises(
+            WorkspaceCodingChangeProofRejectedError,
+            match="fresh exact same-conversation",
+        ):
+            await changes.confirm(
+                proposal.proposal_id,
+                successor_task_id=successor_task_id,
+                confirmation_message_id=wrong_message_id,
+            )
+        async with database.session() as session:
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(TaskPlanGenerationRecord)
+                    .where(TaskPlanGenerationRecord.task_id == successor_task_id)
+                )
+                == 0
+            )
+            assert (
+                await session.scalar(
+                    select(func.count()).select_from(WorkspaceCodingWritePlanBindingRecord)
+                )
+                == 0
+            )
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_change_proposer_unknown_outcome_is_not_replayed_after_restart(
+    tmp_path: Path,
+) -> None:
+    provider = _ChangeOnlyFailureProvider()
+    (
+        database,
+        binder,
+        planning,
+        explorer,
+        changes,
+        _conversation_id,
+        reader_task_id,
+    ) = await _verified_reader_change_fixture(
+        tmp_path,
+        suffix="1",
+        provider=provider,
+    )
+    try:
+        with pytest.raises(AgentModelLoopOutcomeUnknownError):
+            await changes.run(reader_task_id)
+        assert provider.change_calls == 1
+        restarted = WorkspaceCodingChangeRuntime(
+            database,
+            binder,
+            binder._agents,  # noqa: SLF001
+            binder._capabilities,  # noqa: SLF001
+            planning,
+            explorer._execution,  # noqa: SLF001
+            explorer._model_loop,  # noqa: SLF001
+        )
+        with pytest.raises(
+            WorkspaceCodingChangeConflictError,
+            match="never automatically replayed",
+        ):
+            await restarted.run(reader_task_id)
+        assert provider.change_calls == 1
+        workbench = await restarted.get_workbench(reader_task_id)
+        assert workbench is not None
+        assert workbench.phase == "proposal_blocked"
+        assert workbench.turn_status == "outcome_unknown"
+        assert reader_task_id not in await restarted.recoverable_task_ids()
+        async with database.session() as session:
+            assert (
+                await session.scalar(
+                    select(func.count()).select_from(WorkspaceCodingChangeProposalRecord)
+                )
+                == 0
+            )
+            assert (
+                await session.scalar(
+                    select(func.count()).select_from(WorkspaceCodingChangeTurnProofRecord)
+                )
+                == 0
+            )
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_change_proposal_rejects_reader_drift_and_turn_proof_tamper(
+    tmp_path: Path,
+) -> None:
+    (
+        database,
+        _binder,
+        _planning,
+        _explorer,
+        changes,
+        _conversation_id,
+        reader_task_id,
+    ) = await _verified_reader_change_fixture(tmp_path, suffix="3")
+    target = tmp_path / "workspace" / "project" / "src" / "a.py"
+    try:
+        original = target.read_text(encoding="utf-8")
+        original_stat = target.stat()
+        target.write_text("VALUE_A = 99\n", encoding="utf-8")
+        with pytest.raises(
+            WorkspaceCodingChangeProofRejectedError,
+            match="Confirmed Reader source proof",
+        ):
+            await changes.run(reader_task_id)
+        target.write_text(original, encoding="utf-8")
+        os.utime(
+            target,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+        proposal = await changes.run(reader_task_id)
+        async with database.session() as session, session.begin():
+            await session.execute(
+                update(WorkspaceCodingChangeTurnProofRecord)
+                .where(
+                    WorkspaceCodingChangeTurnProofRecord.proposal_id == proposal.proposal_id
+                )
+                .values(model_request_digest="f" * 64)
+            )
+        with pytest.raises(
+            WorkspaceCodingChangeProofRejectedError,
+            match="columns diverged",
+        ):
+            await changes.get_proposal(proposal_id=proposal.proposal_id)
     finally:
         await database.dispose()

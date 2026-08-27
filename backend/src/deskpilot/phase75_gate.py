@@ -15,7 +15,7 @@ from deskpilot.application.phase75_evaluation import (
 )
 
 DEFAULT_BASELINE = Path(
-    "tests/baselines/evaluations/multi-agent-core-v20.baseline.json"
+    "tests/baselines/evaluations/multi-agent-core-v21.baseline.json"
 )
 
 

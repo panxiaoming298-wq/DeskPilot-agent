@@ -337,7 +337,7 @@ GET /api/v1/agents/{agent_id}/versions/{version}
 
 阶段 112 最终验证：后端 745 项，`733 passed + 12 skipped`；Ruff 全仓、严格 mypy 275 个生产源码、frozen `uv` 与 `pip check` 通过。Phase75 v16 仍为 11/11、false-success=0、unauthorized-effect=0，17 份 baseline SHA-256 前后不变；wheel Prompt 24/24。前端 22 文件 / 157 项、type-check/build 通过；Alembic 唯一 head `0054_task_loop_cycle_events`，SQLite current/upgrade/check、integrity/foreign-key 通过。专用测试库 PostgreSQL 11/11（含容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复。
 
-当前实现方向为阶段 116B Codex 类持久多 Agent 编码纵切。116A 已闭合服务器固定 `WorkspaceCommandPlan`。116B 第六检查点已在 Python/Node 各 2～8 文件预编译图上完成 Node 八文件完整执行和逐 batch 重启恢复；第七检查点进一步持久化受控项目 snapshot、无权限 Explorer candidate、同会话 exact confirmation、新 generation-1 只读 Reader Plan 与 Workbench proof。下一步让 Explorer 通过标准 Invocation/Model Turn 真实运行，并把 exact Reader bindings 激活到现有 TaskLoop；全部 Reader verified join 后仍需新的 Patch 确认。自由 Shell、依赖安装和自动 push 继续禁止，真实 cloud 115B/116C 仍受外部授权阻塞。详见根目录 [`项目进度.md`](../项目进度.md)、[`doc/116B-持久多Agent编码循环第七检查点.md`](../doc/116B-持久多Agent编码循环第七检查点.md)与 [`doc/111-117-通用多Agent与Codex纵切实施路线.md`](../doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+当前实现方向为阶段 116B Codex 类持久多 Agent 编码纵切。116A 已闭合服务器固定 `WorkspaceCommandPlan`。116B 现已走通 Python/Node 各 2～8 文件预编译图、Node 八文件逐 batch 恢复，以及受控 snapshot→持久 Explorer→文件集确认→Reader TaskLoop→零工具 Change Proposal→新确认→第三 Task 写 Plan。第十检查点只持久化后继 `workspace_coding_loop` Plan，并明确禁用 Workbench 自动启动；下一步将 `WorkspaceCodingWritePlanBinding` 作为现有 TaskLoop 的受信来源激活，复用 Patch/Test/一次 Repair/Git/Delivery。自由 Shell、依赖安装和自动 push 继续禁止，真实 cloud 115B/116C 仍受外部授权阻塞。详见根目录 [`项目进度.md`](../项目进度.md)、[`doc/116B-持久多Agent编码循环第十检查点.md`](../doc/116B-持久多Agent编码循环第十检查点.md)与 [`doc/111-117-通用多Agent与Codex纵切实施路线.md`](../doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 ## 测试
 

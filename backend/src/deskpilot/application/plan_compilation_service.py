@@ -192,6 +192,90 @@ class PlanCompilationService:
                 "Planning generation changed concurrently"
             ) from error
 
+    async def activate_in_session(
+        self,
+        session: AsyncSession,
+        contract: TaskContract,
+        draft: DraftPlan,
+    ) -> ExecutablePlanRead:
+        """Advance a planning generation inside a caller-owned atomic transaction."""
+
+        task = await session.scalar(
+            select(TaskRecord)
+            .where(TaskRecord.task_id == contract.task_id)
+            .with_for_update()
+        )
+        if task is None:
+            raise PlanningNotFoundError("Task does not exist")
+        state = await session.scalar(
+            select(TaskPlanningStateRecord)
+            .where(TaskPlanningStateRecord.task_id == contract.task_id)
+            .with_for_update()
+        )
+        generation, insert_contract = await self._next_generation(
+            session,
+            contract,
+            state,
+        )
+        plan = self._compiler.compile(contract, draft, generation=generation)
+        if insert_contract:
+            session.add(
+                TaskContractVersionRecord(
+                    task_id=contract.task_id,
+                    version=contract.version,
+                    contract_id=contract.contract_id,
+                    previous_contract_digest=contract.previous_contract_digest,
+                    manifest=contract.model_dump(mode="json"),
+                    contract_digest=contract.digest,
+                    created_at=utc_now(),
+                )
+            )
+        if state is not None:
+            previous = await session.get(
+                TaskPlanGenerationRecord,
+                (contract.task_id, state.active_plan_generation),
+            )
+            if previous is None or previous.status != "active":
+                raise PlanningProofRejectedError(
+                    "Active plan pointer has no matching generation"
+                )
+            self._plan_from_record(previous)
+            previous.status = "superseded"
+        now = utc_now()
+        session.add(
+            TaskPlanGenerationRecord(
+                task_id=contract.task_id,
+                generation=generation,
+                plan_id=plan.plan_id,
+                contract_version=contract.version,
+                contract_digest=contract.digest,
+                status="active",
+                manifest=plan.model_dump(mode="json"),
+                plan_manifest_digest=plan.plan_manifest_digest,
+                created_at=now,
+            )
+        )
+        if state is None:
+            state = TaskPlanningStateRecord(
+                task_id=contract.task_id,
+                active_contract_version=contract.version,
+                active_contract_digest=contract.digest,
+                active_plan_generation=generation,
+                active_plan_digest=plan.plan_manifest_digest,
+                revision=1,
+                updated_at=now,
+            )
+            session.add(state)
+        else:
+            state.active_contract_version = contract.version
+            state.active_contract_digest = contract.digest
+            state.active_plan_generation = generation
+            state.active_plan_digest = plan.plan_manifest_digest
+            state.revision += 1
+            state.updated_at = now
+        await session.flush()
+        return ExecutablePlanRead(plan=plan, status="active")
+
     async def activate_initial_once(
         self,
         contract: TaskContract,
