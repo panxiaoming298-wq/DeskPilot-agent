@@ -734,8 +734,7 @@ class WorkspaceCodingExplorationWorkbenchRead(BaseModel):
         elif self.phase == "explorer_ready":
             if (
                 any(value is None for value in run_values)
-                or any(value is None for value in execution_values)
-                != all(value is None for value in execution_values)
+                or any(value is not None for value in execution_values)
                 or self.explorer_turn_proof_digest is not None
                 or any(value is not None for value in (*proposal_values, *binding_values))
             ):
@@ -744,12 +743,14 @@ class WorkspaceCodingExplorationWorkbenchRead(BaseModel):
                 raise ValueError("Explorer-ready projection has no candidate confirmation")
         elif self.phase == "explorer_blocked":
             if (
-                any(value is None for value in (*run_values, *execution_values))
+                any(value is None for value in run_values)
+                or self.explorer_invocation_id is None
+                or (self.explorer_turn_id is None) != (self.explorer_turn_status is None)
                 or self.explorer_turn_proof_digest is not None
                 or any(value is not None for value in (*proposal_values, *binding_values))
-                or self.explorer_turn_status not in {"failed", "outcome_unknown"}
+                or self.explorer_turn_status == "succeeded"
             ):
-                raise ValueError("Blocked Explorer projection lost its terminal Turn evidence")
+                raise ValueError("Blocked Explorer projection lost its non-replay evidence")
             if self.candidates or self.requires_user_confirmation:
                 raise ValueError("Blocked Explorer projection has no candidate confirmation")
         elif self.phase == "proposal_ready":

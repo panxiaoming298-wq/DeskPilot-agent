@@ -583,6 +583,7 @@ def create_app(
             command_profile_ids=workspace_command_runtime.enabled_profile_ids,
             workspace_coding_explorations=workspace_coding_explorations,
             workspace_coding_changes=workspace_coding_change_runtime,
+            workspace_coding_explorer=workspace_coding_explorer_runtime,
         )
         workbench_runtime = (
             WorkbenchRuntimeCoordinator(

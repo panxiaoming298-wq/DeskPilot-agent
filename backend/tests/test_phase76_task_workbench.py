@@ -1,4 +1,6 @@
 import asyncio
+import shutil
+import subprocess
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -4466,6 +4468,258 @@ def test_conversation_turn_auto_advances_and_keeps_follow_up_history(
     assert follow_up["task"]["conversation_id"] == conversation_id
     assert len(follow_up["conversation"]) == 9
     assert follow_up["conversation"][-2]["content"] == "再研究一个不同主题，保留同一会话"
+
+
+@pytest.mark.parametrize(
+    ("ecosystem", "source_suffix", "test_path"),
+    (
+        ("python", ".py", "tests/test_sample.py"),
+        ("node", ".ts", "tests/sample.test.js"),
+    ),
+)
+def test_workspace_coding_conversation_binds_explorer_and_exact_file_set_confirmation(
+    workbench_client: TestClient,
+    tmp_path: Path,
+    ecosystem: str,
+    source_suffix: str,
+    test_path: str,
+) -> None:
+    project_name = f"conversation-{ecosystem}-project"
+    project = tmp_path / "conversation-workspace" / project_name
+    (project / "src").mkdir(parents=True)
+    (project / "tests").mkdir()
+    (project / "src" / f"a{source_suffix}").write_text(
+        "VALUE_A = 1\n" if ecosystem == "python" else "export const valueA = 1\n",
+        encoding="utf-8",
+    )
+    (project / "src" / f"b{source_suffix}").write_text(
+        "VALUE_B = 2\n" if ecosystem == "python" else "export const valueB = 2\n",
+        encoding="utf-8",
+    )
+    (project / test_path).write_text(
+        "def test_app():\n    assert True\n"
+        if ecosystem == "python"
+        else "import { test } from 'node:test'\ntest('app', () => {})\n",
+        encoding="utf-8",
+    )
+    if ecosystem == "python":
+        git_executable = shutil.which("git")
+        if git_executable is None:
+            pytest.skip("Git is unavailable")
+        for arguments in (
+            ("init",),
+            ("config", "user.email", "deskpilot-test@example.invalid"),
+            ("config", "user.name", "DeskPilot Test"),
+            ("config", "core.autocrlf", "false"),
+            ("add", "--", "."),
+            ("commit", "-m", "initial"),
+        ):
+            subprocess.run(  # noqa: S603 - fixed test-only Git arguments.
+                (git_executable, *arguments),
+                cwd=project,
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+
+    created = workbench_client.post(
+        "/api/v1/conversation-turns",
+        json={
+            "message": "检查实现并提出一个有测试保护的最小修改",
+            "workspace_coding": {
+                "project_path": project_name,
+                "ecosystem": ecosystem,
+                "test_path": test_path,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    source = created.json()
+    source_task_id = source["task"]["task_id"]
+    assert source["route"] is None
+    assert source["stage"] == "executing"
+    assert source["workspace_coding_exploration"]["phase"] == "snapshot_ready"
+    assert _enabled(source, "explore_workspace")
+
+    explored = workbench_client.post(
+        f"/api/v1/tasks/{source_task_id}/workbench:advance"
+    )
+    assert explored.status_code == 200, explored.text
+    proposal = explored.json()
+    exploration = proposal["workspace_coding_exploration"]
+    assert proposal["stage"] == "needs_user_action"
+    assert exploration["phase"] == "proposal_ready"
+    assert len(exploration["candidates"]) == 2
+    assert exploration["requires_user_confirmation"] is True
+
+    mismatched = workbench_client.post(
+        f"/api/v1/tasks/{source_task_id}/conversation-turns",
+        json={"message": f'{exploration["confirmation_text"]}-tampered'},
+    )
+    assert mismatched.status_code == 409
+    assert (
+        workbench_client.get(f"/api/v1/tasks/{source_task_id}/workbench")
+        .json()["workspace_coding_exploration"]["phase"]
+        == "proposal_ready"
+    )
+
+    confirmed = workbench_client.post(
+        f"/api/v1/tasks/{source_task_id}/conversation-turns",
+        json={"message": exploration["confirmation_text"]},
+    )
+    assert confirmed.status_code == 201, confirmed.text
+    reader = confirmed.json()
+    assert reader["task"]["task_id"] != source_task_id
+    assert reader["task"]["conversation_id"] == source["task"]["conversation_id"]
+    assert reader["workspace_coding_exploration"]["phase"] == (
+        "confirmed_read_only_plan"
+    )
+    assert reader["task_loop"]["execution_status"] is None
+    assert reader["task_loop"]["node_count"] == 4
+    assert reader["task_loop"]["ready_count"] == 2
+    assert _enabled(reader, "advance_task_loop")
+
+    reader_task_id = reader["task"]["task_id"]
+    change_workbench = reader
+    for _ in range(8):
+        change = change_workbench["workspace_coding_change"]
+        if change is not None and change["phase"] == "proposal_ready":
+            break
+        advanced = workbench_client.post(
+            f"/api/v1/tasks/{reader_task_id}/workbench:advance"
+        )
+        assert advanced.status_code == 200, advanced.text
+        change_workbench = advanced.json()
+    else:
+        pytest.fail("confirmed Reader TaskLoop did not produce a Change Proposal")
+
+    change = change_workbench["workspace_coding_change"]
+    assert change["requires_user_confirmation"] is True
+    assert len(change["changes"]) == 2
+    mismatched_change = workbench_client.post(
+        f"/api/v1/tasks/{reader_task_id}/conversation-turns",
+        json={"message": f'{change["confirmation_text"]}-tampered'},
+    )
+    assert mismatched_change.status_code == 409
+    write_confirmed = workbench_client.post(
+        f"/api/v1/tasks/{reader_task_id}/conversation-turns",
+        json={"message": change["confirmation_text"]},
+    )
+    assert write_confirmed.status_code == 201, write_confirmed.text
+    write_task = write_confirmed.json()
+    assert write_task["task"]["task_id"] not in {source_task_id, reader_task_id}
+    assert write_task["task"]["conversation_id"] == source["task"]["conversation_id"]
+    assert write_task["workspace_coding_change"]["phase"] == "confirmed_write_plan"
+    assert write_task["task_loop"]["execution_status"] is None
+    assert _enabled(write_task, "advance_task_loop")
+
+    if ecosystem == "python":
+        write_task_id = write_task["task"]["task_id"]
+        delivered = write_task
+        patch_approved = False
+        git_approved = False
+        for _ in range(30):
+            if delivered["stage"] == "delivered":
+                break
+            if _enabled(delivered, "commit_workspace_patch") and not patch_approved:
+                response = workbench_client.post(
+                    f"/api/v1/tasks/{write_task_id}/workspace-patch:commit",
+                    json={
+                        "confirmation_digest": delivered["workspace_patch"][
+                            "confirmation_digest"
+                        ]
+                    },
+                )
+                patch_approved = True
+            elif _enabled(delivered, "commit_workspace_git") and not git_approved:
+                response = workbench_client.post(
+                    f"/api/v1/tasks/{write_task_id}/workspace-git:commit",
+                    json={
+                        "confirmation_digest": delivered["workspace_git_commit"][
+                            "confirmation_digest"
+                        ]
+                    },
+                )
+                git_approved = True
+            else:
+                response = workbench_client.post(
+                    f"/api/v1/tasks/{write_task_id}/workbench:advance"
+                )
+            assert response.status_code == 200, response.text
+            delivered = response.json()
+        else:
+            enabled_actions = [
+                item["action"] for item in delivered["actions"] if item["enabled"]
+            ]
+            node_states = [
+                (item["local_key"], item["status"])
+                for item in delivered["task_loop"]["nodes"]
+            ]
+            pytest.fail(
+                "confirmed write TaskLoop did not deliver through the Workbench API: "
+                f"stage={delivered['stage']}, actions={enabled_actions}, nodes={node_states}"
+            )
+        assert delivered["task_loop"]["execution_status"] == "succeeded"
+        coding_delivery = delivered["task_loop"]["coding_delivery"]
+        assert coding_delivery["changed_files"] == [
+            f"{project_name}/src/a.py",
+            f"{project_name}/src/b.py",
+        ]
+        assert coding_delivery["git_commit"]["push_disabled"] is True
+        assert (project / "src" / "a.py").read_text(encoding="utf-8") == (
+            "VALUE_A = 1 # DeskPilot proposed change\n"
+        )
+
+
+def test_workspace_coding_snapshot_is_recovered_without_browser_schedule(
+    workbench_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "conversation-workspace" / "recoverable-coding-project"
+    (project / "src").mkdir(parents=True)
+    (project / "tests").mkdir()
+    (project / "src" / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (project / "src" / "b.py").write_text("B = 2\n", encoding="utf-8")
+    (project / "tests" / "test_app.py").write_text(
+        "def test_app():\n    assert True\n",
+        encoding="utf-8",
+    )
+    created = workbench_client.post(
+        "/api/v1/conversation-turns",
+        json={
+            "message": "恢复后继续只读探索",
+            "workspace_coding": {
+                "project_path": "recoverable-coding-project",
+                "ecosystem": "python",
+                "test_path": "tests/test_app.py",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    task_id = created.json()["task"]["task_id"]
+    coordinator = WorkbenchRuntimeCoordinator(
+        workbench_client.app.state.database,
+        workbench_client.app.state.task_workbench_service,
+        instance_id="workspace-coding-recovery-test",
+        poll_interval_seconds=0.01,
+        claim_ttl_seconds=5,
+        concurrency=1,
+        max_failures=3,
+        retry_base_seconds=0,
+        retry_max_seconds=0,
+    )
+
+    assert asyncio.run(coordinator.recover_runnable_tasks()) == 1
+    result = asyncio.run(coordinator.advance_pending())
+    assert (result.claimed, result.advanced, result.applied) == (1, 1, 1)
+    recovered = workbench_client.get(f"/api/v1/tasks/{task_id}/workbench")
+    assert recovered.status_code == 200, recovered.text
+    body = recovered.json()
+    assert body["stage"] == "needs_user_action"
+    assert body["workspace_coding_exploration"]["phase"] == "proposal_ready"
+    assert not _enabled(body, "explore_workspace")
 
 
 def test_server_runtime_completes_research_without_client_advance(

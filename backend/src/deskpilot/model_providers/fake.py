@@ -481,6 +481,7 @@ class FakeModelProvider:
                 )
             observation_digest = request.metadata.get("observation_digest")
             source_text = request.metadata.get("workspace_patch_source_text")
+            expected_change = request.metadata.get("workspace_patch_expected_change")
             if (
                 phase != "propose_patch"
                 or not isinstance(patch_binding_id, str)
@@ -489,10 +490,31 @@ class FakeModelProvider:
                 or not isinstance(source_text, str)
             ):
                 raise ValueError("Fake patch planner fixture requires a bound observation")
-            old_text = next((line for line in source_text.splitlines() if line), "")
-            if not old_text or len(old_text) > 4_096:
-                raise ValueError("Fake patch planner fixture requires one bounded non-empty line")
-            suffix = "  # DeskPilot proposal" if path.endswith(".py") else "  // DeskPilot proposal"
+            if expected_change is not None:
+                if (
+                    not isinstance(expected_change, dict)
+                    or expected_change.get("path") != path
+                    or not isinstance(expected_change.get("old_text"), str)
+                    or not isinstance(expected_change.get("new_text"), str)
+                    or source_text.count(cast(str, expected_change["old_text"])) != 1
+                ):
+                    raise ValueError(
+                        "Fake patch planner fixture requires one exact confirmed change"
+                    )
+                old_text = cast(str, expected_change["old_text"])
+                new_text = cast(str, expected_change["new_text"])
+            else:
+                old_text = next((line for line in source_text.splitlines() if line), "")
+                if not old_text or len(old_text) > 4_096:
+                    raise ValueError(
+                        "Fake patch planner fixture requires one bounded non-empty line"
+                    )
+                suffix = (
+                    "  # DeskPilot proposal"
+                    if path.endswith(".py")
+                    else "  // DeskPilot proposal"
+                )
+                new_text = f"{old_text}{suffix}"
             return cast(
                 dict[str, JsonValue],
                 WorkspacePatchLoopDecision(
@@ -503,7 +525,7 @@ class FakeModelProvider:
                             WorkspacePatchChangeProposal(
                                 path=path,
                                 old_text=old_text,
-                                new_text=f"{old_text}{suffix}",
+                                new_text=new_text,
                                 rationale="生成一个等待用户确认的单点、精确替换候选补丁。",
                             ),
                         ),

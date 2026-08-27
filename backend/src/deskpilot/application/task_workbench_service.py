@@ -9,6 +9,7 @@ from deskpilot.application.agent_execution_runtime import (
     AgentExecutionRuntime,
     AgentRuntimeError,
 )
+from deskpilot.application.agent_model_loop import AgentModelLoopOutcomeUnknownError
 from deskpilot.application.agent_supervisor_runtime import AgentSupervisorError
 from deskpilot.application.artifact_delivery_runtime import (
     ArtifactDeliveryError,
@@ -101,11 +102,17 @@ from deskpilot.application.workspace_coding_exploration_binder import (
     WorkspaceCodingExplorationBinder,
     WorkspaceCodingExplorationBindingError,
 )
+from deskpilot.application.workspace_coding_explorer_runtime import (
+    WorkspaceCodingExplorerRuntime,
+    WorkspaceCodingExplorerRuntimeError,
+)
 from deskpilot.application.workspace_coding_graph import (
     WORKSPACE_CODING_MAX_FILES,
     WORKSPACE_CODING_MIN_FILES,
     workspace_coding_variant_key,
 )
+from deskpilot.application.workspace_coding_runtime import WorkspaceCodingError
+from deskpilot.application.workspace_file_runtime import WorkspaceFileError
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_replanning import (
     BOUNDED_PATCH_REPAIR_LOOP_CONSTRAINT,
@@ -163,6 +170,9 @@ from deskpilot.domain.task_workbench import (
 )
 from deskpilot.domain.turn_planning import TurnPlanningRead, TurnPlanningWorkbenchRead
 from deskpilot.domain.workspace_coding_changes import WorkspaceCodingChangeWorkbenchRead
+from deskpilot.domain.workspace_coding_explorations import (
+    WorkspaceCodingExplorationWorkbenchRead,
+)
 from deskpilot.domain.workspace_files import (
     WorkspaceDirectoryRead,
     WorkspaceEditReceipt,
@@ -224,6 +234,7 @@ class TaskWorkbenchService:
         command_profile_ids: frozenset[CommandProfileId] = frozenset(),
         workspace_coding_explorations: WorkspaceCodingExplorationBinder | None = None,
         workspace_coding_changes: WorkspaceCodingChangeRuntime | None = None,
+        workspace_coding_explorer: WorkspaceCodingExplorerRuntime | None = None,
     ) -> None:
         self._database = database
         self._tasks = tasks
@@ -244,6 +255,7 @@ class TaskWorkbenchService:
         self._command_profile_ids = command_profile_ids
         self._workspace_coding_explorations = workspace_coding_explorations
         self._workspace_coding_changes = workspace_coding_changes
+        self._workspace_coding_explorer = workspace_coding_explorer
         self._auto_advance: WorkbenchAutoAdvancePort | None = None
 
     def bind_auto_advance(self, auto_advance: WorkbenchAutoAdvancePort) -> None:
@@ -280,7 +292,12 @@ class TaskWorkbenchService:
             if self._workspace_coding_changes is not None
             else ()
         )
-        return tuple(dict.fromkeys((*planned, *deferred, *changes)))[:limit]
+        explorations = (
+            await self._workspace_coding_explorations.recoverable_task_ids(limit=limit)
+            if self._workspace_coding_explorations is not None
+            else ()
+        )
+        return tuple(dict.fromkeys((*planned, *deferred, *changes, *explorations)))[:limit]
 
     @staticmethod
     def automatic_action(workbench: TaskWorkbenchRead) -> WorkbenchAction | None:
@@ -288,6 +305,7 @@ class TaskWorkbenchService:
 
         allowed = {
             WorkbenchAction.INTERPRET_TURN,
+            WorkbenchAction.EXPLORE_WORKSPACE,
             WorkbenchAction.PLAN_TASK_LOOP,
             WorkbenchAction.ADVANCE_TASK_LOOP,
             WorkbenchAction.PROPOSE_WORKSPACE_CHANGE,
@@ -330,6 +348,8 @@ class TaskWorkbenchService:
         )
 
     async def create_turn(self, command: CreateConversationTurn) -> TaskWorkbenchRead:
+        if command.workspace_coding is not None:
+            return await self._create_workspace_coding_turn(command)
         return await self._schedule_automatic(
             await self._create_turn_task(
                 goal=command.message,
@@ -337,6 +357,60 @@ class TaskWorkbenchService:
                 constraints=command.constraints,
             )
         )
+
+    async def _create_workspace_coding_turn(
+        self,
+        command: CreateConversationTurn,
+    ) -> TaskWorkbenchRead:
+        scope = command.workspace_coding
+        if (
+            scope is None
+            or self._workspace_coding_explorations is None
+            or self._workspace_coding_explorer is None
+        ):
+            raise TaskWorkbenchConflictError("Workspace coding Explorer runtime is unavailable")
+        conversation = await self._context.create_conversation(
+            CreateConversationRequest(title=command.message.strip()[:200])
+        )
+        task = await self._tasks.create_task(
+            TaskCreate(
+                conversation_id=conversation.conversation_id,
+                goal=command.message,
+                privacy_mode=command.privacy_mode,
+                constraints=list(command.constraints),
+            )
+        )
+        user_message = await self._context.add_message(
+            conversation.conversation_id,
+            CreateConversationMessageRequest(
+                role="user",
+                content=command.message,
+                task_id=task.task_id,
+                classification=DataClassification.INTERNAL,
+            ),
+        )
+        try:
+            await self._workspace_coding_explorations.prepare(
+                task_id=task.task_id,
+                user_message_id=user_message.message_id,
+                project_path=scope.project_path,
+                ecosystem=scope.ecosystem,
+                test_path=scope.test_path,
+            )
+        except (
+            WorkspaceCodingError,
+            WorkspaceFileError,
+            WorkspaceCodingExplorationBindingError,
+        ) as error:
+            raise TaskWorkbenchConflictError(
+                "Workspace coding project scope was rejected"
+            ) from error
+        await self._add_assistant_message(
+            task.task_id,
+            "已封存项目 Catalog 并提交只读 Explorer；模型不能扩大路径、获得写权限或选择命令。"
+            "候选文件形成后，Workbench 会给出唯一可接受的精确确认文本。",
+        )
+        return await self._schedule_automatic(await self.get(task.task_id))
 
     async def continue_turn(
         self, task_id: str, command: ContinueConversationTurn
@@ -362,13 +436,65 @@ class TaskWorkbenchService:
                 "Task privacy mode is incompatible with the research conversation"
             )
         privacy_mode = cast(Literal["local_preferred", "balanced"], previous.task.privacy_mode)
+        if self._workspace_coding_explorations is not None:
+            try:
+                exploration = await self._workspace_coding_explorations.get_workbench(task_id)
+            except WorkspaceCodingExplorationBindingError as error:
+                raise TaskWorkbenchConflictError(
+                    "Workspace coding exploration proof drifted"
+                ) from error
+            if (
+                exploration is not None
+                and exploration.phase == "proposal_ready"
+                and exploration.confirmation_text == command.message
+                and exploration.proposal_id is not None
+            ):
+                successor = await self._tasks.create_task(
+                    TaskCreate(
+                        conversation_id=conversation_id,
+                        goal=command.message,
+                        privacy_mode=privacy_mode,
+                        constraints=list(previous.task.constraints),
+                    )
+                )
+                confirmation = await self._context.add_message(
+                    conversation_id,
+                    CreateConversationMessageRequest(
+                        role="user",
+                        content=command.message,
+                        task_id=successor.task_id,
+                        classification=DataClassification.INTERNAL,
+                    ),
+                )
+                try:
+                    await self._workspace_coding_explorations.confirm(
+                        exploration.proposal_id,
+                        successor_task_id=successor.task_id,
+                        confirmation_message_id=confirmation.message_id,
+                    )
+                except WorkspaceCodingExplorationBindingError as error:
+                    raise TaskWorkbenchConflictError(
+                        "Workspace coding file-set confirmation was rejected"
+                    ) from error
+                await self._add_assistant_message(
+                    successor.task_id,
+                    "已将精确确认绑定为后继只读计划；系统将通过现有 TaskLoop 读取并验证候选文件，"
+                    "此阶段仍没有工作区写权限。",
+                )
+                return await self._schedule_automatic(await self.get(successor.task_id))
+            if (
+                exploration is not None
+                and exploration.phase == "proposal_ready"
+                and command.message.startswith("确认候选文件集：")
+            ):
+                raise TaskWorkbenchConflictError(
+                    "Workspace coding file-set confirmation did not exactly match"
+                )
         if self._workspace_coding_changes is not None:
             try:
                 change = await self._workspace_coding_changes.get_workbench(task_id)
             except WorkspaceCodingChangeRuntimeError as error:
-                raise TaskWorkbenchConflictError(
-                    "Workspace coding change proof drifted"
-                ) from error
+                raise TaskWorkbenchConflictError("Workspace coding change proof drifted") from error
             if (
                 change is not None
                 and change.phase == "proposal_ready"
@@ -404,9 +530,18 @@ class TaskWorkbenchService:
                     ) from error
                 await self._add_assistant_message(
                     successor.task_id,
-                    "已将新的精确确认绑定为后继写计划；文件尚未修改，写计划也尚未激活。",
+                    "已将新的精确确认绑定为后继写计划；系统将通过现有 TaskLoop 推进，"
+                    "实际 Patch 与 Git 提交仍分别等待显式确认。",
                 )
                 return await self._schedule_automatic(await self.get(successor.task_id))
+            if (
+                change is not None
+                and change.phase == "proposal_ready"
+                and command.message.startswith("确认变更提案：")
+            ):
+                raise TaskWorkbenchConflictError(
+                    "Workspace coding change confirmation did not exactly match"
+                )
         continuation_code = classify_agent_replan_continuation(command.message)
         if (
             continuation_code is not None
@@ -447,20 +582,12 @@ class TaskWorkbenchService:
         )
         if task_loop_amended:
             if self._task_loop_execution is None:
-                raise TaskWorkbenchConflictError(
-                    "Task Loop amendment runtime is unavailable"
-                )
+                raise TaskWorkbenchConflictError("Task Loop amendment runtime is unavailable")
             if self._auto_advance is not None:
                 await self._auto_advance.cancel(previous.task.task_id)
             sealed = await self._task_loop_execution.cancel_for_amendment(task_id)
-            if (
-                sealed is None
-                or sealed.execution is None
-                or sealed.execution.status != "cancelled"
-            ):
-                raise TaskWorkbenchConflictError(
-                    "Old Task Loop generation was not sealed"
-                )
+            if sealed is None or sealed.execution is None or sealed.execution.status != "cancelled":
+                raise TaskWorkbenchConflictError("Old Task Loop generation was not sealed")
             await self._add_assistant_message(
                 previous.task.task_id,
                 "收到新的任务要求。旧 TaskLoop generation 与全部未完成租约已封存；"
@@ -869,6 +996,36 @@ class TaskWorkbenchService:
         # be duplicated or lost across concurrent workers and crash recovery.
         return await self.get(task_id)
 
+    async def explore_workspace(self, task_id: str) -> TaskWorkbenchRead:
+        """Run or recover the exact read-only Explorer bound to this source Task."""
+
+        if self._workspace_coding_explorer is None:
+            raise TaskWorkbenchConflictError("Workspace coding Explorer runtime is unavailable")
+        before = await self.get(task_id)
+        exploration = before.workspace_coding_exploration
+        enabled = any(
+            item.action is WorkbenchAction.EXPLORE_WORKSPACE and item.enabled
+            for item in before.actions
+        )
+        if exploration is None or not enabled:
+            return before
+        try:
+            await self._workspace_coding_explorer.run(exploration.snapshot_id)
+        except (
+            AgentModelLoopOutcomeUnknownError,
+            WorkspaceCodingExplorerRuntimeError,
+        ) as error:
+            after = await self.get(task_id)
+            if (
+                after.workspace_coding_exploration is not None
+                and after.workspace_coding_exploration.phase == "explorer_blocked"
+            ):
+                return after
+            raise TaskWorkbenchConflictError(
+                "Workspace coding Explorer dispatch was rejected"
+            ) from error
+        return await self.get(task_id)
+
     async def _prepare_planner_route(
         self,
         task_id: str,
@@ -917,6 +1074,11 @@ class TaskWorkbenchService:
         ):
             return await self.interpret_turn(task_id)
         if any(
+            item.action is WorkbenchAction.EXPLORE_WORKSPACE and item.enabled
+            for item in workbench.actions
+        ):
+            return await self.explore_workspace(task_id)
+        if any(
             item.action is WorkbenchAction.PLAN_TASK_LOOP and item.enabled
             for item in workbench.actions
         ):
@@ -940,9 +1102,7 @@ class TaskWorkbenchService:
             for item in workbench.actions
         ):
             if self._workspace_coding_changes is None:
-                raise TaskWorkbenchConflictError(
-                    "Workspace coding Change Proposer is unavailable"
-                )
+                raise TaskWorkbenchConflictError("Workspace coding Change Proposer is unavailable")
             try:
                 await self._workspace_coding_changes.run(task_id)
             except WorkspaceCodingChangeRuntimeError as error:
@@ -1385,7 +1545,8 @@ class TaskWorkbenchService:
                 isinstance(workbench.workspace_patch, WorkspacePatchPreview)
                 and workbench.workspace_patch.confirmation_digest == confirmation_digest
                 and generic_summary is not None
-                and generic_summary.execution_status in {
+                and generic_summary.execution_status
+                in {
                     "active",
                     "repairing",
                     "succeeded",
@@ -1428,16 +1589,12 @@ class TaskWorkbenchService:
                 or generic_task_loop is None
                 or generic_task_loop.execution_revision is None
             ):
-                raise TaskWorkbenchConflictError(
-                    "Task Loop workspace patch runtime is unavailable"
-                )
+                raise TaskWorkbenchConflictError("Task Loop workspace patch runtime is unavailable")
             try:
                 preview = await self._task_loop_execution.approve_workspace_patch(
                     task_id,
                     confirmation_digest,
-                    expected_execution_revision=(
-                        generic_task_loop.execution_revision
-                    ),
+                    expected_execution_revision=(generic_task_loop.execution_revision),
                 )
             except TaskLoopExecutionCoordinatorError as error:
                 raise TaskWorkbenchConflictError(str(error)) from error
@@ -1907,8 +2064,7 @@ class TaskWorkbenchService:
                     )
                 )
         variants.update(
-            f"workspace_command_profile:{profile_id}"
-            for profile_id in self._command_profile_ids
+            f"workspace_command_profile:{profile_id}" for profile_id in self._command_profile_ids
         )
         return frozenset(variants)
 
@@ -2033,9 +2189,7 @@ class TaskWorkbenchService:
                 else None
             )
         except WorkspaceCodingChangeRuntimeError as error:
-            raise TaskWorkbenchConflictError(
-                "Workspace coding change proof drifted"
-            ) from error
+            raise TaskWorkbenchConflictError("Workspace coding change proof drifted") from error
         try:
             (
                 knowledge,
@@ -2051,15 +2205,10 @@ class TaskWorkbenchService:
             ) = await self._router.get_result(task_id)
         except TurnRouterError as error:
             raise TaskWorkbenchConflictError(str(error)) from error
-        if (
-            task_loop_execution is not None
-            and task_loop_execution.workspace_patch is not None
-        ):
+        if task_loop_execution is not None and task_loop_execution.workspace_patch is not None:
             workspace_patch = task_loop_execution.workspace_patch
         workspace_git_commit = (
-            task_loop_execution.git_commit
-            if task_loop_execution is not None
-            else None
+            task_loop_execution.git_commit if task_loop_execution is not None else None
         )
         mcp_enabled = bool(
             route is not None
@@ -2076,6 +2225,7 @@ class TaskWorkbenchService:
             task_loop,
             task_loop_execution,
             workspace_coding_change,
+            workspace_coding_exploration,
         )
         repair_loop = self._repair_loop_status(executions, contract, route)
         actions = self._actions(
@@ -2089,6 +2239,7 @@ class TaskWorkbenchService:
             task_loop,
             task_loop_execution,
             workspace_coding_change,
+            workspace_coding_exploration,
         )
         material = {
             "schema_version": "deskpilot.task-workbench.v1",
@@ -2106,7 +2257,7 @@ class TaskWorkbenchService:
                 task_loop_execution.workbench
                 if (
                     task_loop_execution is not None
-                    and task_loop_execution.execution is not None
+                    and (task_loop_execution.execution is not None or task_loop is None)
                 )
                 else (
                     TaskLoopWorkbenchRead.from_internal(task_loop)
@@ -2238,6 +2389,7 @@ class TaskWorkbenchService:
         task_loop: TaskLoop | None,
         task_loop_execution: TaskLoopExecutionRead | None,
         workspace_coding_change: WorkspaceCodingChangeWorkbenchRead | None,
+        workspace_coding_exploration: WorkspaceCodingExplorationWorkbenchRead | None = None,
     ) -> WorkbenchStage:
         if workspace_coding_change is not None:
             if workspace_coding_change.phase == "proposal_ready":
@@ -2272,6 +2424,14 @@ class TaskWorkbenchService:
             if task_loop.status == "planned":
                 return WorkbenchStage.PLANNED
             return WorkbenchStage.BLOCKED
+        if workspace_coding_exploration is not None:
+            if workspace_coding_exploration.phase == "proposal_ready":
+                return WorkbenchStage.NEEDS_USER_ACTION
+            if workspace_coding_exploration.phase == "explorer_blocked":
+                return WorkbenchStage.BLOCKED
+            if workspace_coding_exploration.phase == "confirmed_read_only_plan":
+                return WorkbenchStage.DELIVERED
+            return WorkbenchStage.EXECUTING
         if turn_planning is not None:
             if turn_planning.run.status in {"prepared", "dispatching"}:
                 return WorkbenchStage.INTERPRETING
@@ -2423,6 +2583,7 @@ class TaskWorkbenchService:
         task_loop: TaskLoop | None,
         task_loop_execution: TaskLoopExecutionRead | None,
         workspace_coding_change: WorkspaceCodingChangeWorkbenchRead | None,
+        workspace_coding_exploration: WorkspaceCodingExplorationWorkbenchRead | None = None,
     ) -> tuple[WorkbenchActionRead, ...]:
         run = executions.runs[-1] if executions.runs else None
         nodes = {item.local_key: item for item in run.nodes} if run else {}
@@ -2436,7 +2597,9 @@ class TaskWorkbenchService:
             and turn_planning.binding is not None
             and turn_planning.binding.status == "multi_step_deferred"
         )
-        is_research = route is None or route.route_id == "research_to_html"
+        is_research = workspace_coding_exploration is None and (
+            route is None or route.route_id == "research_to_html"
+        )
         is_direct = bool(
             route is not None
             and route.route_id
@@ -2467,6 +2630,14 @@ class TaskWorkbenchService:
             WorkbenchAction.INTERPRET_TURN: (
                 bool(turn_planning is not None and turn_planning.run.status == "prepared"),
                 "TURN_INTERPRETATION_NOT_PREPARED",
+            ),
+            WorkbenchAction.EXPLORE_WORKSPACE: (
+                bool(
+                    workspace_coding_exploration is not None
+                    and workspace_coding_exploration.phase in {"snapshot_ready", "explorer_ready"}
+                    and workspace_coding_exploration.explorer_invocation_id is None
+                ),
+                "WORKSPACE_EXPLORATION_NOT_RECOVERABLE",
             ),
             WorkbenchAction.PLAN_TASK_LOOP: (
                 bool(
@@ -2676,10 +2847,7 @@ class TaskWorkbenchService:
                             task_loop_execution.workspace_patch,
                             WorkspacePatchPreview,
                         )
-                        and any(
-                            node.status == "waiting_user"
-                            for node in task_loop_execution.nodes
-                        )
+                        and any(node.status == "waiting_user" for node in task_loop_execution.nodes)
                     )
                     or (
                         route is not None
@@ -2725,8 +2893,7 @@ class TaskWorkbenchService:
                     and generic_execution.status == "awaiting_user"
                     and isinstance(task_loop_execution.git_commit, GitCommitPreview)
                     and any(
-                        node.local_key.endswith("commit_git")
-                        and node.status == "waiting_user"
+                        node.local_key.endswith("commit_git") and node.status == "waiting_user"
                         for node in task_loop_execution.nodes
                     )
                 ),
@@ -2771,6 +2938,9 @@ class TaskWorkbenchService:
             WorkbenchAction.INTERPRET_TURN: (
                 "运行一次本地 Turn Planner，只能选择服务器预编译的 opaque Offer。"
             ),
+            WorkbenchAction.EXPLORE_WORKSPACE: (
+                "运行一次只读 Explorer；只能从服务器封存的 Catalog 提出候选文件集。"
+            ),
             WorkbenchAction.PLAN_TASK_LOOP: (
                 "复验已持久化 Offer，并组合一个不授予新权限的多步骤 DraftPlan。"
             ),
@@ -2804,6 +2974,7 @@ class TaskWorkbenchService:
         }
         effects = {
             WorkbenchAction.INTERPRET_TURN: "read_only",
+            WorkbenchAction.EXPLORE_WORKSPACE: "read_only",
             WorkbenchAction.PLAN_TASK_LOOP: "read_only",
             WorkbenchAction.ADVANCE_TASK_LOOP: "execution_control",
             WorkbenchAction.PROPOSE_WORKSPACE_CHANGE: "read_only",

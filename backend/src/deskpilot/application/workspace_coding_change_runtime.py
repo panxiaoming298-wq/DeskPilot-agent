@@ -744,17 +744,35 @@ class WorkspaceCodingChangeRuntime:
     ) -> WorkspaceCodingChangeWorkbenchRead | None:
         write = await self.get_write_plan_binding(successor_task_id=task_id)
         reader_task_id = task_id
+        allowed_verified_contents: dict[str, str] | None = None
         if write is not None:
             proposal = await self.get_proposal(proposal_id=write.proposal_id)
             assert proposal is not None
             run_binding = await self.get_run_binding(binding_id=proposal.run_binding_id)
             assert run_binding is not None
             reader_task_id = run_binding.task_contract.task_id
+            if await self._write_patch_is_verified(write, proposal):
+                allowed_verified_contents = await self._expected_post_patch_contents(
+                    write,
+                    proposal,
+                )
         else:
             proposal = await self.get_proposal(reader_task_id=task_id)
             run_binding = await self.get_run_binding(reader_task_id=task_id)
+        async with self._database.session() as session:
+            reader_execution = await session.scalar(
+                select(TaskLoopExecutionRecord).where(
+                    TaskLoopExecutionRecord.task_id == reader_task_id,
+                    TaskLoopExecutionRecord.source_kind == "confirmed_file_set",
+                )
+            )
+        if reader_execution is None or reader_execution.status != "succeeded":
+            return None
         try:
-            source = await self._reader_evidence(reader_task_id)
+            source = await self._reader_evidence(
+                reader_task_id,
+                allowed_verified_contents=allowed_verified_contents,
+            )
         except WorkspaceCodingExplorationNotFoundError:
             return None
         if run_binding is None:

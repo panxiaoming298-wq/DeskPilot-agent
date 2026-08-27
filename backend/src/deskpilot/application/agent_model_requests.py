@@ -72,10 +72,31 @@ def build_patch_planner_model_request(
     upstream_data: list[dict[str, object]],
     observation_digest: str | None = None,
     source_text: str | None = None,
+    expected_change: dict[str, str] | None = None,
     provider_hint: str | None = None,
 ) -> ModelRequest:
     """Build the exact bounded Patch Planner request used in production."""
 
+    metadata: dict[str, JsonValue] = {
+        "agent_id": "builtin.workspace_patch_planner",
+        "agent_version": "1.0.0",
+        "agent_loop_phase": phase,
+        "workspace_route_id": route_id,
+        "route_binding_id": route_binding_id,
+        "workspace_patch_binding_id": patch_binding_id,
+        "workspace_path": path,
+        "workspace_project_path": project_path,
+        "workspace_test_path": test_path,
+        "workspace_test_kind": test_kind,
+        "workspace_patch_objective": objective,
+        "observation_digest": observation_digest,
+        "workspace_patch_source_text": source_text,
+    }
+    if expected_change is not None:
+        metadata["workspace_patch_expected_change"] = cast(
+            dict[str, JsonValue],
+            expected_change,
+        )
     return ModelRequest(
         request_id=request_id,
         task_id=task_id,
@@ -130,21 +151,7 @@ def build_patch_planner_model_request(
             max_retry_delay_seconds=0,
             max_task_cost_micros=budget.cost_micros,
         ),
-        metadata={
-            "agent_id": "builtin.workspace_patch_planner",
-            "agent_version": "1.0.0",
-            "agent_loop_phase": phase,
-            "workspace_route_id": route_id,
-            "route_binding_id": route_binding_id,
-            "workspace_patch_binding_id": patch_binding_id,
-            "workspace_path": path,
-            "workspace_project_path": project_path,
-            "workspace_test_path": test_path,
-            "workspace_test_kind": test_kind,
-            "workspace_patch_objective": objective,
-            "observation_digest": observation_digest,
-            "workspace_patch_source_text": source_text,
-        },
+        metadata=metadata,
     )
 
 

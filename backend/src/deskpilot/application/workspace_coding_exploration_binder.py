@@ -790,8 +790,7 @@ class WorkspaceCodingExplorationBinder:
             else "proposal_ready"
             if proposal is not None
             else "explorer_blocked"
-            if explorer_turn_record is not None
-            and explorer_turn_record.status in {"failed", "outcome_unknown"}
+            if explorer_invocation_record is not None
             else "explorer_ready"
             if run_binding is not None
             else "snapshot_ready"
@@ -819,7 +818,7 @@ class WorkspaceCodingExplorationBinder:
             ),
             "explorer_invocation_id": (
                 explorer_invocation_record.invocation_id
-                if explorer_turn_record is not None and explorer_invocation_record is not None
+                if explorer_invocation_record is not None
                 else None
             ),
             "explorer_turn_id": (
@@ -852,6 +851,31 @@ class WorkspaceCodingExplorationBinder:
         return WorkspaceCodingExplorationWorkbenchRead.model_validate(
             {**material, "projection_digest": sha256_digest(material)}
         )
+
+    async def recoverable_task_ids(self, *, limit: int = 100) -> tuple[str, ...]:
+        """Return bounded source Tasks that still need a safe Explorer dispatch."""
+
+        if not 1 <= limit <= 1_000:
+            raise ValueError("Workspace coding exploration recovery limit is invalid")
+        async with self._database.session() as session:
+            return tuple(
+                (
+                    await session.scalars(
+                        select(WorkspaceCodingExplorationSnapshotRecord.source_task_id)
+                        .outerjoin(
+                            WorkspaceCodingExplorationProposalRecord,
+                            WorkspaceCodingExplorationProposalRecord.snapshot_id
+                            == WorkspaceCodingExplorationSnapshotRecord.snapshot_id,
+                        )
+                        .where(WorkspaceCodingExplorationProposalRecord.proposal_id.is_(None))
+                        .order_by(
+                            WorkspaceCodingExplorationSnapshotRecord.created_at,
+                            WorkspaceCodingExplorationSnapshotRecord.source_task_id,
+                        )
+                        .limit(limit)
+                    )
+                ).all()
+            )
 
     def _assert_current_snapshot(
         self,
@@ -912,9 +936,7 @@ class WorkspaceCodingExplorationBinder:
                 "Verified write changed the exploration catalog shape"
             )
         changed_paths = tuple(
-            path
-            for path, proof in current_by_path.items()
-            if proof != original_by_path[path]
+            path for path, proof in current_by_path.items() if proof != original_by_path[path]
         )
         if set(changed_paths) != set(expected_contents):
             raise WorkspaceCodingExplorationProofRejectedError(
@@ -936,8 +958,7 @@ class WorkspaceCodingExplorationBinder:
             for item in reads.files
         }
         if set(contents) != set(expected_contents) or any(
-            contents[path].replace("\r\n", "\n")
-            != expected_contents[path].replace("\r\n", "\n")
+            contents[path].replace("\r\n", "\n") != expected_contents[path].replace("\r\n", "\n")
             for path in expected_contents
         ):
             raise WorkspaceCodingExplorationProofRejectedError(

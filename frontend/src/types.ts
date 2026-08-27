@@ -979,6 +979,7 @@ export type WorkbenchStage =
 
 export type WorkbenchAction =
   | 'interpret_turn'
+  | 'explore_workspace'
   | 'plan_task_loop'
   | 'advance_task_loop'
   | 'activate_research_plan'
@@ -1831,6 +1832,58 @@ export interface WorkspacePathOperationReceipt {
   receipt_digest: string
 }
 
+export interface WorkspaceCodingExplorationWorkbench {
+  schema_version: 'deskpilot.workspace-coding-exploration-workbench.v1'
+  phase:
+    | 'snapshot_ready'
+    | 'explorer_ready'
+    | 'explorer_blocked'
+    | 'proposal_ready'
+    | 'confirmed_read_only_plan'
+  source_task_id: string
+  snapshot_id: string
+  snapshot_digest: string
+  project_path: string
+  ecosystem: 'python' | 'node'
+  test_path: string
+  catalog_file_count: number
+  catalog_truncated: boolean
+  candidates: Array<{
+    relative_path: string
+    source_file_proof_digest: string
+    rationale: string
+  }>
+  confirmation_text: string | null
+  successor_task_id: string | null
+  requires_user_confirmation: boolean
+  projection_digest: string
+}
+
+export interface WorkspaceCodingChangeWorkbench {
+  schema_version: 'deskpilot.workspace-coding-change-workbench.v1'
+  phase:
+    | 'reader_succeeded'
+    | 'proposal_turn_ready'
+    | 'proposal_blocked'
+    | 'proposal_ready'
+    | 'confirmed_write_plan'
+  reader_task_id: string
+  proposal_id: string | null
+  changes: Array<{
+    relative_path: string
+    old_text: string
+    new_text: string
+    source_result_ref_digest: string
+    source_result_digest: string
+    source_version_digest: string
+    rationale: string
+  }>
+  confirmation_text: string | null
+  successor_task_id: string | null
+  requires_user_confirmation: boolean
+  projection_digest: string
+}
+
 export interface TaskWorkbench {
   schema_version: 'deskpilot.task-workbench.v1'
   task: Task
@@ -1934,6 +1987,8 @@ export interface TaskWorkbench {
   workspace_check: WorkspaceCheckRead | null
   workspace_python_test: WorkspacePythonTestRead | null
   workspace_node_test: WorkspaceNodeTestRead | null
+  workspace_coding_exploration: WorkspaceCodingExplorationWorkbench | null
+  workspace_coding_change: WorkspaceCodingChangeWorkbench | null
   exports: ArtifactExport[]
   projection_digest: string
 }
@@ -1948,6 +2003,11 @@ export interface CreateConversationTurn {
   message: string
   privacy_mode: 'local_preferred' | 'balanced'
   constraints: string[]
+  workspace_coding?: {
+    project_path: string
+    ecosystem: 'python' | 'node'
+    test_path: string
+  } | null
 }
 
 export interface ContinueConversationTurn {

@@ -1064,6 +1064,7 @@ class TaskLoopAgentRuntime:
             ],
             observation_digest=observation_digest,
             source_text=workspace.content,
+            expected_change=expected_change,
         )
         dispatched = await self._model_loop.dispatch(
             source.claimed,

@@ -110,6 +110,7 @@ class WorkbenchStage(StrEnum):
 
 class WorkbenchAction(StrEnum):
     INTERPRET_TURN = "interpret_turn"
+    EXPLORE_WORKSPACE = "explore_workspace"
     PLAN_TASK_LOOP = "plan_task_loop"
     ADVANCE_TASK_LOOP = "advance_task_loop"
     PROPOSE_WORKSPACE_CHANGE = "propose_workspace_change"
@@ -248,6 +249,15 @@ class CreateResearchWorkbenchTask(BaseModel):
     constraints: tuple[str, ...] = Field(default=(), max_length=50)
 
 
+class WorkspaceCodingExplorationRequest(BaseModel):
+    """Trusted user-selected project scope for one read-only Explorer turn."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    project_path: str = Field(min_length=1, max_length=32_767)
+    ecosystem: Literal["python", "node"]
+    test_path: str = Field(min_length=1, max_length=500)
+
+
 class CreateConversationTurn(BaseModel):
     """A user turn that starts a new immutable Task inside a conversation."""
 
@@ -255,6 +265,7 @@ class CreateConversationTurn(BaseModel):
     message: str = Field(min_length=1, max_length=4_000)
     privacy_mode: Literal["local_preferred", "balanced"] = "local_preferred"
     constraints: tuple[str, ...] = Field(default=(), max_length=50)
+    workspace_coding: WorkspaceCodingExplorationRequest | None = None
 
 
 class ContinueConversationTurn(BaseModel):
