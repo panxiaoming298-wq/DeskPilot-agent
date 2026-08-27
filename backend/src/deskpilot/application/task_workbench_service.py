@@ -2244,9 +2244,13 @@ class TaskWorkbenchService:
                 return WorkbenchStage.NEEDS_USER_ACTION
             if workspace_coding_change.phase == "proposal_blocked":
                 return WorkbenchStage.BLOCKED
-            if workspace_coding_change.phase == "confirmed_write_plan":
+            if (
+                workspace_coding_change.phase == "confirmed_write_plan"
+                and task_loop_execution is None
+            ):
                 return WorkbenchStage.PLANNED
-            return WorkbenchStage.EXECUTING
+            if workspace_coding_change.phase != "confirmed_write_plan":
+                return WorkbenchStage.EXECUTING
         if task_loop_execution is not None:
             execution = task_loop_execution.execution
             if task_loop_execution.loop_status == "observed":

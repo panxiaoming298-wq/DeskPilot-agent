@@ -189,6 +189,8 @@ class TaskLoopExecutionCoordinator:
         if command.kind == "activate_plan":
             if before.source_kind == "confirmed_file_set":
                 await self._activation.activate_confirmed_readers(task_id)
+            elif before.source_kind == "confirmed_change_proposal":
+                await self._activation.activate_confirmed_change_proposal(task_id)
             else:
                 await self._activation.activate(task_id)
         elif command.kind == "execute_capability":
@@ -344,7 +346,10 @@ class TaskLoopExecutionCoordinator:
             command.node_ids,
         )
         outcomes = await asyncio.gather(
-            *(self._run_agent_candidate(source) for source in claims),
+            *(
+                self._run_agent_candidate(source, defer_run_failure=True)
+                for source in claims
+            ),
             return_exceptions=True,
         )
         for source, outcome in zip(claims, outcomes, strict=True):
@@ -352,12 +357,23 @@ class TaskLoopExecutionCoordinator:
                 outcome,
                 (AgentModelLoopOutcomeUnknownError, AgentModelLoopRouteRejectedError),
             ):
-                await self._settle_agent_error(source, outcome)
+                await self._settle_agent_error(
+                    source,
+                    outcome,
+                    defer_run_failure=True,
+                )
+        if any(isinstance(outcome, BaseException) for outcome in outcomes):
+            await self._agents.settle_failed_batch(claims)
         for outcome in outcomes:
             if isinstance(outcome, BaseException):
                 raise outcome
 
-    async def _run_agent_candidate(self, source: SourceBoundAgentClaim) -> None:
+    async def _run_agent_candidate(
+        self,
+        source: SourceBoundAgentClaim,
+        *,
+        defer_run_failure: bool = False,
+    ) -> None:
         if self._agents is None:
             raise TaskLoopExecutionCoordinatorUnavailableError(
                 "Agent Task Loop runtime is unavailable"
@@ -375,7 +391,10 @@ class TaskLoopExecutionCoordinator:
             elif is_workspace_coding_reader_key(source.binding.mapping.source_local_key):
                 await self._agents.run_workspace_file_candidate(source)
             elif is_workspace_coding_planner_key(source.binding.mapping.source_local_key):
-                await self._agents.run_patch_planner_candidate(source)
+                await self._agents.run_patch_planner_candidate(
+                    source,
+                    defer_run_failure=defer_run_failure,
+                )
             else:
                 raise TaskLoopExecutionCoordinatorProofRejectedError(
                     "Coding Agent node is not registered by the fixed DAG"
@@ -391,15 +410,23 @@ class TaskLoopExecutionCoordinator:
         self,
         source: SourceBoundAgentClaim,
         error: AgentModelLoopOutcomeUnknownError | AgentModelLoopRouteRejectedError,
+        *,
+        defer_run_failure: bool = False,
     ) -> None:
         if self._agents is None:  # pragma: no cover - checked before every claim.
             raise TaskLoopExecutionCoordinatorUnavailableError(
                 "Agent Task Loop runtime is unavailable"
             )
         if isinstance(error, AgentModelLoopOutcomeUnknownError):
-            await self._agents.settle_model_outcome_unknown(source)
+            await self._agents.settle_model_outcome_unknown(
+                source,
+                defer_run_failure=defer_run_failure,
+            )
         else:
-            await self._agents.settle_model_route_rejected(source)
+            await self._agents.settle_model_route_rejected(
+                source,
+                defer_run_failure=defer_run_failure,
+            )
 
     async def _verify_candidate(
         self,
@@ -453,12 +480,23 @@ class TaskLoopExecutionCoordinator:
         task_id: str,
         source: SourceBoundAgentClaim,
     ) -> AgentSourcePlanProof:
-        if source.binding.source_kind == "confirmed_file_set":
+        if source.binding.source_kind in {
+            "confirmed_file_set",
+            "confirmed_change_proposal",
+        }:
             reader_proof = source.binding.workspace_reader_node_proof
-            if reader_proof is None:
+            write_proof = source.binding.workspace_coding_write_node_proof
+            if reader_proof is None and write_proof is None:
                 raise TaskLoopExecutionCoordinatorProofRejectedError(
-                    "Confirmed Reader source lost its exact proof"
+                    "Confirmed source lost its exact node proof"
                 )
+            if reader_proof is not None:
+                exact_plan_id = reader_proof.plan_id
+                exact_plan_digest = reader_proof.plan_manifest_digest
+            else:
+                assert write_proof is not None
+                exact_plan_id = write_proof.plan_id
+                exact_plan_digest = write_proof.plan_manifest_digest
             async with self._database.session() as session:
                 contract_record = await session.get(
                     TaskContractVersionRecord,
@@ -487,8 +525,8 @@ class TaskLoopExecutionCoordinator:
                 contract is None
                 or plan is None
                 or contract.digest != source.binding.source_contract_digest
-                or plan.plan_id != reader_proof.plan_id
-                or plan.plan_manifest_digest != reader_proof.plan_manifest_digest
+                or plan.plan_id != exact_plan_id
+                or plan.plan_manifest_digest != exact_plan_digest
                 or source.binding.source_plan_id != plan.plan_id
                 or source.binding.source_plan_manifest_digest != plan.plan_manifest_digest
             ):

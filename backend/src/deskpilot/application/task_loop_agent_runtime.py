@@ -45,6 +45,11 @@ from deskpilot.application.task_loop_agent_adapter_registry import (
     TaskLoopAgentAdapterRegistry,
 )
 from deskpilot.application.verified_edges import mark_verified_and_unlock
+from deskpilot.application.workspace_coding_change_runtime import (
+    WorkspaceCodingChangeRuntime,
+    WorkspaceCodingChangeRuntimeError,
+    WorkspaceCodingWriteActivationBundle,
+)
 from deskpilot.application.workspace_coding_graph import (
     WORKSPACE_CODING_MAX_FILES,
     WORKSPACE_CODING_MIN_FILES,
@@ -260,6 +265,7 @@ class TaskLoopAgentRuntime:
         research: ResearchRuntime | None = None,
         workspace: WorkspaceFileRuntime | None = None,
         model_loop: AgentModelLoopRuntime | None = None,
+        workspace_coding_changes: WorkspaceCodingChangeRuntime | None = None,
     ) -> None:
         self._database = database
         self._execution = execution
@@ -267,6 +273,7 @@ class TaskLoopAgentRuntime:
         self._research = research
         self._workspace = workspace
         self._model_loop = model_loop
+        self._workspace_coding_changes = workspace_coding_changes
 
     async def claim_next(
         self,
@@ -288,6 +295,7 @@ class TaskLoopAgentRuntime:
         if selected is None:
             return None
         execution, binding, profile = selected
+        await self._assert_current_write_source(execution, binding)
         claimed = await self._execution.claim_next(
             execution.run_id,
             owner_id,
@@ -325,6 +333,7 @@ class TaskLoopAgentRuntime:
             if execution_record is None:
                 raise TaskLoopAgentNotFoundError("Task Loop execution does not exist")
             execution = self._execution_from_record(execution_record)
+            await self._assert_current_write_source(execution)
             if execution.status != "active":
                 return None
             attempt_query = select(TaskLoopNodeAttemptRecord).where(
@@ -726,12 +735,19 @@ class TaskLoopAgentRuntime:
             if file_count == WORKSPACE_CODING_MIN_FILES
             else "coordinate_bounded_coding"
         )
-        prefix = f"s{binding.step_ordinal:02d}_"
-        by_key = {
-            item.local_key.removeprefix(prefix): item
-            for item in plan.nodes
-            if item.local_key.startswith(prefix)
-        }
+        if binding.source_kind == "confirmed_change_proposal":
+            by_key = {item.local_key: item for item in plan.nodes}
+        else:
+            if binding.step_ordinal is None:
+                raise TaskLoopAgentProofRejectedError(
+                    "Coding Coordinator source Step ordinal changed"
+                )
+            prefix = f"s{binding.step_ordinal:02d}_"
+            by_key = {
+                item.local_key.removeprefix(prefix): item
+                for item in plan.nodes
+                if item.local_key.startswith(prefix)
+            }
         if set(keys) - set(by_key) or coordinator_key not in by_key:
             raise TaskLoopAgentProofRejectedError("Coding Coordinator fixed Plan nodes changed")
         node_id_to_key = {item.node_id: key for key, item in by_key.items()}
@@ -974,6 +990,8 @@ class TaskLoopAgentRuntime:
     async def run_patch_planner_candidate(
         self,
         source: SourceBoundAgentClaim,
+        *,
+        defer_run_failure: bool = False,
     ) -> AgentOutputResult:
         """Run one persisted LOCAL-only Patch Planner turn without write authority."""
 
@@ -1072,6 +1090,7 @@ class TaskLoopAgentRuntime:
             await self._settle_model_rejected(
                 source,
                 error_code="TASK_LOOP_PATCH_PROPOSAL_REJECTED",
+                defer_run_failure=defer_run_failure,
             )
             raise TaskLoopAgentProofRejectedError(
                 "Patch Planner changed the exact server-offered replacement"
@@ -1429,6 +1448,9 @@ class TaskLoopAgentRuntime:
                     invocation=invocation,
                     result=result,
                     workspace_reader_node_proof=(binding.workspace_reader_node_proof),
+                    workspace_coding_write_node_proof=(
+                        binding.workspace_coding_write_node_proof
+                    ),
                 )
                 profile = self._profile(binding)
                 output_manifest: dict[str, object]
@@ -1743,6 +1765,7 @@ class TaskLoopAgentRuntime:
         *,
         error_code: str,
         verification_status: Literal["not_requested", "rejected"] = "rejected",
+        defer_run_failure: bool = False,
     ) -> None:
         """Fail one bounded model node after a usable but unauthorized decision."""
 
@@ -1818,13 +1841,16 @@ class TaskLoopAgentRuntime:
             node.claim_heartbeat_at = None
             node.claim_expires_at = None
             node.updated_at = now
-            run.status = "failed"
-            run.revision += 1
-            run.updated_at = now
+            if not defer_run_failure:
+                run.status = "failed"
+                run.revision += 1
+                run.updated_at = now
 
     async def settle_model_route_rejected(
         self,
         source: SourceBoundAgentClaim,
+        *,
+        defer_run_failure: bool = False,
     ) -> None:
         """Fail one bounded node when no authorized model route can dispatch."""
 
@@ -1832,11 +1858,14 @@ class TaskLoopAgentRuntime:
             source,
             error_code="AGENT_MODEL_ROUTE_REJECTED",
             verification_status="not_requested",
+            defer_run_failure=defer_run_failure,
         )
 
     async def settle_model_outcome_unknown(
         self,
         source: SourceBoundAgentClaim,
+        *,
+        defer_run_failure: bool = False,
     ) -> None:
         """Seal one dispatched model attempt whose usable outcome is unknowable."""
 
@@ -1912,9 +1941,113 @@ class TaskLoopAgentRuntime:
             node.claim_heartbeat_at = None
             node.claim_expires_at = None
             node.updated_at = now
-            run.status = "failed"
-            run.revision += 1
-            run.updated_at = now
+            if not defer_run_failure:
+                run.status = "failed"
+                run.revision += 1
+                run.updated_at = now
+
+    async def settle_failed_batch(
+        self,
+        sources: tuple[SourceBoundAgentClaim, ...],
+    ) -> None:
+        """Terminalize one parallel Run only after every claimed sibling settled."""
+
+        if len(sources) != 2:
+            raise TaskLoopAgentProofRejectedError(
+                "Failed Agent batch must contain its exact two claims"
+            )
+        run_ids = {item.attempt.run_id for item in sources}
+        execution_ids = {item.execution_id for item in sources}
+        attempt_ids = {item.attempt.attempt_id for item in sources}
+        if len(run_ids) != 1 or len(execution_ids) != 1 or len(attempt_ids) != 2:
+            raise TaskLoopAgentProofRejectedError(
+                "Failed Agent batch crossed its Run or execution"
+            )
+        run_id = next(iter(run_ids))
+        async with self._database.session() as session, session.begin():
+            run = await session.scalar(
+                select(TaskExecutionRunRecord)
+                .where(TaskExecutionRunRecord.run_id == run_id)
+                .with_for_update()
+            )
+            attempts = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopNodeAttemptRecord)
+                        .where(TaskLoopNodeAttemptRecord.attempt_id.in_(attempt_ids))
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            if (
+                run is None
+                or len(attempts) != 2
+                or {item.attempt_id for item in attempts} != attempt_ids
+                or not any(
+                    item.status in {"failed", "outcome_unknown"}
+                    for item in attempts
+                )
+                or any(item.status in {"prepared", "claimed", "running"} for item in attempts)
+                or run.status not in {"active", "failed"}
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Failed Agent batch did not settle every sibling"
+                )
+            if run.status == "active":
+                run.status = "failed"
+                run.revision += 1
+                run.updated_at = utc_now()
+
+    async def _current_write_bundle(
+        self,
+        task_id: str,
+    ) -> WorkspaceCodingWriteActivationBundle | None:
+        if self._workspace_coding_changes is None:
+            return None
+        try:
+            return await self._workspace_coding_changes.get_write_activation_bundle(task_id)
+        except WorkspaceCodingChangeRuntimeError as error:
+            raise TaskLoopAgentProofRejectedError(
+                "Confirmed coding write authority changed before Agent claim"
+            ) from error
+
+    async def _assert_current_write_source(
+        self,
+        execution: TaskLoopExecution,
+        binding: ModelPlannerNodeBinding | None = None,
+    ) -> None:
+        bundle = await self._current_write_bundle(execution.task_id)
+        if execution.source_kind == "confirmed_change_proposal":
+            proof = (
+                binding.workspace_coding_write_node_proof
+                if binding is not None
+                else None
+            )
+            if (
+                bundle is None
+                or execution.write_plan_binding_id != bundle.binding.binding_id
+                or execution.write_plan_binding_digest != bundle.binding.binding_digest
+                or execution.plan_id != bundle.binding.expected_plan.plan_id
+                or execution.plan_manifest_digest
+                != bundle.binding.expected_plan_manifest_digest
+                or (
+                    binding is not None
+                    and (
+                        proof is None
+                        or proof.write_plan_binding_id != bundle.binding.binding_id
+                        or proof.write_plan_binding_digest != bundle.binding.binding_digest
+                        or proof.snapshot_digest != bundle.reader.snapshot.snapshot_digest
+                        or proof.catalog_digest != bundle.reader.snapshot.catalog_digest
+                    )
+                )
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Agent claim lost its current confirmed coding source"
+                )
+        elif bundle is not None:
+            raise TaskLoopAgentProofRejectedError(
+                "Confirmed coding write binding crossed another execution source"
+            )
 
     async def _select_next(
         self,
@@ -2636,6 +2769,34 @@ class TaskLoopAgentRuntime:
                     "Confirmed Reader Contract, Plan, mapping or node proof changed"
                 )
             return
+        if binding.source_kind == "confirmed_change_proposal":
+            write = binding.workspace_coding_write_node_proof
+            composite_node = next(
+                (
+                    item
+                    for item in composite_plan.nodes
+                    if item.node_id == binding.composite_node_id
+                ),
+                None,
+            )
+            if (
+                step is not None
+                or write is None
+                or proof.source_contract.digest != binding.source_contract_digest
+                or proof.source_plan != composite_plan
+                or composite_plan.plan_id != execution.plan_id
+                or composite_plan.plan_manifest_digest != execution.plan_manifest_digest
+                or write.plan_id != composite_plan.plan_id
+                or write.plan_manifest_digest != composite_plan.plan_manifest_digest
+                or write.plan_node_id != binding.composite_node_id
+                or write.plan_local_key != profile.source_local_key
+                or composite_node is None
+                or composite_node.node_spec_digest != write.plan_node_spec_digest
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Confirmed change Contract, Plan, mapping or node proof changed"
+                )
+            return
         if step is None or binding.recipe is None:
             raise TaskLoopAgentProofRejectedError("Model Planner Agent source proof is incomplete")
         source_node = next(
@@ -2714,6 +2875,8 @@ class TaskLoopAgentRuntime:
             != (
                 "confirmed_file_set_exact_reader"
                 if binding.source_kind == "confirmed_file_set"
+                else "confirmed_change_proposal_exact_plan"
+                if binding.source_kind == "confirmed_change_proposal"
                 else "composite_intersection_source_step"
             )
             or authority.node_kind.value != "agent"
@@ -2755,6 +2918,23 @@ class TaskLoopAgentRuntime:
                 or proof.capability != capability
             ):
                 raise TaskLoopAgentProofRejectedError("Confirmed Reader exact input proof changed")
+            return
+        if binding.source_kind == "confirmed_change_proposal":
+            write_node_proof = binding.workspace_coding_write_node_proof
+            if (
+                write_node_proof is None
+                or values != write_node_proof.parameters
+                or write_node_proof.plan_node_id != node.node_id
+                or write_node_proof.plan_node_spec_digest != node.node_spec_digest
+                or write_node_proof.plan_local_key != profile.source_local_key
+                or write_node_proof.bound_agent != bound_agent
+                or write_node_proof.capability != capability
+                or write_node_proof.parameters_digest
+                != sha256_digest({"parameters": dict(sorted(values.items()))})
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Confirmed coding exact input proof changed"
+                )
             return
         parameter_values = {item.parameter_name: item.value for item in binding.parameter_bindings}
         fixed_names: set[str] = set()
@@ -2853,6 +3033,16 @@ class TaskLoopAgentRuntime:
             material["source_file_proof_digest"] = (
                 binding.workspace_reader_node_proof.source_file_proof_digest
             )
+        if binding.workspace_coding_write_node_proof is not None:
+            material["workspace_coding_write_node_proof_digest"] = (
+                binding.workspace_coding_write_node_proof.proof_digest
+            )
+            material["workspace_coding_change_proposal_digest"] = (
+                binding.workspace_coding_write_node_proof.proposal_digest
+            )
+            material["workspace_coding_snapshot_digest"] = (
+                binding.workspace_coding_write_node_proof.snapshot_digest
+            )
         return material
 
     @staticmethod
@@ -2944,6 +3134,8 @@ class TaskLoopAgentRuntime:
             "draft_id",
             "source_binding_id",
             "source_binding_digest",
+            "write_plan_binding_id",
+            "write_plan_binding_digest",
             "task_id",
             "plan_id",
             "plan_generation",
@@ -3049,6 +3241,30 @@ class TaskLoopAgentRuntime:
             != (
                 binding.workspace_reader_node_proof.proof_digest
                 if binding.workspace_reader_node_proof is not None
+                else None
+            )
+            or record.write_plan_binding_id
+            != (
+                binding.workspace_coding_write_node_proof.write_plan_binding_id
+                if binding.workspace_coding_write_node_proof is not None
+                else None
+            )
+            or record.write_plan_binding_digest
+            != (
+                binding.workspace_coding_write_node_proof.write_plan_binding_digest
+                if binding.workspace_coding_write_node_proof is not None
+                else None
+            )
+            or record.workspace_coding_write_node_proof_manifest
+            != (
+                binding.workspace_coding_write_node_proof.model_dump(mode="json")
+                if binding.workspace_coding_write_node_proof is not None
+                else None
+            )
+            or record.workspace_coding_write_node_proof_digest
+            != (
+                binding.workspace_coding_write_node_proof.proof_digest
+                if binding.workspace_coding_write_node_proof is not None
                 else None
             )
             or record.mapping_manifest != binding.mapping.model_dump(mode="json")

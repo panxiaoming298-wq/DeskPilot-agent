@@ -536,6 +536,7 @@ def create_app(
             ),
             command_plans=workspace_command_plan_binder,
             workspace_coding_explorations=workspace_coding_explorations,
+            workspace_coding_changes=workspace_coding_change_runtime,
         )
         task_loop_capability_runtime = CapabilityExecutionRuntime(
             database,
@@ -543,6 +544,7 @@ def create_app(
             task_loop_capability_executors,
             CapabilityExecutionEngine(task_loop_capability_executors),
             command_plans=workspace_command_plan_binder,
+            workspace_coding_changes=workspace_coding_change_runtime,
         )
         task_loop_agent_runtime = TaskLoopAgentRuntime(
             database,
@@ -551,6 +553,7 @@ def create_app(
             research=research_runtime,
             workspace=workspace_file_runtime,
             model_loop=agent_model_loop_runtime,
+            workspace_coding_changes=workspace_coding_change_runtime,
         )
         task_loop_execution_runtime = TaskLoopExecutionCoordinator(
             database,

@@ -39,6 +39,7 @@ from deskpilot.domain.task_plans import (
     TASK_ID_PATTERN,
     CapabilityRef,
 )
+from deskpilot.domain.workspace_coding_changes import WorkspaceCodingWriteNodeProof
 from deskpilot.domain.workspace_command_plans import WorkspaceCommandPlanStepProof
 
 
@@ -285,9 +286,19 @@ class BoundCapabilityInput(BaseModel):
     effective_authority_digest: str = Field(pattern=DIGEST_PATTERN)
     runtime_eligibility_digest: str = Field(pattern=DIGEST_PATTERN)
     capability: CapabilityRef
-    source_step_binding_id: str
-    source_step_binding_digest: str = Field(pattern=DIGEST_PATTERN)
-    source_offer_key: str
+    source_step_binding_id: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    source_step_binding_digest: str | None = Field(
+        default=None,
+        pattern=DIGEST_PATTERN,
+        exclude_if=lambda value: value is None,
+    )
+    source_offer_key: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     route_id: str
     route_version: Literal["2"] = "2"
     route_manifest_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -299,6 +310,10 @@ class BoundCapabilityInput(BaseModel):
     )
     consumed_result_refs: tuple[VerifiedCapabilityResultRef, ...] = Field(default=(), max_length=16)
     workspace_command_plan_step: WorkspaceCommandPlanStepProof | None = None
+    workspace_coding_write_node_proof: WorkspaceCodingWriteNodeProof | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     binding_digest: str = Field(pattern=DIGEST_PATTERN)
 
     @model_validator(mode="after")
@@ -319,6 +334,25 @@ class BoundCapabilityInput(BaseModel):
         if any(item.task_id != self.task_id for item in self.dependency_result_refs):
             raise ValueError("Bound capability dependencies cross Task scope")
         proof = self.workspace_command_plan_step
+        write_proof = self.workspace_coding_write_node_proof
+        if write_proof is None:
+            if (
+                self.source_step_binding_id is None
+                or self.source_step_binding_digest is None
+                or self.source_offer_key is None
+            ):
+                raise ValueError("Bound capability input lost its source Offer step")
+        elif (
+            self.route_id != "workspace_coding_loop"
+            or self.source_step_binding_id is not None
+            or self.source_step_binding_digest is not None
+            or self.source_offer_key is not None
+            or write_proof.successor_task_id != self.task_id
+            or write_proof.plan_node_id != self.node_id
+            or write_proof.plan_node_spec_digest != self.node_spec_digest
+            or write_proof.capability != self.capability
+        ):
+            raise ValueError("Confirmed write proof changed from its capability input")
         if self.route_id == "workspace_command_profile":
             if not isinstance(self.arguments, WorkspaceCommandExecutorInput):
                 raise ValueError("Command capability input changed its argument Schema")
@@ -337,6 +371,8 @@ class BoundCapabilityInput(BaseModel):
         material = self.model_dump(mode="json", exclude={"binding_digest"})
         if proof is None:
             material.pop("workspace_command_plan_step", None)
+        if write_proof is None:
+            material.pop("workspace_coding_write_node_proof", None)
         if self.binding_digest != sha256_digest(material):
             raise ValueError("Bound capability input digest does not match")
         return self
@@ -355,7 +391,7 @@ class BoundCapabilityInput(BaseModel):
         recipe = node_binding.recipe
         if recipe is None:
             raise ValueError("Capability input has no model-planner source recipe")
-        values = {
+        values: dict[str, object] = {
             "schema_version": "deskpilot.bound-capability-input.v1",
             "task_id": node_binding.task_id,
             "node_id": node_binding.composite_node_id,
@@ -365,9 +401,6 @@ class BoundCapabilityInput(BaseModel):
             "effective_authority_digest": (node_binding.effective_authority.authority_digest),
             "runtime_eligibility_digest": (node_binding.runtime_eligibility.eligibility_digest),
             "capability": capability,
-            "source_step_binding_id": node_binding.step_binding_id,
-            "source_step_binding_digest": node_binding.step_binding_digest,
-            "source_offer_key": node_binding.offer_key,
             "route_id": recipe.route_id,
             "route_version": "2",
             "route_manifest_digest": recipe.route_manifest_digest,
@@ -377,8 +410,22 @@ class BoundCapabilityInput(BaseModel):
             "dependency_result_refs": dependency_result_refs,
             "consumed_result_refs": consumed_result_refs,
         }
+        if node_binding.step_binding_id is not None:
+            if node_binding.step_binding_digest is None or node_binding.offer_key is None:
+                raise ValueError("Capability source Offer step proof is incomplete")
+            values.update(
+                {
+                    "source_step_binding_id": node_binding.step_binding_id,
+                    "source_step_binding_digest": node_binding.step_binding_digest,
+                    "source_offer_key": node_binding.offer_key,
+                }
+            )
         if workspace_command_plan_step is not None:
             values["workspace_command_plan_step"] = workspace_command_plan_step
+        if node_binding.workspace_coding_write_node_proof is not None:
+            values["workspace_coding_write_node_proof"] = (
+                node_binding.workspace_coding_write_node_proof
+            )
         return cls.model_validate({**values, "binding_digest": sha256_digest(values)})
 
 
@@ -800,18 +847,23 @@ class CapabilityInputBindingCatalog:
             raise CapabilityInputProfileNotFoundError(
                 "Derived capability input has no server binding"
             )
+        write_proof = node_binding.workspace_coding_write_node_proof
         by_name = {item.parameter_name: item for item in node_binding.parameter_bindings}
         if len(by_name) != len(node_binding.parameter_bindings):
             raise CapabilityInputLineageRejectedError(
                 "Capability input repeats a persisted parameter proof"
             )
-        all_normalized = {
-            name: canonicalize_capability_parameter(
-                item.value,
-                enum_value=name in profile.enum_parameters,
-            )
-            for name, item in by_name.items()
-        }
+        all_normalized = (
+            dict(write_proof.parameters)
+            if write_proof is not None
+            else {
+                name: canonicalize_capability_parameter(
+                    item.value,
+                    enum_value=name in profile.enum_parameters,
+                )
+                for name, item in by_name.items()
+            }
+        )
         if profile.route_id not in {"workspace_command_profile", "workspace_coding_loop"} and set(
             all_normalized
         ) != set(profile.parameter_names):

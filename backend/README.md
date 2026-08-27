@@ -337,7 +337,9 @@ GET /api/v1/agents/{agent_id}/versions/{version}
 
 阶段 112 最终验证：后端 745 项，`733 passed + 12 skipped`；Ruff 全仓、严格 mypy 275 个生产源码、frozen `uv` 与 `pip check` 通过。Phase75 v16 仍为 11/11、false-success=0、unauthorized-effect=0，17 份 baseline SHA-256 前后不变；wheel Prompt 24/24。前端 22 文件 / 157 项、type-check/build 通过；Alembic 唯一 head `0054_task_loop_cycle_events`，SQLite current/upgrade/check、integrity/foreign-key 通过。专用测试库 PostgreSQL 11/11（含容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复。
 
-当前实现方向为阶段 116B Codex 类持久多 Agent 编码纵切。116A 已闭合服务器固定 `WorkspaceCommandPlan`。116B 现已走通 Python/Node 各 2～8 文件预编译图、Node 八文件逐 batch 恢复，以及受控 snapshot→持久 Explorer→文件集确认→Reader TaskLoop→零工具 Change Proposal→新确认→第三 Task 写 Plan。第十检查点只持久化后继 `workspace_coding_loop` Plan，并明确禁用 Workbench 自动启动；下一步将 `WorkspaceCodingWritePlanBinding` 作为现有 TaskLoop 的受信来源激活，复用 Patch/Test/一次 Repair/Git/Delivery。自由 Shell、依赖安装和自动 push 继续禁止，真实 cloud 115B/116C 仍受外部授权阻塞。详见根目录 [`项目进度.md`](../项目进度.md)、[`doc/116B-持久多Agent编码循环第十检查点.md`](../doc/116B-持久多Agent编码循环第十检查点.md)与 [`doc/111-117-通用多Agent与Codex纵切实施路线.md`](../doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+当前实现方向为阶段 116B Codex 类持久多 Agent 编码纵切。116A 已闭合服务器固定 `WorkspaceCommandPlan`。116B 现已走通 Python/Node 各 2～8 文件预编译图、Node 八文件逐 batch 恢复，以及受控 snapshot→持久 Explorer→文件集确认→Reader TaskLoop→零工具 Change Proposal→新确认→第三 Task 写 TaskLoop。第十一检查点将 `WorkspaceCodingWritePlanBinding` 作为 `confirmed_change_proposal` 第三受信来源接入唯一 TaskLoop，复用 Coordinator/Reader/Patch Planner/Patch/Test/一次 Repair/Git/Delivery，并在 Activation 与每次 claim 重验全链 proof。下一步转向隔离真实仓库的用户验收、重启和长时间 soak；自由 Shell、依赖安装和自动 push 继续禁止，真实 cloud 115B/116C 仍受外部授权阻塞。详见根目录 [`项目进度.md`](../项目进度.md)、[`doc/116B-持久多Agent编码循环第十一检查点.md`](../doc/116B-持久多Agent编码循环第十一检查点.md)与 [`doc/111-117-通用多Agent与Codex纵切实施路线.md`](../doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+
+阶段 116B 第十一检查点验证：默认后端实际收集 827 项，最终代码冻结后的单进程统一运行 `815 passed + 12 skipped`、失败/错误为 0；Ruff 全仓、strict mypy 305 个生产源码、lock/pip、wheel Prompt 33/33、SQLite/Alembic `0065_confirmed_change_task_loop`、Windows Evaluation v2、Phase75 v21 与前端 24 文件 / 165 项、type-check/build 通过。12 个 skip 为未配置的 PostgreSQL/RabbitMQ 外部 cohort；没有调用真实 cloud 模型或改变候选 disabled 状态。
 
 ## 测试
 

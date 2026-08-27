@@ -9,17 +9,20 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from deskpilot.core.canonical_json import sha256_digest
-from deskpilot.domain.agent_contracts import DIGEST_PATTERN, BoundAgentRef
+from deskpilot.domain.agent_contracts import DIGEST_PATTERN, AgentToolGrant, BoundAgentRef
 from deskpilot.domain.task_plans import (
     MESSAGE_ID_PATTERN,
     PLAN_ID_PATTERN,
     PLAN_NODE_ID_PATTERN,
     TASK_ID_PATTERN,
+    CapabilityRef,
+    DraftNodeKind,
     DraftPlan,
     ExecutablePlan,
     TaskContract,
 )
 from deskpilot.domain.workspace_coding_explorations import (
+    WORKSPACE_CODING_EXPLORATION_SNAPSHOT_ID_PATTERN,
     WORKSPACE_CODING_FILE_SET_BINDING_ID_PATTERN,
 )
 
@@ -27,6 +30,7 @@ WORKSPACE_CODING_CHANGE_RUN_BINDING_ID_PATTERN = r"^wcr_[0-9a-f]{64}$"
 WORKSPACE_CODING_CHANGE_PROPOSAL_ID_PATTERN = r"^wcp_[0-9a-f]{64}$"
 WORKSPACE_CODING_CHANGE_TURN_PROOF_ID_PATTERN = r"^wct_[0-9a-f]{64}$"
 WORKSPACE_CODING_WRITE_PLAN_BINDING_ID_PATTERN = r"^wcw_[0-9a-f]{64}$"
+WORKSPACE_CODING_WRITE_NODE_PROOF_ID_PATTERN = r"^wcn_[0-9a-f]{64}$"
 
 
 def _content_id(prefix: str, material: Any) -> str:
@@ -395,6 +399,95 @@ class WorkspaceCodingWritePlanBinding(BaseModel):
         return cls(**base, binding_digest=sha256_digest(base))
 
 
+class WorkspaceCodingWriteNodeProof(BaseModel):
+    """Exact fresh-confirmed write authority for one existing TaskLoop node."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-coding-write-node-proof.v1"] = (
+        "deskpilot.workspace-coding-write-node-proof.v1"
+    )
+    proof_id: str = Field(pattern=WORKSPACE_CODING_WRITE_NODE_PROOF_ID_PATTERN)
+    write_plan_binding_id: str = Field(pattern=WORKSPACE_CODING_WRITE_PLAN_BINDING_ID_PATTERN)
+    write_plan_binding_digest: str = Field(pattern=DIGEST_PATTERN)
+    proposal_id: str = Field(pattern=WORKSPACE_CODING_CHANGE_PROPOSAL_ID_PATTERN)
+    proposal_digest: str = Field(pattern=DIGEST_PATTERN)
+    proposal_decision_digest: str = Field(pattern=DIGEST_PATTERN)
+    file_set_binding_id: str = Field(pattern=WORKSPACE_CODING_FILE_SET_BINDING_ID_PATTERN)
+    file_set_binding_digest: str = Field(pattern=DIGEST_PATTERN)
+    snapshot_id: str = Field(pattern=WORKSPACE_CODING_EXPLORATION_SNAPSHOT_ID_PATTERN)
+    snapshot_digest: str = Field(pattern=DIGEST_PATTERN)
+    catalog_digest: str = Field(pattern=DIGEST_PATTERN)
+    project_path: str = Field(min_length=1, max_length=32_767)
+    ecosystem: Literal["python", "node"]
+    successor_task_id: str = Field(pattern=TASK_ID_PATTERN)
+    confirmation_message_id: str = Field(pattern=MESSAGE_ID_PATTERN)
+    confirmation_message_digest: str = Field(pattern=DIGEST_PATTERN)
+    recipe_digest: str = Field(pattern=DIGEST_PATTERN)
+    parameter_binding_digest: str = Field(pattern=DIGEST_PATTERN)
+    parameters: dict[str, str]
+    parameters_digest: str = Field(pattern=DIGEST_PATTERN)
+    changes_json_digest: str = Field(pattern=DIGEST_PATTERN)
+    plan_id: str = Field(pattern=PLAN_ID_PATTERN)
+    plan_manifest_digest: str = Field(pattern=DIGEST_PATTERN)
+    plan_node_id: str = Field(pattern=PLAN_NODE_ID_PATTERN)
+    plan_local_key: str = Field(min_length=1, max_length=64)
+    plan_node_spec_digest: str = Field(pattern=DIGEST_PATTERN)
+    node_kind: DraftNodeKind
+    bound_agent: BoundAgentRef | None = None
+    bound_tool: AgentToolGrant | None = None
+    capability: CapabilityRef
+    proof_digest: str = Field(pattern=DIGEST_PATTERN)
+
+    @model_validator(mode="after")
+    def scope_and_digest_match(self) -> Self:
+        changes_json = self.parameters.get("changes_json")
+        if (
+            self.parameters_digest
+            != sha256_digest({"parameters": dict(sorted(self.parameters.items()))})
+            or not isinstance(changes_json, str)
+            or self.changes_json_digest != sha256_digest({"changes_json": changes_json})
+            or self.parameters.get("project_path") != self.project_path
+            or self.parameters.get("test_kind") != self.ecosystem
+            or (
+                self.node_kind is DraftNodeKind.AGENT
+                and self.bound_agent is None
+            )
+            or (
+                self.node_kind is DraftNodeKind.CAPABILITY
+                and (self.bound_agent is not None or self.bound_tool is not None)
+            )
+            or self.node_kind not in {DraftNodeKind.AGENT, DraftNodeKind.CAPABILITY}
+        ):
+            raise ValueError("Confirmed write node authority changed")
+        values = self.model_dump(mode="json")
+        identity = {
+            key: value for key, value in values.items() if key not in {"proof_id", "proof_digest"}
+        }
+        if self.proof_id != _content_id("wcn", identity):
+            raise ValueError("Confirmed write node proof identity changed")
+        material = {key: value for key, value in values.items() if key != "proof_digest"}
+        if self.proof_digest != sha256_digest(material):
+            raise ValueError("Confirmed write node proof digest changed")
+        return self
+
+    @classmethod
+    def build(cls, **values: Any) -> Self:
+        base = {
+            "schema_version": "deskpilot.workspace-coding-write-node-proof.v1",
+            **values,
+        }
+        base["parameters_digest"] = sha256_digest(
+            {"parameters": dict(sorted(base["parameters"].items()))}
+        )
+        base["changes_json_digest"] = sha256_digest(
+            {"changes_json": base["parameters"]["changes_json"]}
+        )
+        proof_id = _content_id("wcn", base)
+        material = {**base, "proof_id": proof_id}
+        return cls(**material, proof_digest=sha256_digest(material))
+
+
 class WorkspaceCodingChangeWorkbenchRead(BaseModel):
     """Unified no-write proposal and confirmed successor Plan projection."""
 
@@ -491,5 +584,6 @@ __all__ = [
     "WorkspaceCodingChangeRunBinding",
     "WorkspaceCodingChangeTurnProof",
     "WorkspaceCodingChangeWorkbenchRead",
+    "WorkspaceCodingWriteNodeProof",
     "WorkspaceCodingWritePlanBinding",
 ]

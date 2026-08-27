@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0064_workspace_coding_change_proposals"
+CURRENT_REVISION = "0065_confirmed_change_task_loop"
 
 
 def _sync_url(path: Path) -> str:
@@ -1414,6 +1414,182 @@ def test_stage_116b_workspace_coding_change_proposal_migration_is_guarded(
     assert "workspace_coding_write_plan_bindings" not in tables
     command.upgrade(config, "head")
     command.check(config)
+
+
+def test_stage_116b_confirmed_change_task_loop_migration_is_guarded(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage-116b-confirmed-change-task-loop.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        execution_columns = {
+            item["name"] for item in inspector.get_columns("task_loop_executions")
+        }
+        node_binding_columns = {
+            item["name"]
+            for item in inspector.get_columns("model_planner_node_bindings")
+        }
+        execution_constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspector.get_check_constraints("task_loop_executions")
+        }
+        node_binding_constraints = {
+            item["name"]: str(item["sqltext"])
+            for item in inspector.get_check_constraints("model_planner_node_bindings")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {
+        "write_plan_binding_id",
+        "write_plan_binding_digest",
+    }.issubset(execution_columns)
+    assert {
+        "write_plan_binding_id",
+        "write_plan_binding_digest",
+        "workspace_coding_write_node_proof_manifest",
+        "workspace_coding_write_node_proof_digest",
+    }.issubset(node_binding_columns)
+    assert "confirmed_change_proposal" in execution_constraints[
+        "ck_task_loop_execution_source"
+    ]
+    assert "confirmed_change_proposal" in node_binding_constraints[
+        "ck_model_planner_node_source"
+    ]
+    assert revision == CURRENT_REVISION
+
+    command.downgrade(config, "0064_workspace_coding_change_proposals")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        execution_columns = {
+            item["name"] for item in inspector.get_columns("task_loop_executions")
+        }
+        node_binding_columns = {
+            item["name"]
+            for item in inspector.get_columns("model_planner_node_bindings")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert {
+        "write_plan_binding_id",
+        "write_plan_binding_digest",
+    }.isdisjoint(execution_columns)
+    assert {
+        "write_plan_binding_id",
+        "write_plan_binding_digest",
+        "workspace_coding_write_node_proof_manifest",
+        "workspace_coding_write_node_proof_digest",
+    }.isdisjoint(node_binding_columns)
+    assert revision == "0064_workspace_coding_change_proposals"
+
+    command.upgrade(config, "head")
+    engine = create_engine(_sync_url(database_path))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO workspace_coding_write_plan_bindings (
+                    binding_id, proposal_id, proposal_digest, successor_task_id,
+                    confirmation_message_id, confirmation_message_digest,
+                    route_id, route_version, recipe_digest,
+                    parameter_binding_digest, parameters_digest,
+                    contract_version, contract_digest, plan_generation,
+                    plan_id, plan_manifest_digest, change_count,
+                    manifest, binding_digest, created_at
+                ) VALUES (
+                    :binding_id, :proposal_id, :proposal_digest, :task_id,
+                    :message_id, :message_digest,
+                    'coding_task', '1.0.0', :recipe_digest,
+                    :parameter_digest, :parameters_digest,
+                    1, :contract_digest, 1,
+                    :plan_id, :plan_digest, 2,
+                    :manifest, :binding_digest, :created_at
+                )
+                """
+            ),
+            {
+                "binding_id": "wcp_" + "1" * 64,
+                "proposal_id": "wcp_" + "2" * 64,
+                "proposal_digest": "3" * 64,
+                "task_id": "tsk_" + "4" * 32,
+                "message_id": "msg_" + "5" * 32,
+                "message_digest": "6" * 64,
+                "recipe_digest": "7" * 64,
+                "parameter_digest": "8" * 64,
+                "parameters_digest": "9" * 64,
+                "contract_digest": "a" * 64,
+                "plan_id": "epl_" + "b" * 64,
+                "plan_digest": "c" * 64,
+                "manifest": "{}",
+                "binding_digest": "d" * 64,
+                "created_at": "2026-08-27 00:00:00+00:00",
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO task_loop_executions (
+                    execution_id, task_id, source_kind, loop_id, draft_id,
+                    source_binding_id, source_binding_digest,
+                    write_plan_binding_id, write_plan_binding_digest,
+                    plan_id, plan_generation, plan_manifest_digest, run_id,
+                    status, revision, event_count, latest_event_id,
+                    latest_event_digest, node_binding_count, binding_set_digest,
+                    manifest, execution_digest, created_at, updated_at
+                ) VALUES (
+                    :execution_id, :task_id, 'confirmed_change_proposal', NULL, NULL,
+                    NULL, NULL, :binding_id, :binding_digest,
+                    :plan_id, 1, :plan_digest, :run_id,
+                    'active', 1, 1, :event_id,
+                    :event_digest, 1, :binding_set_digest,
+                    :manifest, :execution_digest, :created_at, :created_at
+                )
+                """
+            ),
+            {
+                "execution_id": "tlx_" + "e" * 64,
+                "task_id": "tsk_" + "4" * 32,
+                "binding_id": "wcp_" + "1" * 64,
+                "binding_digest": "d" * 64,
+                "plan_id": "epl_" + "b" * 64,
+                "plan_digest": "c" * 64,
+                "run_id": "run_" + "f" * 64,
+                "event_id": "tle_" + "0" * 64,
+                "event_digest": "2" * 64,
+                "binding_set_digest": "3" * 64,
+                "manifest": "{}",
+                "execution_digest": "1" * 64,
+                "created_at": "2026-08-27 00:00:00+00:00",
+            },
+        )
+    engine.dispose()
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"DESKPILOT_DOWNGRADE_UNSAFE.*Restore the reviewed stage backup",
+    ):
+        command.downgrade(config, "0064_workspace_coding_change_proposals")
+
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+        persisted = connection.exec_driver_sql(
+            "SELECT source_kind FROM task_loop_executions"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == CURRENT_REVISION
+    assert persisted == "confirmed_change_proposal"
 
 
 @pytest.mark.asyncio

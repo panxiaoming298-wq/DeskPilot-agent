@@ -1054,10 +1054,16 @@ class TaskLoopExecutionRecord(Base):
         CheckConstraint(
             "(source_kind = 'model_planner' AND loop_id IS NOT NULL AND "
             "draft_id IS NOT NULL AND source_binding_id IS NULL AND "
-            "source_binding_digest IS NULL) OR "
+            "source_binding_digest IS NULL AND write_plan_binding_id IS NULL AND "
+            "write_plan_binding_digest IS NULL) OR "
             "(source_kind = 'confirmed_file_set' AND loop_id IS NULL AND "
             "draft_id IS NULL AND source_binding_id IS NOT NULL AND "
-            "source_binding_digest IS NOT NULL)",
+            "source_binding_digest IS NOT NULL AND write_plan_binding_id IS NULL AND "
+            "write_plan_binding_digest IS NULL) OR "
+            "(source_kind = 'confirmed_change_proposal' AND loop_id IS NULL AND "
+            "draft_id IS NULL AND source_binding_id IS NULL AND "
+            "source_binding_digest IS NULL AND write_plan_binding_id IS NOT NULL AND "
+            "write_plan_binding_digest IS NOT NULL)",
             name="ck_task_loop_execution_source",
         ),
         CheckConstraint(
@@ -1070,6 +1076,10 @@ class TaskLoopExecutionRecord(Base):
         UniqueConstraint(
             "source_binding_id",
             name="uq_task_loop_execution_source_binding",
+        ),
+        UniqueConstraint(
+            "write_plan_binding_id",
+            name="uq_task_loop_execution_write_plan_binding",
         ),
         UniqueConstraint("run_id", name="uq_task_loop_execution_run"),
         UniqueConstraint("execution_digest", name="uq_task_loop_execution_digest"),
@@ -1099,6 +1109,16 @@ class TaskLoopExecutionRecord(Base):
         nullable=True,
     )
     source_binding_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    write_plan_binding_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "workspace_coding_write_plan_bindings.binding_id",
+            name="fk_task_loop_execution_write_plan_binding",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
+    write_plan_binding_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
     plan_id: Mapped[str] = mapped_column(String(68))
     plan_generation: Mapped[int] = mapped_column(Integer)
@@ -1189,7 +1209,10 @@ class ModelPlannerNodeBindingRecord(Base):
             "recipe_digest IS NOT NULL AND policy_snapshot_digest IS NOT NULL AND "
             "source_binding_id IS NULL AND source_binding_digest IS NULL AND "
             "workspace_reader_node_proof_manifest IS NULL AND "
-            "workspace_reader_node_proof_digest IS NULL) OR "
+            "workspace_reader_node_proof_digest IS NULL AND "
+            "write_plan_binding_id IS NULL AND write_plan_binding_digest IS NULL AND "
+            "workspace_coding_write_node_proof_manifest IS NULL AND "
+            "workspace_coding_write_node_proof_digest IS NULL) OR "
             "(source_kind = 'confirmed_file_set' AND draft_id IS NULL AND "
             "step_binding_id IS NULL AND step_binding_digest IS NULL AND "
             "step_ordinal IS NULL AND offer_id IS NULL AND offer_key IS NULL AND "
@@ -1197,7 +1220,20 @@ class ModelPlannerNodeBindingRecord(Base):
             "policy_snapshot_digest IS NULL AND source_binding_id IS NOT NULL AND "
             "source_binding_digest IS NOT NULL AND "
             "workspace_reader_node_proof_manifest IS NOT NULL AND "
-            "workspace_reader_node_proof_digest IS NOT NULL)",
+            "workspace_reader_node_proof_digest IS NOT NULL AND "
+            "write_plan_binding_id IS NULL AND write_plan_binding_digest IS NULL AND "
+            "workspace_coding_write_node_proof_manifest IS NULL AND "
+            "workspace_coding_write_node_proof_digest IS NULL) OR "
+            "(source_kind = 'confirmed_change_proposal' AND draft_id IS NULL AND "
+            "step_binding_id IS NULL AND step_binding_digest IS NULL AND "
+            "step_ordinal IS NULL AND offer_id IS NULL AND offer_key IS NULL AND "
+            "offer_digest IS NULL AND recipe_manifest IS NOT NULL AND recipe_digest IS NOT NULL "
+            "AND policy_snapshot_digest IS NULL AND source_binding_id IS NULL AND "
+            "source_binding_digest IS NULL AND workspace_reader_node_proof_manifest IS NULL "
+            "AND workspace_reader_node_proof_digest IS NULL AND "
+            "write_plan_binding_id IS NOT NULL AND write_plan_binding_digest IS NOT NULL AND "
+            "workspace_coding_write_node_proof_manifest IS NOT NULL AND "
+            "workspace_coding_write_node_proof_digest IS NOT NULL)",
             name="ck_model_planner_node_source",
         ),
         UniqueConstraint(
@@ -1266,6 +1302,23 @@ class ModelPlannerNodeBindingRecord(Base):
         nullable=True,
     )
     workspace_reader_node_proof_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    write_plan_binding_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "workspace_coding_write_plan_bindings.binding_id",
+            name="fk_model_planner_node_write_plan_binding",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    write_plan_binding_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    workspace_coding_write_node_proof_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True),
+        nullable=True,
+    )
+    workspace_coding_write_node_proof_digest: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
     )

@@ -32,6 +32,11 @@ from deskpilot.application.turn_planner_runtime import (
     TurnPlannerRuntime,
     TurnPlannerRuntimeError,
 )
+from deskpilot.application.workspace_coding_change_runtime import (
+    WorkspaceCodingChangeRuntime,
+    WorkspaceCodingChangeRuntimeError,
+    WorkspaceCodingWriteActivationBundle,
+)
 from deskpilot.application.workspace_coding_exploration_binder import (
     WorkspaceCodingExplorationBinder,
     WorkspaceCodingExplorationBindingError,
@@ -72,6 +77,7 @@ from deskpilot.domain.task_plans import DraftNodeKind, ExecutablePlan, TaskContr
 from deskpilot.domain.workspace_coding_amendments import (
     WorkspaceCodingAmendmentBinding,
 )
+from deskpilot.domain.workspace_coding_changes import WorkspaceCodingWritePlanBinding
 from deskpilot.domain.workspace_coding_explorations import (
     WorkspaceCodingFileSetPlanBinding,
 )
@@ -103,6 +109,7 @@ from deskpilot.infrastructure.models import (
     WorkspaceCodingAmendmentBindingRecord,
     WorkspaceCodingDeliveryRecord,
     WorkspaceCodingFileSetPlanBindingRecord,
+    WorkspaceCodingWritePlanBindingRecord,
 )
 
 
@@ -140,6 +147,7 @@ class TaskLoopActivationRuntime:
         *,
         command_plans: WorkspaceCommandPlanBinder | None = None,
         workspace_coding_explorations: WorkspaceCodingExplorationBinder | None = None,
+        workspace_coding_changes: WorkspaceCodingChangeRuntime | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._database = database
@@ -150,6 +158,7 @@ class TaskLoopActivationRuntime:
         self._node_binder = node_binder
         self._command_plans = command_plans
         self._workspace_coding_explorations = workspace_coding_explorations
+        self._workspace_coding_changes = workspace_coding_changes
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def activate(self, task_id: str) -> TaskLoopExecution:
@@ -410,6 +419,130 @@ class TaskLoopActivationRuntime:
         except AgentRuntimeError as error:
             raise TaskLoopActivationProofRejectedError(
                 "Confirmed Reader Run activation was rejected"
+            ) from error
+
+    async def activate_confirmed_change_proposal(self, task_id: str) -> TaskLoopExecution:
+        """Activate a fresh-confirmed coding Plan in the existing TaskLoop FSM."""
+
+        bundle = await self._required_confirmed_write_bundle(task_id)
+        try:
+            bindings = self._node_binder.bind_confirmed_write_plan(bundle)
+            current = await self._required_confirmed_write_bundle(task_id)
+            if current != bundle:
+                raise TaskLoopActivationProofRejectedError(
+                    "Confirmed change Proposal authority changed before activation"
+                )
+            bindings = self._node_binder.bind_confirmed_write_plan(current)
+        except TaskLoopActivationError:
+            raise
+        except (
+            WorkspaceCodingChangeRuntimeError,
+            ModelPlannerNodeBindingError,
+            ValidationError,
+            ValueError,
+        ) as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Confirmed change Proposal activation preflight was rejected"
+            ) from error
+
+        confirmed = current.binding
+        try:
+            async with self._database.session() as session, session.begin():
+                source_record = await session.scalar(
+                    select(WorkspaceCodingWritePlanBindingRecord)
+                    .where(
+                        WorkspaceCodingWritePlanBindingRecord.binding_id
+                        == confirmed.binding_id
+                    )
+                    .with_for_update()
+                )
+                existing = await session.scalar(
+                    select(TaskLoopExecutionRecord)
+                    .where(TaskLoopExecutionRecord.task_id == task_id)
+                    .with_for_update()
+                )
+                if source_record is None:
+                    raise TaskLoopActivationNotFoundError(
+                        "Confirmed coding write Plan binding disappeared"
+                    )
+                try:
+                    locked_binding = WorkspaceCodingWritePlanBinding.model_validate(
+                        source_record.manifest
+                    )
+                except ValidationError as error:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Confirmed coding write Plan binding Schema changed"
+                    ) from error
+                if (
+                    locked_binding != confirmed
+                    or source_record.binding_digest != confirmed.binding_digest
+                    or source_record.successor_task_id != task_id
+                    or source_record.plan_id != confirmed.expected_plan.plan_id
+                    or source_record.plan_manifest_digest
+                    != confirmed.expected_plan_manifest_digest
+                ):
+                    raise TaskLoopActivationProofRejectedError(
+                        "Locked confirmed coding write authority changed"
+                    )
+                if existing is not None:
+                    return await self._read_exact(
+                        session,
+                        existing,
+                        draft=None,
+                        confirmed=None,
+                        confirmed_write=current,
+                        expected_bindings=bindings,
+                    )
+                run = await self._execution.start_exact_in_session(
+                    session,
+                    confirmed.expected_plan,
+                )
+                created_at = self._now()
+                execution, event = TaskLoopExecution.activate_confirmed_change_proposal(
+                    write_plan_binding_id=confirmed.binding_id,
+                    write_plan_binding_digest=confirmed.binding_digest,
+                    task_id=task_id,
+                    plan_id=confirmed.expected_plan.plan_id,
+                    plan_manifest_digest=confirmed.expected_plan_manifest_digest,
+                    run_id=run.run_id,
+                    bindings=bindings,
+                    created_at=created_at,
+                )
+                session.add(self._execution_record(execution))
+                await session.flush()
+                session.add_all(
+                    self._binding_record(item, execution.execution_id, created_at)
+                    for item in bindings
+                )
+                session.add(self._event_record(event))
+                await session.flush()
+                return await self._read_exact(
+                    session,
+                    await self._required_execution_record(
+                        session,
+                        execution.execution_id,
+                    ),
+                    draft=None,
+                    confirmed=None,
+                    confirmed_write=current,
+                    expected_bindings=bindings,
+                )
+        except IntegrityError:
+            read = await self.get(task_id)
+            if read is None or read.execution is None:
+                raise TaskLoopActivationConflictError(
+                    "Concurrent confirmed coding activation did not converge"
+                ) from None
+            if read.execution.write_plan_binding_id != confirmed.binding_id:
+                raise TaskLoopActivationConflictError(
+                    "Concurrent activation selected another write Plan binding"
+                ) from None
+            return read.execution
+        except TaskLoopActivationError:
+            raise
+        except AgentRuntimeError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Confirmed coding Run activation was rejected"
             ) from error
 
     async def cancel_for_amendment(self, task_id: str) -> TaskLoopExecutionRead | None:
@@ -795,10 +928,13 @@ class TaskLoopActivationRuntime:
                 "Persisted Task Loop proof was rejected during execution recovery"
             ) from error
         confirmed: WorkspaceCodingReaderActivationBundle | None = None
+        confirmed_write: WorkspaceCodingWriteActivationBundle | None = None
         if bundle is None:
             confirmed = await self._confirmed_reader_bundle(task_id)
             if confirmed is None:
-                return None
+                confirmed_write = await self._confirmed_write_bundle(task_id)
+                if confirmed_write is None:
+                    return None
         async with self._database.session() as session:
             records = tuple(
                 (
@@ -822,6 +958,23 @@ class TaskLoopActivationRuntime:
                     loop=None,
                     draft=None,
                     confirmed=confirmed,
+                    confirmed_write=None,
+                    command_plans=(),
+                )
+            if confirmed_write is not None:
+                if not records:
+                    return self._pre_confirmed_write_read(confirmed_write)
+                if len(records) != 1:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Confirmed coding Task has more than one execution"
+                    )
+                return await self._read_internal(
+                    session,
+                    records[0],
+                    loop=None,
+                    draft=None,
+                    confirmed=None,
+                    confirmed_write=confirmed_write,
                     command_plans=(),
                 )
             assert bundle is not None
@@ -847,6 +1000,7 @@ class TaskLoopActivationRuntime:
                 loop=bundle.loop,
                 draft=bundle.draft,
                 confirmed=None,
+                confirmed_write=None,
                 command_plans=bundle.command_plans,
             )
 
@@ -921,11 +1075,44 @@ class TaskLoopActivationRuntime:
                     )
                 ).all()
             )
+            write_candidates = tuple(
+                (
+                    await session.execute(
+                        select(
+                            WorkspaceCodingWritePlanBindingRecord.successor_task_id,
+                            WorkspaceCodingWritePlanBindingRecord.created_at,
+                        )
+                        .outerjoin(
+                            TaskLoopExecutionRecord,
+                            TaskLoopExecutionRecord.write_plan_binding_id
+                            == WorkspaceCodingWritePlanBindingRecord.binding_id,
+                        )
+                        .where(
+                            or_(
+                                TaskLoopExecutionRecord.execution_id.is_(None),
+                                TaskLoopExecutionRecord.status.in_(
+                                    (
+                                        "active",
+                                        "paused",
+                                        "awaiting_user",
+                                        "repairing",
+                                    )
+                                ),
+                            )
+                        )
+                        .order_by(
+                            WorkspaceCodingWritePlanBindingRecord.created_at,
+                            WorkspaceCodingWritePlanBindingRecord.successor_task_id,
+                        )
+                        .limit(limit)
+                    )
+                ).all()
+            )
         candidates = tuple(
             dict.fromkeys(
                 task_id
                 for task_id, _created_at in sorted(
-                    (*model_candidates, *confirmed_candidates),
+                    (*model_candidates, *confirmed_candidates, *write_candidates),
                     key=lambda item: (item[1], item[0]),
                 )
             )
@@ -963,6 +1150,30 @@ class TaskLoopActivationRuntime:
         bundle = await self._confirmed_reader_bundle(task_id)
         if bundle is None:
             raise TaskLoopActivationNotFoundError("Task has no confirmed Reader Plan")
+        return bundle
+
+    async def _confirmed_write_bundle(
+        self,
+        task_id: str,
+    ) -> WorkspaceCodingWriteActivationBundle | None:
+        if self._workspace_coding_changes is None:
+            return None
+        try:
+            return await self._workspace_coding_changes.get_write_activation_bundle(task_id)
+        except WorkspaceCodingChangeRuntimeError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Confirmed change Proposal source proof was rejected"
+            ) from error
+
+    async def _required_confirmed_write_bundle(
+        self,
+        task_id: str,
+    ) -> WorkspaceCodingWriteActivationBundle:
+        bundle = await self._confirmed_write_bundle(task_id)
+        if bundle is None:
+            raise TaskLoopActivationNotFoundError(
+                "Task has no confirmed coding write Plan"
+            )
         return bundle
 
     def _pre_execution_read(
@@ -1067,6 +1278,59 @@ class TaskLoopActivationRuntime:
         )
 
     @staticmethod
+    def _pre_confirmed_write_read(
+        bundle: WorkspaceCodingWriteActivationBundle,
+    ) -> TaskLoopExecutionRead:
+        binding = bundle.binding
+        nodes = tuple(
+            TaskLoopExecutionNodeRead.build(
+                node_id=node.node_id,
+                local_key=node.local_key,
+                kind=node.kind,
+                status="ready" if not node.depends_on else "pending",
+                depends_on=node.depends_on,
+                verified_dependency_node_ids=(),
+                dependency_count=len(node.depends_on),
+                verified_dependency_count=0,
+                dependencies_verified=not node.depends_on,
+                attempt_count=0,
+                max_attempts=node.budget.retries + 1,
+                candidate_present=False,
+                verified_result_present=False,
+                created_at=binding.created_at,
+                updated_at=binding.created_at,
+            )
+            for node in sorted(
+                binding.expected_plan.nodes,
+                key=lambda item: item.local_key,
+            )
+        )
+        return TaskLoopExecutionRead.build(
+            task_id=binding.successor_task_id,
+            source_kind="confirmed_change_proposal",
+            loop_id=None,
+            source_binding_id=None,
+            source_binding_digest=None,
+            write_plan_binding_id=binding.binding_id,
+            write_plan_binding_digest=binding.binding_digest,
+            loop_status="planned",
+            phase="plan",
+            loop_revision=1,
+            loop_event_count=1,
+            loop_progress_digest=sha256_digest(
+                {
+                    "source_kind": "confirmed_change_proposal",
+                    "write_plan_binding_id": binding.binding_id,
+                    "write_plan_binding_digest": binding.binding_digest,
+                }
+            ),
+            execution=None,
+            nodes=nodes,
+            recoverable=True,
+            created_at=binding.created_at,
+            updated_at=binding.created_at,
+        )
+    @staticmethod
     def _command_node_projection(
         command_plans: tuple[WorkspaceCommandPlanBinding, ...],
     ) -> dict[str, dict[str, object]]:
@@ -1100,21 +1364,33 @@ class TaskLoopActivationRuntime:
         loop: TaskLoop | None,
         draft: ModelPlannerDraft | None,
         confirmed: WorkspaceCodingReaderActivationBundle | None,
+        confirmed_write: WorkspaceCodingWriteActivationBundle | None,
         command_plans: tuple[WorkspaceCommandPlanBinding, ...],
     ) -> TaskLoopExecutionRead:
-        if (loop is None or draft is None) is (confirmed is None):
+        source_count = sum(
+            (
+                loop is not None and draft is not None,
+                confirmed is not None,
+                confirmed_write is not None,
+            )
+        )
+        if source_count != 1:
             raise TaskLoopActivationProofRejectedError(
                 "Task Loop execution read has no unique source kind"
             )
         confirmed_binding = confirmed.binding if confirmed is not None else None
+        write_binding = confirmed_write.binding if confirmed_write is not None else None
         execution = await self._read_exact(
             session,
             record,
             draft=draft,
             confirmed=confirmed,
+            confirmed_write=confirmed_write,
             expected_bindings=(
                 self._node_binder.bind_confirmed_readers(confirmed)
                 if confirmed is not None
+                else self._node_binder.bind_confirmed_write_plan(confirmed_write)
+                if confirmed_write is not None
                 else None
             ),
         )
@@ -1455,19 +1731,30 @@ class TaskLoopActivationRuntime:
             source_updated_at = loop.updated_at
             source_progress_digest = loop.progress_digest
         else:
-            if confirmed_binding is None:
-                raise TaskLoopActivationProofRejectedError(
-                    "Confirmed Reader execution lost its file-set binding"
+            if confirmed_binding is not None:
+                source_created_at = confirmed_binding.created_at
+                source_updated_at = confirmed_binding.created_at
+                source_progress_digest = sha256_digest(
+                    {
+                        "source_kind": "confirmed_file_set",
+                        "source_binding_id": confirmed_binding.binding_id,
+                        "source_binding_digest": confirmed_binding.binding_digest,
+                    }
                 )
-            source_created_at = confirmed_binding.created_at
-            source_updated_at = confirmed_binding.created_at
-            source_progress_digest = sha256_digest(
-                {
-                    "source_kind": "confirmed_file_set",
-                    "source_binding_id": confirmed_binding.binding_id,
-                    "source_binding_digest": confirmed_binding.binding_digest,
-                }
-            )
+            elif write_binding is not None:
+                source_created_at = write_binding.created_at
+                source_updated_at = write_binding.created_at
+                source_progress_digest = sha256_digest(
+                    {
+                        "source_kind": "confirmed_change_proposal",
+                        "write_plan_binding_id": write_binding.binding_id,
+                        "write_plan_binding_digest": write_binding.binding_digest,
+                    }
+                )
+            else:
+                raise TaskLoopActivationProofRejectedError(
+                    "Confirmed execution lost its source binding"
+                )
         updated_at = max(
             source_updated_at,
             execution.updated_at,
@@ -1546,6 +1833,8 @@ class TaskLoopActivationRuntime:
             loop_id=execution.loop_id,
             source_binding_id=execution.source_binding_id,
             source_binding_digest=execution.source_binding_digest,
+            write_plan_binding_id=execution.write_plan_binding_id,
+            write_plan_binding_digest=execution.write_plan_binding_digest,
             loop_status=loop.status if loop is not None else "planned",
             phase=phase,
             loop_revision=loop.revision if loop is not None else 1,
@@ -1867,7 +2156,8 @@ class TaskLoopActivationRuntime:
         *,
         draft: ModelPlannerDraft | None,
         confirmed: WorkspaceCodingReaderActivationBundle | None,
-        expected_bindings: tuple[ModelPlannerNodeBinding, ...] | None,
+        confirmed_write: WorkspaceCodingWriteActivationBundle | None = None,
+        expected_bindings: tuple[ModelPlannerNodeBinding, ...] | None = None,
     ) -> TaskLoopExecution:
         try:
             execution = TaskLoopExecution.model_validate(record.manifest)
@@ -1883,6 +2173,8 @@ class TaskLoopActivationRuntime:
             "draft_id",
             "source_binding_id",
             "source_binding_digest",
+            "write_plan_binding_id",
+            "write_plan_binding_digest",
             "task_id",
             "plan_id",
             "plan_generation",
@@ -1902,7 +2194,14 @@ class TaskLoopActivationRuntime:
                 raise TaskLoopActivationProofRejectedError(
                     "Task Loop execution columns diverge from its manifest"
                 )
-        if (draft is None) is (confirmed is None):
+        source_count = sum(
+            (
+                draft is not None,
+                confirmed is not None,
+                confirmed_write is not None,
+            )
+        )
+        if source_count != 1:
             raise TaskLoopActivationProofRejectedError(
                 "Task Loop execution has no unique sealed source"
             )
@@ -1927,6 +2226,20 @@ class TaskLoopActivationRuntime:
         ):
             raise TaskLoopActivationProofRejectedError(
                 "Task Loop execution scope differs from the confirmed Reader Plan"
+            )
+        if confirmed_write is not None and (
+            self._aware(record.created_at) != execution.created_at
+            or self._aware(record.updated_at) != execution.updated_at
+            or execution.source_kind != "confirmed_change_proposal"
+            or execution.write_plan_binding_id != confirmed_write.binding.binding_id
+            or execution.write_plan_binding_digest
+            != confirmed_write.binding.binding_digest
+            or execution.plan_id != confirmed_write.binding.expected_plan.plan_id
+            or execution.plan_manifest_digest
+            != confirmed_write.binding.expected_plan_manifest_digest
+        ):
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution scope differs from the confirmed coding write Plan"
             )
         events = tuple(
             (
@@ -2173,6 +2486,8 @@ class TaskLoopActivationRuntime:
             draft_id=execution.draft_id,
             source_binding_id=execution.source_binding_id,
             source_binding_digest=execution.source_binding_digest,
+            write_plan_binding_id=execution.write_plan_binding_id,
+            write_plan_binding_digest=execution.write_plan_binding_digest,
             task_id=execution.task_id,
             plan_id=execution.plan_id,
             plan_generation=execution.plan_generation,
@@ -2370,6 +2685,26 @@ class TaskLoopActivationRuntime:
                 if binding.workspace_reader_node_proof is not None
                 else None
             ),
+            write_plan_binding_id=(
+                binding.workspace_coding_write_node_proof.write_plan_binding_id
+                if binding.workspace_coding_write_node_proof is not None
+                else None
+            ),
+            write_plan_binding_digest=(
+                binding.workspace_coding_write_node_proof.write_plan_binding_digest
+                if binding.workspace_coding_write_node_proof is not None
+                else None
+            ),
+            workspace_coding_write_node_proof_manifest=(
+                binding.workspace_coding_write_node_proof.model_dump(mode="json")
+                if binding.workspace_coding_write_node_proof is not None
+                else None
+            ),
+            workspace_coding_write_node_proof_digest=(
+                binding.workspace_coding_write_node_proof.proof_digest
+                if binding.workspace_coding_write_node_proof is not None
+                else None
+            ),
             source_contract_digest=binding.source_contract_digest,
             source_plan_id=binding.source_plan_id,
             source_plan_manifest_digest=binding.source_plan_manifest_digest,
@@ -2466,6 +2801,10 @@ class TaskLoopActivationRuntime:
             "source_binding_digest",
             "workspace_reader_node_proof_manifest",
             "workspace_reader_node_proof_digest",
+            "write_plan_binding_id",
+            "write_plan_binding_digest",
+            "workspace_coding_write_node_proof_manifest",
+            "workspace_coding_write_node_proof_digest",
             "source_contract_digest",
             "source_plan_id",
             "source_plan_manifest_digest",

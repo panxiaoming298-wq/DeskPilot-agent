@@ -32,6 +32,11 @@ from deskpilot.application.capability_input_binding_catalog import (
     CapabilityInputBindingCatalog,
     ResolvedVerifiedCapabilityResult,
 )
+from deskpilot.application.workspace_coding_change_runtime import (
+    WorkspaceCodingChangeRuntime,
+    WorkspaceCodingChangeRuntimeError,
+    WorkspaceCodingWriteActivationBundle,
+)
 from deskpilot.application.workspace_command_plan_binder import (
     WorkspaceCommandPlanBinder,
     WorkspaceCommandPlanBindingError,
@@ -193,6 +198,7 @@ class CapabilityExecutionRuntime:
         engine: CapabilityExecutionEnginePort,
         *,
         command_plans: WorkspaceCommandPlanBinder | None = None,
+        workspace_coding_changes: WorkspaceCodingChangeRuntime | None = None,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self._database = database
@@ -200,6 +206,7 @@ class CapabilityExecutionRuntime:
         self._executors = executors
         self._engine = engine
         self._command_plans = command_plans
+        self._workspace_coding_changes = workspace_coding_changes
         self._clock = clock
 
     async def run_once(
@@ -216,9 +223,11 @@ class CapabilityExecutionRuntime:
         if not 5 <= lease_seconds <= 600:
             raise ValueError("Capability lease must be between 5 and 600 seconds")
         try:
+            write_bundle = await self._current_write_bundle(task_id)
             work = await self._claim_work(
                 task_id,
                 owner_id,
+                write_bundle=write_bundle,
                 lease_seconds=lease_seconds,
             )
             if work is None:
@@ -288,6 +297,7 @@ class CapabilityExecutionRuntime:
         """Reconcile expired capability claims before the pure reducer snapshots them."""
 
         now = self._now()
+        write_bundle = await self._current_write_bundle(task_id)
         async with self._database.session() as session, session.begin():
             execution_records = tuple(
                 (
@@ -306,6 +316,7 @@ class CapabilityExecutionRuntime:
                 )
             execution_record = execution_records[0]
             execution = self._execution_from_record(execution_record)
+            self._assert_current_write_source(execution, write_bundle)
             if execution.status != "active":
                 return
             plan = await self._load_plan(session, execution)
@@ -321,12 +332,14 @@ class CapabilityExecutionRuntime:
         task_id: str,
         owner_id: str,
         *,
+        write_bundle: WorkspaceCodingWriteActivationBundle | None,
         lease_seconds: int,
     ) -> _CapabilityWork | None:
         now = self._now()
         async with self._database.session() as session, session.begin():
             execution_record = await self._execution_record_for_task(session, task_id)
             execution = self._execution_from_record(execution_record)
+            self._assert_current_write_source(execution, write_bundle)
             if execution.status != "active":
                 return None
             run = await self._locked_run(session, execution)
@@ -1601,6 +1614,41 @@ class CapabilityExecutionRuntime:
             )
         return records[0]
 
+    async def _current_write_bundle(
+        self,
+        task_id: str,
+    ) -> WorkspaceCodingWriteActivationBundle | None:
+        if self._workspace_coding_changes is None:
+            return None
+        try:
+            return await self._workspace_coding_changes.get_write_activation_bundle(task_id)
+        except WorkspaceCodingChangeRuntimeError as error:
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Confirmed coding write authority changed before capability claim"
+            ) from error
+
+    @staticmethod
+    def _assert_current_write_source(
+        execution: TaskLoopExecution,
+        bundle: WorkspaceCodingWriteActivationBundle | None,
+    ) -> None:
+        if execution.source_kind == "confirmed_change_proposal":
+            if (
+                bundle is None
+                or execution.write_plan_binding_id != bundle.binding.binding_id
+                or execution.write_plan_binding_digest != bundle.binding.binding_digest
+                or execution.plan_id != bundle.binding.expected_plan.plan_id
+                or execution.plan_manifest_digest
+                != bundle.binding.expected_plan_manifest_digest
+            ):
+                raise CapabilityExecutionRuntimeProofRejectedError(
+                    "Capability claim lost its current confirmed coding source"
+                )
+        elif bundle is not None:
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Confirmed coding write binding crossed another execution source"
+            )
+
     async def _locked_run(
         self,
         session: AsyncSession,
@@ -2128,8 +2176,13 @@ class CapabilityExecutionRuntime:
             ) from error
         direct_fields = (
             "execution_id",
+            "source_kind",
             "loop_id",
             "draft_id",
+            "source_binding_id",
+            "source_binding_digest",
+            "write_plan_binding_id",
+            "write_plan_binding_digest",
             "task_id",
             "plan_id",
             "plan_generation",
@@ -2167,6 +2220,7 @@ class CapabilityExecutionRuntime:
             ) from error
         direct_fields = (
             "node_binding_id",
+            "source_kind",
             "task_id",
             "user_message_id",
             "draft_id",
@@ -2200,6 +2254,54 @@ class CapabilityExecutionRuntime:
             any(getattr(record, field) != getattr(binding, field) for field in direct_fields)
             or record.recipe_manifest != recipe.model_dump(mode="json")
             or record.recipe_digest != recipe.route_manifest_digest
+            or record.source_binding_id
+            != (
+                binding.workspace_reader_node_proof.file_set_binding_id
+                if binding.workspace_reader_node_proof is not None
+                else None
+            )
+            or record.source_binding_digest
+            != (
+                binding.workspace_reader_node_proof.file_set_binding_digest
+                if binding.workspace_reader_node_proof is not None
+                else None
+            )
+            or record.workspace_reader_node_proof_manifest
+            != (
+                binding.workspace_reader_node_proof.model_dump(mode="json")
+                if binding.workspace_reader_node_proof is not None
+                else None
+            )
+            or record.workspace_reader_node_proof_digest
+            != (
+                binding.workspace_reader_node_proof.proof_digest
+                if binding.workspace_reader_node_proof is not None
+                else None
+            )
+            or record.write_plan_binding_id
+            != (
+                binding.workspace_coding_write_node_proof.write_plan_binding_id
+                if binding.workspace_coding_write_node_proof is not None
+                else None
+            )
+            or record.write_plan_binding_digest
+            != (
+                binding.workspace_coding_write_node_proof.write_plan_binding_digest
+                if binding.workspace_coding_write_node_proof is not None
+                else None
+            )
+            or record.workspace_coding_write_node_proof_manifest
+            != (
+                binding.workspace_coding_write_node_proof.model_dump(mode="json")
+                if binding.workspace_coding_write_node_proof is not None
+                else None
+            )
+            or record.workspace_coding_write_node_proof_digest
+            != (
+                binding.workspace_coding_write_node_proof.proof_digest
+                if binding.workspace_coding_write_node_proof is not None
+                else None
+            )
             or record.mapping_manifest != binding.mapping.model_dump(mode="json")
             or record.mapping_digest != binding.mapping.mapping_digest
             or record.parameter_bindings_manifest

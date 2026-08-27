@@ -40,6 +40,7 @@ from deskpilot.domain.task_plans import (
     ExecutablePlanNode,
     TaskContract,
 )
+from deskpilot.domain.workspace_coding_changes import WorkspaceCodingWriteNodeProof
 from deskpilot.domain.workspace_coding_explorations import WorkspaceCodingReaderNodeProof
 from deskpilot.domain.workspace_files import WorkspaceFileRead
 from deskpilot.infrastructure.models import (
@@ -86,6 +87,7 @@ class AgentVerifiedResultPlanProof:
     invocation: AgentInvocationRecord
     result: AgentResultRecord
     workspace_reader_node_proof: WorkspaceCodingReaderNodeProof | None = None
+    workspace_coding_write_node_proof: WorkspaceCodingWriteNodeProof | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,11 +241,18 @@ class AgentVerifiedResultBridge:
             ) from error
         cls._assert_agent_result_record(plan_proof, result)
         reader_node_proof = plan_proof.workspace_reader_node_proof
+        write_node_proof = plan_proof.workspace_coding_write_node_proof
         if reader_node_proof is not None:
             bound_path = reader_node_proof.workspace_relative_path
             source_binding_digest = reader_node_proof.proof_digest
             source_binding_material = {
                 "source_binding_digest": source_binding_digest,
+            }
+        elif write_node_proof is not None:
+            bound_path = cls._proof_parameter(plan_proof, source_parameter_name)
+            source_binding_digest = write_node_proof.proof_digest
+            source_binding_material = {
+                "workspace_coding_write_node_proof_digest": source_binding_digest,
             }
         else:
             if plan_proof.step_binding is None:
@@ -335,7 +344,7 @@ class AgentVerifiedResultBridge:
         cls._assert_agent_result_record(plan_proof, result)
         turn = verification_proof.model_turn
         decision = verification_proof.decision
-        bound_path = cls._parameter(plan_proof.step_binding, source_parameter_name)
+        bound_path = cls._proof_parameter(plan_proof, source_parameter_name)
         change = proposal.changes[0] if len(proposal.changes) == 1 else None
         decision_material = {
             "turn_id": turn.turn_id,
@@ -378,7 +387,7 @@ class AgentVerifiedResultBridge:
         verification_digest = sha256_digest(
             {
                 "schema_version": "deskpilot.workspace-patch-planner-verification-proof.v1",
-                "step_binding_digest": cls._required_step(plan_proof).step_binding_digest,
+                **cls._verification_source_binding(plan_proof),
                 "plan_manifest_digest": plan_proof.composite_plan.plan_manifest_digest,
                 "node_spec_digest": plan_proof.node.node_spec_digest,
                 "invocation_id": plan_proof.invocation.invocation_id,
@@ -490,7 +499,7 @@ class AgentVerifiedResultBridge:
                     if bounded
                     else "deskpilot.workspace-coding-coordinator-verification-proof.v1"
                 ),
-                "step_binding_digest": cls._required_step(plan_proof).step_binding_digest,
+                **cls._verification_source_binding(plan_proof),
                 "plan_manifest_digest": plan_proof.composite_plan.plan_manifest_digest,
                 "node_spec_digest": plan_proof.node.node_spec_digest,
                 "invocation_id": plan_proof.invocation.invocation_id,
@@ -529,6 +538,15 @@ class AgentVerifiedResultBridge:
     ) -> _ResolvedPlanProof:
         if proof.workspace_reader_node_proof is not None:
             return cls._resolve_confirmed_reader_proof(
+                proof,
+                expected_route_id=expected_route_id,
+                expected_source_local_key=expected_source_local_key,
+                expected_agent_id=expected_agent_id,
+                expected_capability_id=expected_capability_id,
+                allow_pending_node_transition=allow_pending_node_transition,
+            )
+        if proof.workspace_coding_write_node_proof is not None:
+            return cls._resolve_confirmed_write_proof(
                 proof,
                 expected_route_id=expected_route_id,
                 expected_source_local_key=expected_source_local_key,
@@ -728,6 +746,107 @@ class AgentVerifiedResultBridge:
             capability=reader.capability,
         )
 
+    @classmethod
+    def _resolve_confirmed_write_proof(
+        cls,
+        proof: AgentVerifiedResultPlanProof,
+        *,
+        expected_route_id: str,
+        expected_source_local_key: str,
+        expected_agent_id: str,
+        expected_capability_id: str,
+        allow_pending_node_transition: bool,
+    ) -> _ResolvedPlanProof:
+        write = proof.workspace_coding_write_node_proof
+        if (
+            write is None
+            or proof.step_binding is not None
+            or proof.workspace_reader_node_proof is not None
+        ):
+            raise AgentVerifiedResultSourceBindingError(
+                "Confirmed write source proof shape changed"
+            )
+        source_plan = proof.source_plan
+        composite_plan = proof.composite_plan
+        run = proof.run
+        node = proof.node
+        invocation = proof.invocation
+        if (
+            expected_route_id != "workspace_coding_loop"
+            or expected_source_local_key != write.plan_local_key
+            or write.bound_agent is None
+            or write.bound_agent.agent_id != expected_agent_id
+            or write.capability.capability_id != expected_capability_id
+            or proof.source_contract.task_id != write.successor_task_id
+            or proof.source_contract.task_id != run.task_id
+            or proof.source_contract.digest != source_plan.task_contract.digest
+            or source_plan != composite_plan
+            or source_plan.plan_id != write.plan_id
+            or source_plan.plan_manifest_digest != write.plan_manifest_digest
+            or run.task_id != write.successor_task_id
+            or run.plan_generation != 1
+            or run.plan_digest != write.plan_manifest_digest
+            or run.status not in {"active", "awaiting_verification", "paused", "succeeded"}
+        ):
+            raise AgentVerifiedResultSourceBindingError(
+                "Confirmed write Plan lineage changed"
+            )
+        composite_node = cls._plan_node(composite_plan, write.plan_node_id)
+        if (
+            composite_node.local_key != write.plan_local_key
+            or composite_node.node_spec_digest != write.plan_node_spec_digest
+            or composite_node.kind is not DraftNodeKind.AGENT
+            or composite_node.bound_agent != write.bound_agent
+            or composite_node.bound_tool != write.bound_tool
+            or composite_node.capability != write.capability
+            or node.run_id != run.run_id
+            or node.node_id != composite_node.node_id
+            or node.local_key != composite_node.local_key
+            or node.node_kind != composite_node.kind.value
+            or node.node_spec_digest != composite_node.node_spec_digest
+            or tuple(node.depends_on) != composite_node.depends_on
+            or node.bound_agent != write.bound_agent.model_dump(mode="json")
+            or node.capability != write.capability.model_dump(mode="json")
+            or tuple(node.acceptance_refs) != composite_node.acceptance_refs
+            or node.budget != composite_node.budget.model_dump(mode="json")
+            or node.runtime_enabled is not composite_node.runtime_enabled
+            or node.status
+            not in (
+                {"verified", "awaiting_verification"}
+                if allow_pending_node_transition
+                else {"verified"}
+            )
+            or node.attempt_count < 1
+            or invocation.run_id != run.run_id
+            or invocation.node_id != node.node_id
+            or invocation.attempt != node.attempt_count
+            or invocation.parent_invocation_id is not None
+            or invocation.agent_id != write.bound_agent.agent_id
+            or invocation.agent_version != write.bound_agent.version
+            or invocation.agent_contract_digest != write.bound_agent.contract_digest
+            or invocation.prompt_package_digest != write.bound_agent.prompt_package_digest
+            or invocation.execution_status != "result_submitted"
+            or invocation.verification_status != "verified"
+            or invocation.result_id != proof.result.result_id
+        ):
+            raise AgentVerifiedResultProofRejectedError(
+                "Confirmed write Invocation or node proof changed"
+            )
+        mapping = ModelPlannerNodeMapping.build(
+            source_node_id=composite_node.node_id,
+            source_local_key=composite_node.local_key,
+            source_node_spec_digest=composite_node.node_spec_digest,
+            composite_node_id=composite_node.node_id,
+            composite_local_key=composite_node.local_key,
+            composite_node_spec_digest=composite_node.node_spec_digest,
+        )
+        return _ResolvedPlanProof(
+            mapping=mapping,
+            source_node=composite_node,
+            composite_node=composite_node,
+            capability=write.capability,
+        )
+
     @staticmethod
     def _plan_node(plan: ExecutablePlan, node_id: str) -> ExecutablePlanNode:
         node = next((item for item in plan.nodes if item.node_id == node_id), None)
@@ -751,6 +870,30 @@ class AgentVerifiedResultBridge:
                 f"Source-step binding requires exactly one {name} parameter"
             )
         return matches[0]
+
+    @classmethod
+    def _proof_parameter(cls, proof: AgentVerifiedResultPlanProof, name: str) -> str:
+        write = proof.workspace_coding_write_node_proof
+        if write is not None:
+            value = write.parameters.get(name)
+            if value is None:
+                raise AgentVerifiedResultSourceBindingError(
+                    "Confirmed write proof has no exact parameter"
+                )
+            return value
+        return cls._parameter(proof.step_binding, name)
+
+    @staticmethod
+    def _verification_source_binding(
+        proof: AgentVerifiedResultPlanProof,
+    ) -> dict[str, str]:
+        write = proof.workspace_coding_write_node_proof
+        if write is not None:
+            return {
+                "workspace_coding_write_node_proof_digest": write.proof_digest,
+            }
+        step = AgentVerifiedResultBridge._required_step(proof)
+        return {"step_binding_digest": step.step_binding_digest}
 
     @staticmethod
     def _required_step(proof: AgentVerifiedResultPlanProof) -> ModelPlannerStepBinding:

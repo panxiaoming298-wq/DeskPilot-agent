@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from typing import Literal
+
 from deskpilot.application.agent_registry import AgentRegistry, AgentRegistryError
 from deskpilot.application.capability_executor_registry import (
     CapabilityExecutorRegistry,
@@ -18,6 +21,9 @@ from deskpilot.application.task_loop_agent_adapter_registry import (
     TaskLoopAgentAdapterRegistry,
 )
 from deskpilot.application.turn_planner_runtime import RevalidatedDeferredPlan
+from deskpilot.application.workspace_coding_change_runtime import (
+    WorkspaceCodingWriteActivationBundle,
+)
 from deskpilot.application.workspace_coding_exploration_binder import (
     WorkspaceCodingReaderActivationBundle,
 )
@@ -42,6 +48,8 @@ from deskpilot.domain.task_plans import (
     TaskContract,
 )
 from deskpilot.domain.tool_contracts import ToolRiskLevel
+from deskpilot.domain.turn_planning import TurnPlanningRecipeRef
+from deskpilot.domain.workspace_coding_changes import WorkspaceCodingWriteNodeProof
 from deskpilot.domain.workspace_coding_explorations import WorkspaceCodingReaderNodeProof
 
 _CLASSIFICATION_ORDER = {"public": 0, "internal": 1, "sensitive": 2}
@@ -148,7 +156,7 @@ class ModelPlannerNodeBinder:
                 eligibility = self._runtime_eligibility(
                     composite_node=composite_node,
                     source_node=source_node,
-                    current=current,
+                    route_id=current.route.route_id,
                 )
                 bindings.append(
                     ModelPlannerNodeBinding.build(
@@ -372,6 +380,163 @@ class ModelPlannerNodeBinder:
             raise ModelPlannerNodeProofRejectedError("Confirmed Reader binding set is incomplete")
         return tuple(sorted(bindings, key=lambda item: item.composite_node_id))
 
+    def bind_confirmed_write_plan(
+        self,
+        bundle: WorkspaceCodingWriteActivationBundle,
+    ) -> tuple[ModelPlannerNodeBinding, ...]:
+        """Bind a fresh-confirmed proposal to its existing coding-loop DAG."""
+
+        reader = bundle.reader
+        proposal = bundle.proposal
+        run_binding = bundle.run_binding
+        confirmed = bundle.binding
+        if (
+            confirmed.proposal_id != proposal.proposal_id
+            or confirmed.proposal_digest != proposal.proposal_digest
+            or proposal.run_binding_id != run_binding.binding_id
+            or proposal.run_binding_digest != run_binding.binding_digest
+            or run_binding.file_set_binding_id != reader.binding.binding_id
+            or run_binding.file_set_binding_digest != reader.binding.binding_digest
+            or confirmed.successor_task_id != confirmed.expected_plan.task_id
+            or confirmed.task_contract.digest
+            != confirmed.expected_plan.task_contract.digest
+        ):
+            raise ModelPlannerNodeProofRejectedError(
+                "Confirmed write activation crossed its Reader or Proposal lineage"
+            )
+        expected_changes_json = json.dumps(
+            [
+                {
+                    "path": (
+                        change.relative_path
+                        if reader.snapshot.project_path == "."
+                        else f"{reader.snapshot.project_path.rstrip('/')}/{change.relative_path}"
+                    ),
+                    "old_text": change.old_text,
+                    "new_text": change.new_text,
+                }
+                for change in proposal.decision.changes
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if (
+            confirmed.parameters.get("changes_json") != expected_changes_json
+            or confirmed.parameters.get("project_path") != reader.snapshot.project_path
+            or confirmed.parameters.get("test_kind") != reader.snapshot.ecosystem
+        ):
+            raise ModelPlannerNodeProofRejectedError(
+                "Confirmed write parameters changed from the exact Proposal"
+            )
+        recipe = TurnPlanningRecipeRef(
+            route_id=confirmed.route_id,
+            route_version=confirmed.route_version,
+            route_manifest_digest=confirmed.recipe_digest,
+        )
+        bindings: list[ModelPlannerNodeBinding] = []
+        for node in confirmed.expected_plan.nodes:
+            if node.kind not in {DraftNodeKind.AGENT, DraftNodeKind.CAPABILITY}:
+                continue
+            if node.capability is None:
+                raise ModelPlannerNodeProofRejectedError(
+                    "Confirmed write runnable node lost its exact Capability"
+                )
+            mapping = ModelPlannerNodeMapping.build(
+                source_node_id=node.node_id,
+                source_local_key=node.local_key,
+                source_node_spec_digest=node.node_spec_digest,
+                composite_node_id=node.node_id,
+                composite_local_key=node.local_key,
+                composite_node_spec_digest=node.node_spec_digest,
+            )
+            authority = self._effective_authority(
+                composite_contract=confirmed.task_contract,
+                source_contract=confirmed.task_contract,
+                composite_node=node,
+                source_node=node,
+                authority_rule="confirmed_change_proposal_exact_plan",
+            )
+            eligibility = self._runtime_eligibility(
+                composite_node=node,
+                source_node=node,
+                route_id="workspace_coding_loop",
+            )
+            write_proof = WorkspaceCodingWriteNodeProof.build(
+                write_plan_binding_id=confirmed.binding_id,
+                write_plan_binding_digest=confirmed.binding_digest,
+                proposal_id=proposal.proposal_id,
+                proposal_digest=proposal.proposal_digest,
+                proposal_decision_digest=proposal.decision_digest,
+                file_set_binding_id=reader.binding.binding_id,
+                file_set_binding_digest=reader.binding.binding_digest,
+                snapshot_id=reader.snapshot.snapshot_id,
+                snapshot_digest=reader.snapshot.snapshot_digest,
+                catalog_digest=reader.snapshot.catalog_digest,
+                project_path=reader.snapshot.project_path,
+                ecosystem=reader.snapshot.ecosystem,
+                successor_task_id=confirmed.successor_task_id,
+                confirmation_message_id=confirmed.confirmation_message_id,
+                confirmation_message_digest=confirmed.confirmation_message_digest,
+                recipe_digest=confirmed.recipe_digest,
+                parameter_binding_digest=confirmed.parameter_binding_digest,
+                parameters=confirmed.parameters,
+                plan_id=confirmed.expected_plan.plan_id,
+                plan_manifest_digest=confirmed.expected_plan_manifest_digest,
+                plan_node_id=node.node_id,
+                plan_local_key=node.local_key,
+                plan_node_spec_digest=node.node_spec_digest,
+                node_kind=node.kind,
+                bound_agent=node.bound_agent,
+                bound_tool=node.bound_tool,
+                capability=node.capability,
+            )
+            bindings.append(
+                ModelPlannerNodeBinding.build(
+                    source_kind="confirmed_change_proposal",
+                    task_id=confirmed.successor_task_id,
+                    user_message_id=confirmed.confirmation_message_id,
+                    draft_id=None,
+                    step_binding_id=None,
+                    step_binding_digest=None,
+                    step_ordinal=None,
+                    offer_id=None,
+                    offer_key=None,
+                    offer_digest=None,
+                    recipe=recipe,
+                    policy_snapshot_digest=None,
+                    source_contract_digest=confirmed.task_contract_digest,
+                    source_plan_id=confirmed.expected_plan.plan_id,
+                    source_plan_manifest_digest=confirmed.expected_plan_manifest_digest,
+                    source_node_id=node.node_id,
+                    source_node_spec_digest=node.node_spec_digest,
+                    composite_contract_digest=confirmed.task_contract_digest,
+                    composite_plan_id=confirmed.expected_plan.plan_id,
+                    composite_plan_manifest_digest=confirmed.expected_plan_manifest_digest,
+                    composite_node_id=node.node_id,
+                    composite_node_spec_digest=node.node_spec_digest,
+                    mapping=mapping,
+                    parameter_bindings=(),
+                    parameter_bindings_digest=sha256_digest({"parameter_bindings": []}),
+                    bound_input_manifest=dict(sorted(confirmed.parameters.items())),
+                    bound_input_digest=sha256_digest(
+                        {"parameters": dict(sorted(confirmed.parameters.items()))}
+                    ),
+                    effective_authority=authority,
+                    runtime_eligibility=eligibility,
+                    workspace_coding_write_node_proof=write_proof,
+                )
+            )
+        runnable_count = sum(
+            item.kind in {DraftNodeKind.AGENT, DraftNodeKind.CAPABILITY}
+            for item in confirmed.expected_plan.nodes
+        )
+        if not bindings or len(bindings) != runnable_count:
+            raise ModelPlannerNodeProofRejectedError(
+                "Confirmed write binding set is incomplete"
+            )
+        return tuple(sorted(bindings, key=lambda item: item.composite_node_id))
+
     @staticmethod
     def _validate_step(
         draft: ModelPlannerDraft,
@@ -462,7 +627,7 @@ class ModelPlannerNodeBinder:
         *,
         composite_node: ExecutablePlanNode,
         source_node: ExecutablePlanNode,
-        current: RevalidatedOfferStep,
+        route_id: str,
     ) -> RuntimeEligibilityProof:
         if not composite_node.runtime_enabled or not source_node.runtime_enabled:
             raise ModelPlannerNodeRuntimeIneligibleError(
@@ -487,7 +652,7 @@ class ModelPlannerNodeBinder:
                         "Composite Agent capability differs from its source step"
                     )
                 adapter = self._agent_adapters.resolve(
-                    route_id=current.route.route_id,
+                    route_id=route_id,
                     source_local_key=source_node.local_key,
                     bound_agent=bound,
                     capability=capability,
@@ -561,6 +726,10 @@ class ModelPlannerNodeBinder:
         source_contract: TaskContract,
         composite_node: ExecutablePlanNode,
         source_node: ExecutablePlanNode,
+        authority_rule: Literal[
+            "composite_intersection_source_step",
+            "confirmed_change_proposal_exact_plan",
+        ] = "composite_intersection_source_step",
     ) -> EffectiveNodeAuthority:
         if composite_node.kind != source_node.kind or composite_node.kind not in {
             DraftNodeKind.AGENT,
@@ -598,6 +767,7 @@ class ModelPlannerNodeBinder:
             key=_RISK_ORDER.__getitem__,
         )
         return EffectiveNodeAuthority.build(
+            authority_rule=authority_rule,
             composite_contract_digest=composite_contract.digest,
             source_contract_digest=source_contract.digest,
             node_kind=composite_node.kind,

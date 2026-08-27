@@ -25,6 +25,9 @@ from deskpilot.application.agent_model_loop import (
     DispatchedAgentDecision,
 )
 from deskpilot.application.agent_registry import AgentRegistry, AgentRegistryError
+from deskpilot.application.builtin_capability_executors import (
+    WorkspacePatchCapabilityOutput,
+)
 from deskpilot.application.capability_catalog import CapabilityCatalog, CapabilityCatalogError
 from deskpilot.application.plan_compilation_service import PlanCompilationService, PlanningError
 from deskpilot.application.plan_compiler import (
@@ -37,6 +40,7 @@ from deskpilot.application.workspace_coding_exploration_binder import (
     WorkspaceCodingExplorationBinder,
     WorkspaceCodingExplorationNotFoundError,
     WorkspaceCodingExplorationProofRejectedError,
+    WorkspaceCodingReaderActivationBundle,
 )
 from deskpilot.application.workspace_coding_graph import (
     WORKSPACE_CODING_MIN_FILES,
@@ -60,7 +64,11 @@ from deskpilot.domain.model_contracts import (
     PrivacyMode,
     StructuredOutputDefinition,
 )
-from deskpilot.domain.task_loop_execution import TaskLoopExecution, TaskLoopVerifiedResult
+from deskpilot.domain.task_loop_execution import (
+    ModelPlannerNodeBinding,
+    TaskLoopExecution,
+    TaskLoopVerifiedResult,
+)
 from deskpilot.domain.workspace_coding_changes import (
     WorkspaceCodingChangeDecision,
     WorkspaceCodingChangeProposal,
@@ -80,9 +88,11 @@ from deskpilot.infrastructure.models import (
     AgentModelTurnRecord,
     AgentResultRecord,
     ConversationMessageRecord,
+    ModelPlannerNodeBindingRecord,
     TaskExecutionNodeRecord,
     TaskExecutionRunRecord,
     TaskLoopExecutionRecord,
+    TaskLoopNodeAttemptRecord,
     TaskLoopVerifiedResultRecord,
     TaskRecord,
     WorkspaceCodingChangeProposalRecord,
@@ -107,11 +117,22 @@ class WorkspaceCodingChangeProofRejectedError(WorkspaceCodingChangeRuntimeError)
 
 @dataclass(frozen=True, slots=True)
 class _ReaderEvidence:
+    activation: WorkspaceCodingReaderActivationBundle
     binding: WorkspaceCodingFileSetPlanBinding
     execution: TaskLoopExecution
     results: tuple[TaskLoopVerifiedResult, ...]
     files: tuple[WorkspaceFileRead, ...]
     result_set_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceCodingWriteActivationBundle:
+    """Revalidated proposal, snapshot and fresh-confirmed successor write Plan."""
+
+    reader: WorkspaceCodingReaderActivationBundle
+    run_binding: WorkspaceCodingChangeRunBinding
+    proposal: WorkspaceCodingChangeProposal
+    binding: WorkspaceCodingWritePlanBinding
 
 
 class WorkspaceCodingChangeRuntime:
@@ -659,6 +680,64 @@ class WorkspaceCodingChangeRuntime:
             )
         return binding
 
+    async def get_write_activation_bundle(
+        self,
+        successor_task_id: str,
+    ) -> WorkspaceCodingWriteActivationBundle | None:
+        """Rebuild the complete current authority before activation or a claim."""
+
+        binding = await self.get_write_plan_binding(successor_task_id=successor_task_id)
+        if binding is None:
+            return None
+        proposal = await self.get_proposal(proposal_id=binding.proposal_id)
+        if proposal is None or proposal.proposal_digest != binding.proposal_digest:
+            raise WorkspaceCodingChangeProofRejectedError(
+                "Confirmed write Plan lost its exact Change Proposal"
+            )
+        run_binding = await self.get_run_binding(binding_id=proposal.run_binding_id)
+        if (
+            run_binding is None
+            or run_binding.binding_digest != proposal.run_binding_digest
+        ):
+            raise WorkspaceCodingChangeProofRejectedError(
+                "Confirmed write Plan lost its proposer Run binding"
+            )
+        patch_verified = await self._write_patch_is_verified(binding, proposal)
+        expected_contents = (
+            await self._expected_post_patch_contents(binding, proposal)
+            if patch_verified
+            else None
+        )
+        source = await self._reader_evidence(
+            run_binding.task_contract.task_id,
+            allowed_verified_contents=expected_contents,
+        )
+        await self._assert_current_binding(run_binding, source)
+        self._validate_decision(source, proposal.decision)
+        snapshot = source.activation.snapshot
+        expected_parameters = self._write_parameters(
+            snapshot.project_path,
+            snapshot.test_path,
+            snapshot.ecosystem,
+            source,
+            proposal,
+        )
+        if (
+            binding.parameters != expected_parameters
+            or binding.proposal_id != proposal.proposal_id
+            or run_binding.file_set_binding_id != source.binding.binding_id
+            or run_binding.file_set_binding_digest != source.binding.binding_digest
+        ):
+            raise WorkspaceCodingChangeProofRejectedError(
+                "Confirmed write parameters changed from the current Reader evidence"
+            )
+        return WorkspaceCodingWriteActivationBundle(
+            reader=source.activation,
+            run_binding=run_binding,
+            proposal=proposal,
+            binding=binding,
+        )
+
     async def get_workbench(
         self,
         task_id: str,
@@ -752,9 +831,17 @@ class WorkspaceCodingChangeRuntime:
                 recoverable.append(task_id)
         return tuple(recoverable)
 
-    async def _reader_evidence(self, reader_task_id: str) -> _ReaderEvidence:
+    async def _reader_evidence(
+        self,
+        reader_task_id: str,
+        *,
+        allowed_verified_contents: dict[str, str] | None = None,
+    ) -> _ReaderEvidence:
         try:
-            bundle = await self._explorations.get_reader_activation_bundle(reader_task_id)
+            bundle = await self._explorations.get_reader_activation_bundle(
+                reader_task_id,
+                allowed_verified_contents=allowed_verified_contents,
+            )
         except WorkspaceCodingExplorationProofRejectedError as error:
             raise WorkspaceCodingChangeProofRejectedError(
                 "Confirmed Reader source proof was rejected"
@@ -839,12 +926,219 @@ class WorkspaceCodingChangeRuntime:
             files.append(file_read)
         digests = tuple(item.result_ref_digest for item in results)
         return _ReaderEvidence(
+            activation=bundle,
             binding=bundle.binding,
             execution=execution,
             results=tuple(results),
             files=tuple(files),
             result_set_digest=sha256_digest({"result_ref_digests": list(digests)}),
         )
+
+    async def _expected_post_patch_contents(
+        self,
+        binding: WorkspaceCodingWritePlanBinding,
+        proposal: WorkspaceCodingChangeProposal,
+    ) -> dict[str, str]:
+        """Rebuild exact full-file contents from immutable Reader ResultRefs."""
+
+        run_binding = await self.get_run_binding(binding_id=proposal.run_binding_id)
+        if run_binding is None:
+            raise WorkspaceCodingChangeProofRejectedError(
+                "Confirmed write Plan lost its Reader lineage"
+            )
+        project_path = binding.parameters.get("project_path")
+        if not isinstance(project_path, str):
+            raise WorkspaceCodingChangeProofRejectedError(
+                "Confirmed write Plan project path is invalid"
+            )
+        async with self._database.session() as session:
+            execution = await session.scalar(
+                select(TaskLoopExecutionRecord).where(
+                    TaskLoopExecutionRecord.task_id
+                    == run_binding.task_contract.task_id,
+                    TaskLoopExecutionRecord.source_kind == "confirmed_file_set",
+                    TaskLoopExecutionRecord.status == "succeeded",
+                )
+            )
+            if execution is None:
+                raise WorkspaceCodingChangeProofRejectedError(
+                    "Confirmed write Plan lost its succeeded Reader execution"
+                )
+            result_records = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopVerifiedResultRecord).where(
+                            TaskLoopVerifiedResultRecord.execution_id
+                            == execution.execution_id
+                        )
+                    )
+                ).all()
+            )
+        original_contents: dict[str, str] = {}
+        project_prefix = project_path.rstrip("/")
+        for record in result_records:
+            try:
+                result = self._result_from_record(record)
+                file_read = WorkspaceFileRead.model_validate(result.output_manifest)
+            except ValidationError as error:
+                raise WorkspaceCodingChangeProofRejectedError(
+                    "Confirmed Reader ResultRef output is invalid"
+                ) from error
+            relative_path = file_read.relative_path
+            if project_path != ".":
+                prefix = f"{project_prefix}/"
+                if not relative_path.startswith(prefix):
+                    raise WorkspaceCodingChangeProofRejectedError(
+                        "Confirmed Reader ResultRef crossed its project path"
+                    )
+                relative_path = relative_path.removeprefix(prefix)
+            if (
+                result.result_kind != "workspace_file"
+                or result.output_digest != file_read.result_digest
+                or relative_path in original_contents
+            ):
+                raise WorkspaceCodingChangeProofRejectedError(
+                    "Confirmed Reader ResultRef content is ambiguous"
+                )
+            original_contents[relative_path] = file_read.content
+        expected_contents: dict[str, str] = {}
+        for change in proposal.decision.changes:
+            original = original_contents.get(change.relative_path)
+            if original is None or original.count(change.old_text) != 1:
+                raise WorkspaceCodingChangeProofRejectedError(
+                    "Confirmed Proposal no longer matches its Reader ResultRef"
+                )
+            expected_contents[change.relative_path] = original.replace(
+                change.old_text,
+                change.new_text,
+                1,
+            )
+        return expected_contents
+
+    async def _write_patch_is_verified(
+        self,
+        binding: WorkspaceCodingWritePlanBinding,
+        proposal: WorkspaceCodingChangeProposal,
+    ) -> bool:
+        """Recognize only the existing TaskLoop's immutable verified patch receipt."""
+
+        async with self._database.session() as session:
+            execution_record = await session.scalar(
+                select(TaskLoopExecutionRecord).where(
+                    TaskLoopExecutionRecord.task_id == binding.successor_task_id,
+                    TaskLoopExecutionRecord.source_kind
+                    == "confirmed_change_proposal",
+                    TaskLoopExecutionRecord.write_plan_binding_id
+                    == binding.binding_id,
+                    TaskLoopExecutionRecord.write_plan_binding_digest
+                    == binding.binding_digest,
+                )
+            )
+            if execution_record is None:
+                return False
+            execution = self._execution_from_record(execution_record)
+            node_records = tuple(
+                (
+                    await session.scalars(
+                        select(ModelPlannerNodeBindingRecord).where(
+                            ModelPlannerNodeBindingRecord.execution_id
+                            == execution.execution_id,
+                            ModelPlannerNodeBindingRecord.source_kind
+                            == "confirmed_change_proposal",
+                        )
+                    )
+                ).all()
+            )
+            patch_bindings: list[ModelPlannerNodeBinding] = []
+            for record in node_records:
+                try:
+                    node_binding = ModelPlannerNodeBinding.model_validate(
+                        record.manifest
+                    )
+                except ValidationError as error:
+                    raise WorkspaceCodingChangeProofRejectedError(
+                        "Confirmed write node binding manifest is invalid"
+                    ) from error
+                node_proof = node_binding.workspace_coding_write_node_proof
+                if (
+                    node_binding.binding_digest != record.binding_digest
+                    or node_proof is None
+                    or node_proof.write_plan_binding_id != binding.binding_id
+                    or node_proof.write_plan_binding_digest != binding.binding_digest
+                ):
+                    raise WorkspaceCodingChangeProofRejectedError(
+                        "Confirmed write node binding crossed its Plan"
+                    )
+                if node_proof.plan_local_key == "apply_patch":
+                    patch_bindings.append(node_binding)
+            if len(patch_bindings) != 1:
+                raise WorkspaceCodingChangeProofRejectedError(
+                    "Confirmed write Plan lost its exact patch node"
+                )
+            patch_binding = patch_bindings[0]
+            attempt_records = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopNodeAttemptRecord).where(
+                            TaskLoopNodeAttemptRecord.execution_id
+                            == execution.execution_id,
+                            TaskLoopNodeAttemptRecord.node_id
+                            == patch_binding.composite_node_id,
+                        )
+                    )
+                ).all()
+            )
+            verified_attempts = tuple(
+                item for item in attempt_records if item.status == "verified"
+            )
+            if not verified_attempts:
+                return False
+            if len(verified_attempts) != 1:
+                raise WorkspaceCodingChangeProofRejectedError(
+                    "Confirmed write patch has ambiguous verified attempts"
+                )
+            attempt = verified_attempts[0]
+            result_record = await session.scalar(
+                select(TaskLoopVerifiedResultRecord).where(
+                    TaskLoopVerifiedResultRecord.attempt_id == attempt.attempt_id
+                )
+            )
+        if result_record is None:
+            raise WorkspaceCodingChangeProofRejectedError(
+                "Confirmed write patch lost its verified ResultRef"
+            )
+        result = self._result_from_record(result_record)
+        try:
+            output = WorkspacePatchCapabilityOutput.model_validate(
+                result.output_manifest
+            )
+        except ValidationError as error:
+            raise WorkspaceCodingChangeProofRejectedError(
+                "Confirmed write patch ResultRef output is invalid"
+            ) from error
+        project_path = binding.parameters["project_path"]
+        expected_paths = {
+            (
+                item.relative_path
+                if project_path == "."
+                else f"{project_path.rstrip('/')}/{item.relative_path}"
+            )
+            for item in proposal.decision.changes
+        }
+        if (
+            result.node_binding_id != patch_binding.node_binding_id
+            or result.node_binding_digest != patch_binding.binding_digest
+            or result.result_kind != "patch_receipt"
+            or result.output_digest != output.result_digest
+            or output.receipt.task_id != binding.successor_task_id
+            or output.receipt.status != "committed"
+            or {item.relative_path for item in output.receipt.change_receipts}
+            != expected_paths
+        ):
+            raise WorkspaceCodingChangeProofRejectedError(
+                "Confirmed write patch ResultRef crossed its exact Proposal"
+            )
+        return True
 
     async def _request(
         self,
@@ -1376,6 +1670,8 @@ class WorkspaceCodingChangeRuntime:
             "draft_id",
             "source_binding_id",
             "source_binding_digest",
+            "write_plan_binding_id",
+            "write_plan_binding_digest",
             "task_id",
             "plan_id",
             "plan_generation",

@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from pydantic import JsonValue
 from sqlalchemy import func, select, update
 
 from deskpilot.agents.builtins import create_builtin_agent_registry
@@ -24,6 +28,11 @@ from deskpilot.application.capability_catalog import (
     CapabilityCatalog,
     create_builtin_capability_catalog,
 )
+from deskpilot.application.capability_execution_engine import CapabilityExecutionEngine
+from deskpilot.application.capability_execution_runtime import CapabilityExecutionRuntime
+from deskpilot.application.capability_input_binding_catalog import (
+    CapabilityInputBindingCatalog,
+)
 from deskpilot.application.model_gateway import ModelGateway
 from deskpilot.application.model_planner_node_binder import ModelPlannerNodeBinder
 from deskpilot.application.plan_compilation_service import PlanCompilationService
@@ -38,6 +47,7 @@ from deskpilot.application.task_loop_agent_adapter_registry import (
 from deskpilot.application.task_loop_agent_runtime import TaskLoopAgentRuntime
 from deskpilot.application.task_loop_execution_coordinator import (
     TaskLoopExecutionCoordinator,
+    TaskLoopExecutionCoordinatorProofRejectedError,
 )
 from deskpilot.application.task_workbench_service import TaskWorkbenchService
 from deskpilot.application.workspace_coding_change_runtime import (
@@ -65,6 +75,10 @@ from deskpilot.domain.workspace_coding_explorations import (
     WorkspaceCodingExplorationCandidateFile,
     WorkspaceCodingExplorationDecision,
     WorkspaceCodingExplorationSnapshot,
+)
+from deskpilot.domain.workspace_files import (
+    WorkspacePythonTestRead,
+    WorkspacePythonTestSnapshot,
 )
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import (
@@ -128,6 +142,8 @@ def _write_python_project(root: Path) -> None:
 
 async def _services(
     tmp_path: Path,
+    *,
+    provider: FakeModelProvider | None = None,
 ) -> tuple[
     Database,
     WorkspaceCodingExplorationBinder,
@@ -136,7 +152,7 @@ async def _services(
 ]:
     database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'exploration.db').as_posix()}")
     await database.migrate()
-    binder, planning, explorer = _new_binder(database, tmp_path)
+    binder, planning, explorer = _new_binder(database, tmp_path, provider=provider)
     return database, binder, planning, explorer
 
 
@@ -230,6 +246,49 @@ class _ChangeOnlyFailureProvider(FakeModelProvider):
         return await super().complete(request)
 
 
+class _ExactWriteProvider(FakeModelProvider):
+    @staticmethod
+    def _structured_output(request: ModelRequest) -> dict[str, JsonValue] | None:
+        if (
+            request.output_schema is not None
+            and request.output_schema.name == "workspace_patch_planner_loop_decision"
+            and request.metadata.get("agent_loop_phase") == "propose_patch"
+        ):
+            path = str(request.metadata["workspace_path"])
+            changes = {
+                "project/src/a.py": (
+                    "VALUE_A = 1",
+                    "VALUE_A = 1 # DeskPilot proposed change",
+                ),
+                "project/src/b.py": (
+                    "VALUE_B = 2",
+                    "VALUE_B = 2 # DeskPilot proposed change",
+                ),
+            }
+            old_text, new_text = changes[path]
+            return cast(
+                dict[str, JsonValue],
+                {
+                    "schema_version": "deskpilot.agent-decision.v1",
+                    "kind": "submit_result",
+                    "patch_binding_id": request.metadata[
+                        "workspace_patch_binding_id"
+                    ],
+                    "observation_digest": request.metadata["observation_digest"],
+                    "changes": [
+                        {
+                            "path": path,
+                            "old_text": old_text,
+                            "new_text": new_text,
+                            "rationale": "Apply the exact confirmed replacement.",
+                        }
+                    ],
+                    "decision_summary": "Exact confirmed write proposal.",
+                },
+            )
+        return FakeModelProvider._structured_output(request)  # noqa: SLF001
+
+
 class _NoModelTaskLoops:
     async def get_bundle(self, _task_id: str) -> None:
         return None
@@ -243,6 +302,58 @@ class _CountingWorkspaceFileRuntime(WorkspaceFileRuntime):
     def read(self, relative_path: str):  # type: ignore[no-untyped-def]
         self.read_paths.append(relative_path)
         return super().read(relative_path)
+
+
+def _initialize_repository(project: Path) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git is unavailable")
+    for arguments in (
+        ("init",),
+        ("config", "user.email", "deskpilot-test@example.invalid"),
+        ("config", "user.name", "DeskPilot Test"),
+        ("config", "core.autocrlf", "false"),
+        ("add", "--", "."),
+        ("commit", "-m", "initial"),
+    ):
+        subprocess.run(  # noqa: S603 - fixed test-only Git arguments.
+            (executable, *arguments),
+            cwd=project,
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+
+
+class _PassingPythonRuntime:
+    enabled = True
+
+    def run(self, snapshot: WorkspacePythonTestSnapshot) -> WorkspacePythonTestRead:
+        material: dict[str, object] = {
+            "schema_version": "deskpilot.workspace-python-test.v1",
+            "profile": "pytest-file",
+            "project_path": snapshot.project_path,
+            "test_path": snapshot.test_path,
+            "snapshot_digest": snapshot.snapshot_digest,
+            "runtime_digest": "f" * 64,
+            "status": "passed",
+            "exit_code": 0,
+            "passed_count": 1,
+            "failed_count": 0,
+            "skipped_count": 0,
+            "error_count": 0,
+            "duration_ms": 10,
+            "output": "1 passed",
+            "output_truncated": False,
+            "isolation_mode": "windows_appcontainer",
+            "network_access": False,
+            "process_limit": 1,
+        }
+        return WorkspacePythonTestRead.model_validate(
+            {**material, "result_digest": sha256_digest(material)}
+        )
 
 
 def _confirmed_reader_coordinator(
@@ -280,6 +391,65 @@ def _confirmed_reader_coordinator(
     return activation, TaskLoopExecutionCoordinator(
         database,
         activation,
+        agents=agents,
+    )
+
+
+def _confirmed_write_coordinator(
+    database: Database,
+    binder: WorkspaceCodingExplorationBinder,
+    planning: PlanCompilationService,
+    explorer: WorkspaceCodingExplorerRuntime,
+    changes: WorkspaceCodingChangeRuntime,
+    workspace: WorkspaceFileRuntime,
+) -> tuple[TaskLoopActivationRuntime, TaskLoopExecutionCoordinator]:
+    coding = WorkspaceCodingRuntime(workspace)
+    executors = create_builtin_capability_executor_registry(
+        binder._capabilities,  # noqa: SLF001
+        workspace=workspace,
+        python_tests=_PassingPythonRuntime(),
+        workspace_patches=workspace,
+        workspace_coding=coding,
+    )
+    adapters = create_task_loop_agent_adapter_registry(
+        research_available=False,
+        workspace_file_available=True,
+        workspace_coding_loop_available=True,
+    )
+    activation = TaskLoopActivationRuntime(
+        database,
+        _NoModelTaskLoops(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        planning,
+        explorer._execution,  # noqa: SLF001
+        ModelPlannerNodeBinder(
+            binder._agents,  # noqa: SLF001
+            executors,
+            adapters,
+        ),
+        workspace_coding_explorations=binder,
+        workspace_coding_changes=changes,
+        clock=lambda: NOW,
+    )
+    capabilities = CapabilityExecutionRuntime(
+        database,
+        CapabilityInputBindingCatalog(binder._capabilities),  # noqa: SLF001
+        executors,
+        CapabilityExecutionEngine(executors),
+        workspace_coding_changes=changes,
+    )
+    agents = TaskLoopAgentRuntime(
+        database,
+        explorer._execution,  # noqa: SLF001
+        adapters,
+        workspace=workspace,
+        model_loop=explorer._model_loop,  # noqa: SLF001
+        workspace_coding_changes=changes,
+    )
+    return activation, TaskLoopExecutionCoordinator(
+        database,
+        activation,
+        capabilities=capabilities,
         agents=agents,
     )
 
@@ -1082,7 +1252,19 @@ async def test_verified_readers_produce_no_write_proposal_and_confirmed_successo
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     _write_python_project(workspace_root)
-    database, binder, planning, explorer = await _services(tmp_path)
+    (workspace_root / "project" / "src" / "a.py").write_text(
+        "VALUE_A = 1\n# module a\n",
+        encoding="utf-8",
+    )
+    (workspace_root / "project" / "src" / "b.py").write_text(
+        "VALUE_B = 2\n# module b\n",
+        encoding="utf-8",
+    )
+    _initialize_repository(workspace_root / "project")
+    database, binder, planning, explorer = await _services(
+        tmp_path,
+        provider=_ExactWriteProvider(),
+    )
     conversation_id = f"cnv_{'a' * 32}"
     source_task_id, source_message_id = await _seed_task(
         database,
@@ -1151,7 +1333,7 @@ async def test_verified_readers_produce_no_write_proposal_and_confirmed_successo
         assert all(item.old_text != item.new_text for item in change_proposal.decision.changes)
         assert (workspace_root / "project" / "src" / "a.py").read_text(
             encoding="utf-8"
-        ) == "VALUE_A = 1\n"
+        ) == "VALUE_A = 1\n# module a\n"
         state = await planning.get_state(reader_task_id)
         assert state.active_contract_version == 2
         assert state.active_plan_generation == 2
@@ -1289,6 +1471,198 @@ async def test_verified_readers_produce_no_write_proposal_and_confirmed_successo
                 )
                 == 0
             )
+
+        write_workspace = WorkspaceFileRuntime(
+            str(workspace_root),
+            str(tmp_path / "write-staging"),
+        )
+        write_activation, write_coordinator = _confirmed_write_coordinator(
+            database,
+            binder,
+            planning,
+            explorer,
+            restarted,
+            write_workspace,
+        )
+        pre_write = await write_activation.get(write_task_id)
+        assert pre_write is not None
+        assert pre_write.source_kind == "confirmed_change_proposal"
+        assert pre_write.write_plan_binding_id == write_binding.binding_id
+        assert pre_write.execution is None
+        assert pre_write.phase == "plan"
+
+        activated_write = await write_coordinator.advance(
+            write_task_id,
+            "write-activator",
+        )
+        assert activated_write.command.kind == "activate_plan"
+        assert activated_write.read.execution is not None
+        assert activated_write.read.execution.source_kind == (
+            "confirmed_change_proposal"
+        )
+        assert activated_write.read.execution.write_plan_binding_id == (
+            write_binding.binding_id
+        )
+        async with database.session() as session:
+            write_node_bindings = tuple(
+                (
+                    await session.scalars(
+                        select(ModelPlannerNodeBindingRecord).where(
+                            ModelPlannerNodeBindingRecord.execution_id
+                            == activated_write.read.execution.execution_id
+                        )
+                    )
+                ).all()
+            )
+        assert write_node_bindings
+        assert all(
+            item.source_kind == "confirmed_change_proposal"
+            for item in write_node_bindings
+        )
+        assert all(
+            item.write_plan_binding_id == write_binding.binding_id
+            and item.workspace_coding_write_node_proof_manifest is not None
+            and item.workspace_coding_write_node_proof_digest is not None
+            for item in write_node_bindings
+        )
+
+        source_a = workspace_root / "project" / "src" / "a.py"
+        source_a_stat = source_a.stat()
+        source_a.write_text("VALUE_A = 99\n", encoding="utf-8")
+        with pytest.raises(
+            TaskLoopExecutionCoordinatorProofRejectedError,
+            match="Confirmed coding write authority changed",
+        ):
+            await write_coordinator.advance(write_task_id, "drifted-write-worker")
+        source_a.write_text("VALUE_A = 1\n# module a\n", encoding="utf-8")
+        os.utime(
+            source_a,
+            ns=(source_a_stat.st_atime_ns, source_a_stat.st_mtime_ns),
+        )
+
+        claimed_write = await write_coordinator.advance(
+            write_task_id,
+            "write-agent-worker",
+        )
+        assert claimed_write.command.kind == "execute_agent"
+        restarted_activation, restarted_coordinator = _confirmed_write_coordinator(
+            database,
+            binder,
+            planning,
+            explorer,
+            restarted,
+            write_workspace,
+        )
+        recovered_write = await restarted_activation.get(write_task_id)
+        assert recovered_write is not None
+        assert recovered_write.execution == claimed_write.read.execution
+        verified_write = await restarted_coordinator.advance(
+            write_task_id,
+            "write-agent-verifier",
+        )
+        assert verified_write.command.kind == "verify_candidate"
+        delivered_write = None
+        for index in range(30):
+            progressed = await restarted_coordinator.advance(
+                write_task_id,
+                f"write-loop-{index}",
+            )
+            current_execution = progressed.read.execution
+            if (
+                current_execution is not None
+                and current_execution.status == "awaiting_user"
+            ):
+                if (
+                    progressed.read.workspace_patch is not None
+                    and progressed.read.workspace_patch.schema_version
+                    == "deskpilot.workspace-patch-preview.v1"
+                ):
+                    await restarted_coordinator.approve_workspace_patch(
+                        write_task_id,
+                        progressed.read.workspace_patch.confirmation_digest,
+                        expected_execution_revision=current_execution.revision,
+                    )
+                elif (
+                    progressed.read.git_commit is not None
+                    and progressed.read.git_commit.schema_version
+                    == "deskpilot.git-commit-preview.v1"
+                ):
+                    await restarted_coordinator.approve_git_commit(
+                        write_task_id,
+                        progressed.read.git_commit.confirmation_digest,
+                        expected_execution_revision=current_execution.revision,
+                    )
+            if current_execution is not None and current_execution.status == "succeeded":
+                delivered_write = progressed.read
+                break
+        assert delivered_write is not None
+        assert delivered_write.coding_delivery is not None
+        assert delivered_write.coding_delivery.changed_files == (
+            "project/src/a.py",
+            "project/src/b.py",
+        )
+        assert source_a.read_text(encoding="utf-8") == (
+            "VALUE_A = 1 # DeskPilot proposed change\n# module a\n"
+        )
+        assert (workspace_root / "project" / "src" / "b.py").read_text(
+            encoding="utf-8"
+        ) == "VALUE_B = 2 # DeskPilot proposed change\n# module b\n"
+        async with database.session() as session:
+            write_attempts = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopNodeAttemptRecord).where(
+                            TaskLoopNodeAttemptRecord.execution_id
+                            == activated_write.read.execution.execution_id
+                        )
+                    )
+                ).all()
+            )
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(TaskExecutionRunRecord)
+                    .where(TaskExecutionRunRecord.task_id == write_task_id)
+                )
+                == 1
+            )
+            assert (
+                len(write_attempts)
+                == 8
+            )
+        assert all(
+            (
+                "workspace_coding_write_node_proof_digest" in item.input_manifest
+            )
+            ^ ("workspace_coding_write_node_proof" in item.input_manifest)
+            for item in write_attempts
+        )
+        capability_attempts = tuple(
+            item
+            for item in write_attempts
+            if "workspace_coding_write_node_proof" in item.input_manifest
+        )
+        assert len(capability_attempts) == 3
+        assert all(
+            item.input_manifest["workspace_coding_write_node_proof"]["parameters"]
+            == write_binding.parameters
+            for item in capability_attempts
+        )
+
+        async with database.session() as session, session.begin():
+            await session.execute(
+                update(ModelPlannerNodeBindingRecord)
+                .where(
+                    ModelPlannerNodeBindingRecord.execution_id
+                    == activated_write.read.execution.execution_id
+                )
+                .values(workspace_coding_write_node_proof_digest="f" * 64)
+            )
+        with pytest.raises(
+            TaskLoopActivationProofRejectedError,
+            match="node binding",
+        ):
+            await restarted_activation.get(write_task_id)
     finally:
         await database.dispose()
 

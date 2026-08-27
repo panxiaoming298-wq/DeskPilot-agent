@@ -620,6 +620,8 @@ class WorkspaceCodingExplorationBinder:
     async def get_reader_activation_bundle(
         self,
         successor_task_id: str,
+        *,
+        allowed_verified_contents: dict[str, str] | None = None,
     ) -> WorkspaceCodingReaderActivationBundle:
         """Load the exact confirmed Reader authority and revalidate project state."""
 
@@ -640,7 +642,13 @@ class WorkspaceCodingExplorationBinder:
             )
         proposal = await self.get_proposal(proposal_id=binding.proposal_id)
         snapshot = await self.get_snapshot(snapshot_id=proposal.snapshot_id)
-        self._assert_current_snapshot(snapshot)
+        if allowed_verified_contents is None:
+            self._assert_current_snapshot(snapshot)
+        else:
+            self._assert_current_snapshot_after_verified_changes(
+                snapshot,
+                allowed_verified_contents,
+            )
         self._assert_decision(snapshot, proposal.decision)
         self._assert_binding_proposal(binding, proposal)
         return WorkspaceCodingReaderActivationBundle(
@@ -867,6 +875,73 @@ class WorkspaceCodingExplorationBinder:
         if current != snapshot:
             raise WorkspaceCodingExplorationProofRejectedError(
                 "Workspace exploration catalog drifted"
+            )
+
+    def _assert_current_snapshot_after_verified_changes(
+        self,
+        snapshot: WorkspaceCodingExplorationSnapshot,
+        expected_contents: dict[str, str],
+    ) -> None:
+        """Accept only the exact post-patch contents of a verified write node."""
+
+        try:
+            current = self._workspace.exploration_snapshot(
+                task_id=snapshot.task_id,
+                user_message_id=snapshot.user_message_id,
+                user_message_digest=snapshot.user_message_digest,
+                project_path=snapshot.project_path,
+                ecosystem=snapshot.ecosystem,
+                test_path=snapshot.test_path,
+                objective_digest=snapshot.objective_digest,
+                created_at=snapshot.created_at,
+            )
+        except (WorkspaceCodingError, WorkspaceFileError) as error:
+            raise WorkspaceCodingExplorationProofRejectedError(
+                "Workspace exploration project is no longer eligible"
+            ) from error
+        original_by_path = {item.relative_path: item for item in snapshot.files}
+        current_by_path = {item.relative_path: item for item in current.files}
+        if (
+            set(current_by_path) != set(original_by_path)
+            or not expected_contents
+            or set(expected_contents) - set(original_by_path)
+            or current.scanned_file_count != snapshot.scanned_file_count
+            or current.truncated != snapshot.truncated
+        ):
+            raise WorkspaceCodingExplorationProofRejectedError(
+                "Verified write changed the exploration catalog shape"
+            )
+        changed_paths = tuple(
+            path
+            for path, proof in current_by_path.items()
+            if proof != original_by_path[path]
+        )
+        if set(changed_paths) != set(expected_contents):
+            raise WorkspaceCodingExplorationProofRejectedError(
+                "Verified write changed an unconfirmed project file"
+            )
+        try:
+            reads = self._workspace.read_many(snapshot.project_path, changed_paths)
+        except (WorkspaceCodingError, WorkspaceFileError) as error:
+            raise WorkspaceCodingExplorationProofRejectedError(
+                "Verified write files are no longer readable"
+            ) from error
+        project_prefix = snapshot.project_path.rstrip("/")
+        contents = {
+            (
+                item.relative_path.removeprefix(f"{project_prefix}/")
+                if project_prefix != "."
+                else item.relative_path
+            ): item.content
+            for item in reads.files
+        }
+        if set(contents) != set(expected_contents) or any(
+            contents[path].replace("\r\n", "\n")
+            != expected_contents[path].replace("\r\n", "\n")
+            for path in expected_contents
+        ):
+            raise WorkspaceCodingExplorationProofRejectedError(
+                "Verified write content differs from the confirmed Proposal"
             )
 
     def revalidate_snapshot(
