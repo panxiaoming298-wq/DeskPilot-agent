@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -71,6 +72,15 @@ class WorkspaceCodingExplorationConflictError(WorkspaceCodingExplorationBindingE
 
 class WorkspaceCodingExplorationProofRejectedError(WorkspaceCodingExplorationBindingError):
     code = "WORKSPACE_CODING_EXPLORATION_PROOF_REJECTED"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceCodingReaderActivationBundle:
+    """Revalidated snapshot, proposal and confirmed Reader Plan authority."""
+
+    snapshot: WorkspaceCodingExplorationSnapshot
+    proposal: WorkspaceCodingExplorationProposal
+    binding: WorkspaceCodingFileSetPlanBinding
 
 
 class WorkspaceCodingExplorationBinder:
@@ -606,6 +616,38 @@ class WorkspaceCodingExplorationBinder:
                 "Confirmed file-set planning evidence crossed its binding"
             )
         return binding
+
+    async def get_reader_activation_bundle(
+        self,
+        successor_task_id: str,
+    ) -> WorkspaceCodingReaderActivationBundle:
+        """Load the exact confirmed Reader authority and revalidate project state."""
+
+        async with self._database.session() as session:
+            record = await session.scalar(
+                select(WorkspaceCodingFileSetPlanBindingRecord).where(
+                    WorkspaceCodingFileSetPlanBindingRecord.successor_task_id == successor_task_id
+                )
+            )
+        if record is None:
+            raise WorkspaceCodingExplorationNotFoundError(
+                "Successor Task has no confirmed file-set Plan"
+            )
+        binding = await self.get_binding(proposal_id=record.proposal_id)
+        if binding is None or binding.successor_task_id != successor_task_id:
+            raise WorkspaceCodingExplorationProofRejectedError(
+                "Confirmed file-set binding changed before Reader activation"
+            )
+        proposal = await self.get_proposal(proposal_id=binding.proposal_id)
+        snapshot = await self.get_snapshot(snapshot_id=proposal.snapshot_id)
+        self._assert_current_snapshot(snapshot)
+        self._assert_decision(snapshot, proposal.decision)
+        self._assert_binding_proposal(binding, proposal)
+        return WorkspaceCodingReaderActivationBundle(
+            snapshot=snapshot,
+            proposal=proposal,
+            binding=binding,
+        )
 
     async def get_workbench(
         self,
@@ -1150,4 +1192,5 @@ __all__ = [
     "WorkspaceCodingExplorationConflictError",
     "WorkspaceCodingExplorationNotFoundError",
     "WorkspaceCodingExplorationProofRejectedError",
+    "WorkspaceCodingReaderActivationBundle",
 ]

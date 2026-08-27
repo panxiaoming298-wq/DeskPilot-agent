@@ -352,6 +352,9 @@ class BoundCapabilityInput(BaseModel):
         consumed_result_refs: tuple[VerifiedCapabilityResultRef, ...] = (),
         workspace_command_plan_step: WorkspaceCommandPlanStepProof | None = None,
     ) -> BoundCapabilityInput:
+        recipe = node_binding.recipe
+        if recipe is None:
+            raise ValueError("Capability input has no model-planner source recipe")
         values = {
             "schema_version": "deskpilot.bound-capability-input.v1",
             "task_id": node_binding.task_id,
@@ -365,9 +368,9 @@ class BoundCapabilityInput(BaseModel):
             "source_step_binding_id": node_binding.step_binding_id,
             "source_step_binding_digest": node_binding.step_binding_digest,
             "source_offer_key": node_binding.offer_key,
-            "route_id": node_binding.recipe.route_id,
+            "route_id": recipe.route_id,
             "route_version": "2",
-            "route_manifest_digest": node_binding.recipe.route_manifest_digest,
+            "route_manifest_digest": recipe.route_manifest_digest,
             "parameter_bindings_digest": node_binding.parameter_bindings_digest,
             "arguments": arguments,
             "arguments_digest": sha256_digest(arguments),
@@ -386,9 +389,7 @@ _INPUT_SCHEMA_BY_CAPABILITY = {
     "workspace.python.test.v1": "deskpilot.workspace-python-test-executor-input.v1",
     "workspace.node.test.v1": "deskpilot.workspace-node-test-executor-input.v1",
     "workspace.project.search.v1": "deskpilot.workspace-project-search-executor-input.v1",
-    "workspace.project.read_many.v1": (
-        "deskpilot.workspace-project-batch-read-executor-input.v1"
-    ),
+    "workspace.project.read_many.v1": ("deskpilot.workspace-project-batch-read-executor-input.v1"),
     "workspace.git.inspect.v1": "deskpilot.workspace-git-inspect-executor-input.v1",
     "workspace.git.commit.v1": "deskpilot.workspace-git-commit-executor-input.v1",
     "workspace.command.run.v1": "deskpilot.workspace-command-executor-input.v1",
@@ -658,9 +659,11 @@ class CapabilityInputBindingCatalog:
         authority = node_binding.effective_authority
         eligibility = node_binding.runtime_eligibility
         capability = authority.capability
+        recipe = node_binding.recipe
         if (
             authority.node_kind.value != "capability"
             or capability is None
+            or recipe is None
             or eligibility.runtime_kind != "capability_executor"
             or eligibility.capability != capability
             or not eligibility.runtime_enabled
@@ -673,7 +676,7 @@ class CapabilityInputBindingCatalog:
                 capability.capability_id,
                 capability.version,
                 capability.digest,
-                node_binding.recipe.route_id,
+                recipe.route_id,
                 node_binding.mapping.source_local_key,
             )
         )
@@ -707,13 +710,9 @@ class CapabilityInputBindingCatalog:
         elif profile.route_id == "workspace_coding_loop":
             test_kind = node_binding.bound_input_manifest.get("test_kind")
             if test_kind not in {"python", "node"}:
-                raise CapabilityInputLineageRejectedError(
-                    "Coding-loop fixed test kind is invalid"
-                )
+                raise CapabilityInputLineageRejectedError("Coding-loop fixed test kind is invalid")
             try:
-                file_count = workspace_coding_file_count(
-                    node_binding.bound_input_manifest
-                )
+                file_count = workspace_coding_file_count(node_binding.bound_input_manifest)
             except ValueError as error:
                 raise CapabilityInputLineageRejectedError(
                     "Coding-loop fixed file count is invalid"
@@ -727,9 +726,9 @@ class CapabilityInputBindingCatalog:
                 )
             )
         if (
-            node_binding.recipe.route_id != profile.route_id
-            or node_binding.recipe.route_version != "2"
-            or node_binding.recipe.route_manifest_digest != expected_recipe_digest
+            recipe.route_id != profile.route_id
+            or recipe.route_version != "2"
+            or recipe.route_manifest_digest != expected_recipe_digest
         ):
             raise CapabilityInputLineageRejectedError("Capability input source recipe changed")
         if (
@@ -773,9 +772,7 @@ class CapabilityInputBindingCatalog:
         selected: list[ResolvedVerifiedCapabilityResult] = []
         for result_kind in profile.consumes:
             matches = tuple(
-                item
-                for item in dependencies
-                if item.result_ref.result_kind is result_kind
+                item for item in dependencies if item.result_ref.result_kind is result_kind
             )
             if len(matches) != 1:
                 raise CapabilityInputDependencyRejectedError(
@@ -815,10 +812,9 @@ class CapabilityInputBindingCatalog:
             )
             for name, item in by_name.items()
         }
-        if (
-            profile.route_id not in {"workspace_command_profile", "workspace_coding_loop"}
-            and set(all_normalized) != set(profile.parameter_names)
-        ):
+        if profile.route_id not in {"workspace_command_profile", "workspace_coding_loop"} and set(
+            all_normalized
+        ) != set(profile.parameter_names):
             raise CapabilityInputLineageRejectedError(
                 "Capability input contains parameters outside its trusted recipe"
             )
@@ -826,18 +822,14 @@ class CapabilityInputBindingCatalog:
         for name in profile.fixed_parameter_names:
             fixed_value = node_binding.bound_input_manifest.get(name)
             if not isinstance(fixed_value, str) or not fixed_value:
-                raise CapabilityInputLineageRejectedError(
-                    "Capability fixed parameter is missing"
-                )
+                raise CapabilityInputLineageRejectedError("Capability fixed parameter is missing")
             expected_bound[name] = fixed_value
         if (
             profile.route_id == "workspace_coding_loop"
             and "file_count" in node_binding.bound_input_manifest
         ):
             try:
-                file_count = workspace_coding_file_count(
-                    node_binding.bound_input_manifest
-                )
+                file_count = workspace_coding_file_count(node_binding.bound_input_manifest)
             except ValueError as error:
                 raise CapabilityInputLineageRejectedError(
                     "Coding-loop fixed file count is invalid"
@@ -855,10 +847,7 @@ class CapabilityInputBindingCatalog:
             raise CapabilityInputLineageRejectedError(
                 "Capability node parameters do not match the trusted recipe"
             )
-        normalized = {
-            name: all_normalized[name]
-            for name in profile.parameter_names
-        }
+        normalized = {name: all_normalized[name] for name in profile.parameter_names}
         result: dict[str, object] = dict(normalized)
         if profile.route_id == "knowledge_lookup":
             result["limit"] = 10

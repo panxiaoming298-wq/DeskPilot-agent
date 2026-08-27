@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0062_workspace_coding_explorer_turns"
+CURRENT_REVISION = "0063_confirmed_reader_task_loop"
 
 
 def _sync_url(path: Path) -> str:
@@ -1211,7 +1211,7 @@ def test_stage_116b_workspace_coding_explorer_turn_migration_is_guarded(
     _assert_populated_downgrade_refused(
         database_path,
         config,
-        revision=CURRENT_REVISION,
+        revision="0062_workspace_coding_explorer_turns",
         target_revision="0061_workspace_coding_explorations",
         insert_statement="""
             INSERT INTO workspace_coding_explorer_run_bindings (
@@ -1540,11 +1540,97 @@ def test_stage_112_model_planner_task_loop_migration_round_trips(
     command.check(config)
 
 
-def test_stage_112_task_loop_execution_migration_round_trips(
+def test_stage_112_and_116_task_loop_execution_migrations_round_trip(
     tmp_path: Path,
 ) -> None:
-    database_path = tmp_path / "stage-112-task-loop-execution.db"
+    database_path = tmp_path / "stage-116-confirmed-reader-task-loop.db"
     config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    command.check(config)
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        execution_columns = {
+            item["name"]: item for item in inspector.get_columns("task_loop_executions")
+        }
+        binding_columns = {
+            item["name"]: item for item in inspector.get_columns("model_planner_node_bindings")
+        }
+        execution_constraints = {
+            item["name"] for item in inspector.get_check_constraints("task_loop_executions")
+        }
+        binding_constraints = {
+            item["name"] for item in inspector.get_check_constraints("model_planner_node_bindings")
+        }
+        execution_foreign_keys = {
+            item["name"]: item for item in inspector.get_foreign_keys("task_loop_executions")
+        }
+        binding_foreign_keys = {
+            item["name"]: item for item in inspector.get_foreign_keys("model_planner_node_bindings")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+
+    assert revision == CURRENT_REVISION
+    assert {
+        "source_kind",
+        "source_binding_id",
+        "source_binding_digest",
+    }.issubset(execution_columns)
+    assert execution_columns["loop_id"]["nullable"] is True
+    assert execution_columns["draft_id"]["nullable"] is True
+    assert "ck_task_loop_execution_source" in execution_constraints
+    assert (
+        execution_foreign_keys["fk_task_loop_execution_file_set_binding"]["referred_table"]
+        == "workspace_coding_file_set_plan_bindings"
+    )
+    assert {
+        "source_kind",
+        "source_binding_id",
+        "source_binding_digest",
+        "workspace_reader_node_proof_manifest",
+        "workspace_reader_node_proof_digest",
+    }.issubset(binding_columns)
+    assert all(
+        binding_columns[name]["nullable"] is True
+        for name in (
+            "draft_id",
+            "step_binding_id",
+            "step_ordinal",
+            "offer_id",
+            "recipe_manifest",
+            "policy_snapshot_digest",
+        )
+    )
+    assert "ck_model_planner_node_source" in binding_constraints
+    assert (
+        binding_foreign_keys["fk_model_planner_node_file_set_binding"]["referred_table"]
+        == "workspace_coding_file_set_plan_bindings"
+    )
+
+    command.downgrade(config, "0062_workspace_coding_explorer_turns")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        execution_columns = {
+            item["name"]: item for item in inspector.get_columns("task_loop_executions")
+        }
+        binding_columns = {
+            item["name"]: item for item in inspector.get_columns("model_planner_node_bindings")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert revision == "0062_workspace_coding_explorer_turns"
+    assert "source_kind" not in execution_columns
+    assert "source_kind" not in binding_columns
+    assert execution_columns["loop_id"]["nullable"] is False
+    assert execution_columns["draft_id"]["nullable"] is False
+    assert binding_columns["recipe_manifest"]["nullable"] is False
 
     command.upgrade(config, "head")
     command.check(config)

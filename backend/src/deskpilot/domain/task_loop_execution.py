@@ -43,6 +43,10 @@ from deskpilot.domain.turn_planning import (
     TurnPlanningParameterBinding,
     TurnPlanningRecipeRef,
 )
+from deskpilot.domain.workspace_coding_explorations import (
+    WORKSPACE_CODING_FILE_SET_BINDING_ID_PATTERN,
+    WorkspaceCodingReaderNodeProof,
+)
 from deskpilot.domain.workspace_command_plans import WORKSPACE_COMMAND_PLAN_ID_PATTERN
 from deskpilot.domain.workspace_files import WorkspacePatchPreview, WorkspacePatchReceipt
 
@@ -116,9 +120,10 @@ class EffectiveNodeAuthority(BaseModel):
     schema_version: Literal["deskpilot.effective-node-authority.v1"] = (
         "deskpilot.effective-node-authority.v1"
     )
-    authority_rule: Literal["composite_intersection_source_step"] = (
-        "composite_intersection_source_step"
-    )
+    authority_rule: Literal[
+        "composite_intersection_source_step",
+        "confirmed_file_set_exact_reader",
+    ] = "composite_intersection_source_step"
     composite_contract_digest: str = Field(pattern=DIGEST_PATTERN)
     source_contract_digest: str = Field(pattern=DIGEST_PATTERN)
     node_kind: DraftNodeKind
@@ -238,17 +243,24 @@ class ModelPlannerNodeBinding(BaseModel):
         "deskpilot.model-planner-node-binding.v1"
     )
     node_binding_id: str = Field(pattern=MODEL_PLANNER_NODE_BINDING_ID_PATTERN)
+    source_kind: Literal["model_planner", "confirmed_file_set"] = Field(
+        default="model_planner",
+        exclude_if=lambda value: value == "model_planner",
+    )
     task_id: str = Field(pattern=TASK_ID_PATTERN)
     user_message_id: str = Field(pattern=MESSAGE_ID_PATTERN)
-    draft_id: str = Field(pattern=MODEL_PLANNER_DRAFT_ID_PATTERN)
-    step_binding_id: str = Field(pattern=MODEL_PLANNER_STEP_BINDING_ID_PATTERN)
-    step_binding_digest: str = Field(pattern=DIGEST_PATTERN)
-    step_ordinal: int = Field(ge=1, le=8)
-    offer_id: str = Field(pattern=TURN_PLANNING_OFFER_ID_PATTERN)
-    offer_key: str = Field(pattern=TURN_PLANNING_OFFER_KEY_PATTERN)
-    offer_digest: str = Field(pattern=DIGEST_PATTERN)
-    recipe: TurnPlanningRecipeRef
-    policy_snapshot_digest: str = Field(pattern=DIGEST_PATTERN)
+    draft_id: str | None = Field(default=None, pattern=MODEL_PLANNER_DRAFT_ID_PATTERN)
+    step_binding_id: str | None = Field(
+        default=None,
+        pattern=MODEL_PLANNER_STEP_BINDING_ID_PATTERN,
+    )
+    step_binding_digest: str | None = Field(default=None, pattern=DIGEST_PATTERN)
+    step_ordinal: int | None = Field(default=None, ge=1, le=8)
+    offer_id: str | None = Field(default=None, pattern=TURN_PLANNING_OFFER_ID_PATTERN)
+    offer_key: str | None = Field(default=None, pattern=TURN_PLANNING_OFFER_KEY_PATTERN)
+    offer_digest: str | None = Field(default=None, pattern=DIGEST_PATTERN)
+    recipe: TurnPlanningRecipeRef | None = None
+    policy_snapshot_digest: str | None = Field(default=None, pattern=DIGEST_PATTERN)
     source_contract_digest: str = Field(pattern=DIGEST_PATTERN)
     source_plan_id: str = Field(pattern=PLAN_ID_PATTERN)
     source_plan_manifest_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -266,7 +278,31 @@ class ModelPlannerNodeBinding(BaseModel):
     bound_input_digest: str = Field(pattern=DIGEST_PATTERN)
     effective_authority: EffectiveNodeAuthority
     runtime_eligibility: RuntimeEligibilityProof
+    workspace_reader_node_proof: WorkspaceCodingReaderNodeProof | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     binding_digest: str = Field(pattern=DIGEST_PATTERN)
+
+    def _identity_material(self) -> dict[str, Any]:
+        values = self.model_dump(mode="json")
+        material = {
+            key: value
+            for key, value in values.items()
+            if key not in {"node_binding_id", "binding_digest"}
+        }
+        if self.source_kind == "model_planner":
+            material.pop("source_kind", None)
+            material.pop("workspace_reader_node_proof", None)
+        return material
+
+    def _digest_material(self) -> dict[str, Any]:
+        values = self.model_dump(mode="json")
+        material = {key: value for key, value in values.items() if key != "binding_digest"}
+        if self.source_kind == "model_planner":
+            material.pop("source_kind", None)
+            material.pop("workspace_reader_node_proof", None)
+        return material
 
     @model_validator(mode="after")
     def lineage_and_digest_match(self) -> Self:
@@ -277,8 +313,50 @@ class ModelPlannerNodeBinding(BaseModel):
             or self.mapping.composite_node_spec_digest != self.composite_node_spec_digest
         ):
             raise ValueError("Node binding mapping changed")
-        if any(item.offer_key != self.offer_key for item in self.parameter_bindings):
-            raise ValueError("Node binding input crosses its Offer")
+        proof = self.workspace_reader_node_proof
+        model_fields = (
+            self.draft_id,
+            self.step_binding_id,
+            self.step_binding_digest,
+            self.step_ordinal,
+            self.offer_id,
+            self.offer_key,
+            self.offer_digest,
+            self.recipe,
+            self.policy_snapshot_digest,
+        )
+        if self.source_kind == "model_planner":
+            if any(item is None for item in model_fields) or proof is not None:
+                raise ValueError("Model Planner node binding source proof is incomplete")
+            if any(item.offer_key != self.offer_key for item in self.parameter_bindings):
+                raise ValueError("Node binding input crosses its Offer")
+        elif (
+            any(item is not None for item in model_fields)
+            or proof is None
+            or self.parameter_bindings
+            or self.task_id != proof.successor_task_id
+            or self.user_message_id != proof.confirmation_message_id
+            or self.source_contract_digest != self.composite_contract_digest
+            or self.source_plan_id != proof.plan_id
+            or self.source_plan_manifest_digest != proof.plan_manifest_digest
+            or self.composite_plan_id != proof.plan_id
+            or self.composite_plan_manifest_digest != proof.plan_manifest_digest
+            or self.source_node_id != proof.plan_node_id
+            or self.source_node_spec_digest != proof.plan_node_spec_digest
+            or self.composite_node_id != proof.plan_node_id
+            or self.composite_node_spec_digest != proof.plan_node_spec_digest
+            or self.mapping.source_local_key != proof.plan_local_key
+            or self.mapping.composite_local_key != proof.plan_local_key
+            or self.bound_input_manifest
+            != {
+                "path": proof.workspace_relative_path,
+                "project_path": proof.project_path,
+                "source_file_proof_digest": proof.source_file_proof_digest,
+                "workspace_reader_node_proof_digest": proof.proof_digest,
+            }
+            or self.effective_authority.authority_rule != "confirmed_file_set_exact_reader"
+        ):
+            raise ValueError("Confirmed file-set Reader node binding changed")
         expected_inputs = sha256_digest(
             {
                 "parameter_bindings": [
@@ -297,16 +375,9 @@ class ModelPlannerNodeBinding(BaseModel):
             or self.effective_authority.source_contract_digest != self.source_contract_digest
         ):
             raise ValueError("Node binding authority crosses its Contract lineage")
-        values = self.model_dump(mode="json")
-        identity = {
-            key: value
-            for key, value in values.items()
-            if key not in {"node_binding_id", "binding_digest"}
-        }
-        if self.node_binding_id != _content_id("mnb", identity):
+        if self.node_binding_id != _content_id("mnb", self._identity_material()):
             raise ValueError("Model Planner node binding id does not match")
-        digest_material = {key: value for key, value in values.items() if key != "binding_digest"}
-        if self.binding_digest != sha256_digest(digest_material):
+        if self.binding_digest != sha256_digest(self._digest_material()):
             raise ValueError("Model Planner node binding digest does not match")
         return self
 
@@ -316,6 +387,9 @@ class ModelPlannerNodeBinding(BaseModel):
             "schema_version": "deskpilot.model-planner-node-binding.v1",
             **values,
         }
+        if material.get("source_kind", "model_planner") == "model_planner":
+            material.pop("source_kind", None)
+            material.pop("workspace_reader_node_proof", None)
         identity = dict(material)
         node_binding_id = _content_id("mnb", identity)
         digest_material = {**material, "node_binding_id": node_binding_id}
@@ -425,8 +499,22 @@ class TaskLoopExecution(BaseModel):
 
     schema_version: Literal["deskpilot.task-loop-execution.v1"] = "deskpilot.task-loop-execution.v1"
     execution_id: str = Field(pattern=TASK_LOOP_EXECUTION_ID_PATTERN)
-    loop_id: str = Field(pattern=TASK_LOOP_ID_PATTERN)
-    draft_id: str = Field(pattern=MODEL_PLANNER_DRAFT_ID_PATTERN)
+    source_kind: Literal["model_planner", "confirmed_file_set"] = Field(
+        default="model_planner",
+        exclude_if=lambda value: value == "model_planner",
+    )
+    loop_id: str | None = Field(default=None, pattern=TASK_LOOP_ID_PATTERN)
+    draft_id: str | None = Field(default=None, pattern=MODEL_PLANNER_DRAFT_ID_PATTERN)
+    source_binding_id: str | None = Field(
+        default=None,
+        pattern=WORKSPACE_CODING_FILE_SET_BINDING_ID_PATTERN,
+        exclude_if=lambda value: value is None,
+    )
+    source_binding_digest: str | None = Field(
+        default=None,
+        pattern=DIGEST_PATTERN,
+        exclude_if=lambda value: value is None,
+    )
     task_id: str = Field(pattern=TASK_ID_PATTERN)
     plan_id: str = Field(pattern=PLAN_ID_PATTERN)
     plan_generation: Literal[1] = 1
@@ -444,10 +532,13 @@ class TaskLoopExecution(BaseModel):
     execution_digest: str = Field(pattern=DIGEST_PATTERN)
 
     def _identity(self) -> dict[str, Any]:
-        return {
+        material = {
             "schema_version": self.schema_version,
+            "source_kind": self.source_kind,
             "loop_id": self.loop_id,
             "draft_id": self.draft_id,
+            "source_binding_id": self.source_binding_id,
+            "source_binding_digest": self.source_binding_digest,
             "task_id": self.task_id,
             "plan_id": self.plan_id,
             "plan_generation": self.plan_generation,
@@ -456,6 +547,19 @@ class TaskLoopExecution(BaseModel):
             "binding_set_digest": self.binding_set_digest,
             "created_at": self.created_at,
         }
+        if self.source_kind == "model_planner":
+            material.pop("source_kind")
+            material.pop("source_binding_id")
+            material.pop("source_binding_digest")
+        return material
+
+    def _digest_material(self) -> dict[str, Any]:
+        material = self.model_dump(mode="json", exclude={"execution_digest"})
+        if self.source_kind == "model_planner":
+            material.pop("source_kind", None)
+            material.pop("source_binding_id", None)
+            material.pop("source_binding_digest", None)
+        return material
 
     @model_validator(mode="after")
     def lifecycle_and_digest_match(self) -> Self:
@@ -465,11 +569,27 @@ class TaskLoopExecution(BaseModel):
             raise ValueError("Task-loop execution update predates creation")
         if self.revision == 1 and (self.status != "active" or self.event_count != 1):
             raise ValueError("Initial task-loop execution lifecycle is invalid")
+        if (
+            self.source_kind == "model_planner"
+            and (
+                self.loop_id is None
+                or self.draft_id is None
+                or self.source_binding_id is not None
+                or self.source_binding_digest is not None
+            )
+        ) or (
+            self.source_kind == "confirmed_file_set"
+            and (
+                self.loop_id is not None
+                or self.draft_id is not None
+                or self.source_binding_id is None
+                or self.source_binding_digest is None
+            )
+        ):
+            raise ValueError("Task-loop execution source shape is invalid")
         if self.execution_id != _content_id("tlx", self._identity()):
             raise ValueError("Task-loop execution id does not match")
-        values = self.model_dump(mode="json")
-        digest_material = {key: value for key, value in values.items() if key != "execution_digest"}
-        if self.execution_digest != sha256_digest(digest_material):
+        if self.execution_digest != sha256_digest(self._digest_material()):
             raise ValueError("Task-loop execution digest does not match")
         return self
 
@@ -548,6 +668,78 @@ class TaskLoopExecution(BaseModel):
             event,
         )
 
+    @classmethod
+    def activate_confirmed_file_set(
+        cls,
+        *,
+        source_binding_id: str,
+        source_binding_digest: str,
+        task_id: str,
+        plan_id: str,
+        plan_manifest_digest: str,
+        run_id: str,
+        bindings: tuple[ModelPlannerNodeBinding, ...],
+        created_at: datetime,
+    ) -> tuple[Self, TaskLoopExecutionEvent]:
+        if not bindings or any(
+            item.source_kind != "confirmed_file_set"
+            or item.task_id != task_id
+            or item.workspace_reader_node_proof is None
+            or item.workspace_reader_node_proof.file_set_binding_id != source_binding_id
+            or item.workspace_reader_node_proof.file_set_binding_digest != source_binding_digest
+            or item.composite_plan_id != plan_id
+            or item.composite_plan_manifest_digest != plan_manifest_digest
+            for item in bindings
+        ):
+            raise ValueError("Confirmed file-set activation bindings changed")
+        binding_set_digest = sha256_digest(
+            {
+                "node_bindings": [
+                    {
+                        "node_binding_id": item.node_binding_id,
+                        "binding_digest": item.binding_digest,
+                    }
+                    for item in sorted(bindings, key=lambda value: value.composite_node_id)
+                ]
+            }
+        )
+        identity: dict[str, Any] = {
+            "schema_version": "deskpilot.task-loop-execution.v1",
+            "source_kind": "confirmed_file_set",
+            "loop_id": None,
+            "draft_id": None,
+            "source_binding_id": source_binding_id,
+            "source_binding_digest": source_binding_digest,
+            "task_id": task_id,
+            "plan_id": plan_id,
+            "plan_generation": 1,
+            "plan_manifest_digest": plan_manifest_digest,
+            "run_id": run_id,
+            "binding_set_digest": binding_set_digest,
+            "created_at": created_at,
+        }
+        execution_id = _content_id("tlx", identity)
+        event = TaskLoopExecutionEvent.activated(
+            execution_id=execution_id,
+            task_id=task_id,
+            plan_manifest_digest=plan_manifest_digest,
+            run_id=run_id,
+            binding_set_digest=binding_set_digest,
+            created_at=created_at,
+        )
+        material: dict[str, Any] = {
+            **identity,
+            "execution_id": execution_id,
+            "status": "active",
+            "revision": 1,
+            "event_count": 1,
+            "latest_event_id": event.event_id,
+            "latest_event_digest": event.event_digest,
+            "node_binding_count": len(bindings),
+            "updated_at": created_at,
+        }
+        return cls(**material, execution_digest=sha256_digest(material)), event
+
     def transition(
         self,
         *,
@@ -578,6 +770,10 @@ class TaskLoopExecution(BaseModel):
             created_at=updated_at,
         )
         material = self.model_dump(mode="python", exclude={"execution_digest"})
+        if self.source_kind == "model_planner":
+            material.pop("source_kind", None)
+            material.pop("source_binding_id", None)
+            material.pop("source_binding_digest", None)
         material.update(
             {
                 "status": status,
@@ -658,9 +854,7 @@ class TaskLoopExecutionNodeRead(BaseModel):
             item is None for item in command_fields
         ):
             raise ValueError("Task-loop command node projection is incomplete")
-        if self.verified_failure_result_count and (
-            self.kind is not DraftNodeKind.CAPABILITY
-        ):
+        if self.verified_failure_result_count and (self.kind is not DraftNodeKind.CAPABILITY):
             raise ValueError("Only capability nodes may expose failure ResultRefs")
         if (
             self.created_at.tzinfo is None
@@ -823,8 +1017,7 @@ class WorkspaceCodingDeliveryWorkbenchRead(BaseModel):
             != sum(item.status != "passed" for item in self.tests)
             or (self.git_commit is None)
             is not (self.coordinator_evidence.output_node_key == "run_fixed_test")
-            or self.rollback_available
-            is not all(item.available for item in self.rollback_points)
+            or self.rollback_available is not all(item.available for item in self.rollback_points)
             or self.created_at.tzinfo is None
         ):
             raise ValueError("Workspace coding delivery projection is inconsistent")
@@ -851,7 +1044,21 @@ class TaskLoopExecutionRead(BaseModel):
         "deskpilot.task-loop-execution-read.v1"
     )
     task_id: str = Field(pattern=TASK_ID_PATTERN)
-    loop_id: str = Field(pattern=TASK_LOOP_ID_PATTERN)
+    source_kind: Literal["model_planner", "confirmed_file_set"] = Field(
+        default="model_planner",
+        exclude_if=lambda value: value == "model_planner",
+    )
+    loop_id: str | None = Field(default=None, pattern=TASK_LOOP_ID_PATTERN)
+    source_binding_id: str | None = Field(
+        default=None,
+        pattern=WORKSPACE_CODING_FILE_SET_BINDING_ID_PATTERN,
+        exclude_if=lambda value: value is None,
+    )
+    source_binding_digest: str | None = Field(
+        default=None,
+        pattern=DIGEST_PATTERN,
+        exclude_if=lambda value: value is None,
+    )
     loop_status: TaskLoopReadStatus
     phase: TaskLoopWorkbenchPhase
     loop_revision: int = Field(ge=1, le=2)
@@ -895,14 +1102,50 @@ class TaskLoopExecutionRead(BaseModel):
                 raise ValueError("Pre-execution Task Loop cannot expose a Git approval")
             if self.coding_delivery is not None:
                 raise ValueError("Pre-execution Task Loop cannot expose a coding delivery")
+            if (
+                self.source_kind == "model_planner"
+                and (
+                    self.loop_id is None
+                    or self.source_binding_id is not None
+                    or self.source_binding_digest is not None
+                )
+            ) or (
+                self.source_kind == "confirmed_file_set"
+                and (
+                    self.loop_id is not None
+                    or self.source_binding_id is None
+                    or self.source_binding_digest is None
+                )
+            ):
+                raise ValueError("Pre-execution source binding changed")
         else:
             if (
                 self.loop_status != "planned"
                 or self.execution.task_id != self.task_id
-                or self.execution.loop_id != self.loop_id
                 or self.phase in {"observe", "plan"}
             ):
                 raise ValueError("Execution read crosses its planned Task Loop")
+            if (
+                self.source_kind == "model_planner"
+                and (
+                    self.loop_id is None
+                    or self.source_binding_id is not None
+                    or self.source_binding_digest is not None
+                    or self.execution.source_kind != "model_planner"
+                    or self.execution.loop_id != self.loop_id
+                )
+            ) or (
+                self.source_kind == "confirmed_file_set"
+                and (
+                    self.loop_id is not None
+                    or self.source_binding_id is None
+                    or self.source_binding_digest is None
+                    or self.execution.source_kind != "confirmed_file_set"
+                    or self.execution.source_binding_id != self.source_binding_id
+                    or self.execution.source_binding_digest != self.source_binding_digest
+                )
+            ):
+                raise ValueError("Execution read source binding changed")
             expected_recoverable = self.execution.status in {
                 "active",
                 "paused",
@@ -916,6 +1159,10 @@ class TaskLoopExecutionRead(BaseModel):
             if self.coding_delivery is not None and self.execution.status != "succeeded":
                 raise ValueError("Coding delivery requires a succeeded execution")
         material = self.model_dump(mode="json", exclude={"read_digest"})
+        if self.source_kind == "model_planner":
+            material.pop("source_kind", None)
+            material.pop("source_binding_id", None)
+            material.pop("source_binding_digest", None)
         if self.read_digest != sha256_digest(material):
             raise ValueError("Task-loop execution read digest does not match")
         return self
@@ -926,6 +1173,10 @@ class TaskLoopExecutionRead(BaseModel):
             "schema_version": "deskpilot.task-loop-execution-read.v1",
             **values,
         }
+        if material.get("source_kind", "model_planner") == "model_planner":
+            material.pop("source_kind", None)
+            material.pop("source_binding_id", None)
+            material.pop("source_binding_digest", None)
         material.setdefault("cycle", None)
         material.setdefault("workspace_patch", None)
         material.setdefault("git_commit", None)
@@ -992,10 +1243,7 @@ class TaskLoopExecutionWorkbenchNodeRead(BaseModel):
             item is not None for item in command_fields
         ):
             raise ValueError("Task-loop Workbench command summary is incomplete")
-        if (
-            self.verified_failure_result_count
-            and self.kind is not DraftNodeKind.CAPABILITY
-        ):
+        if self.verified_failure_result_count and self.kind is not DraftNodeKind.CAPABILITY:
             raise ValueError("Only capability nodes may expose verified failure receipts")
         material = self.model_dump(mode="json", exclude={"summary_digest"})
         if self.summary_digest != sha256_digest(material):
@@ -1093,9 +1341,7 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
         if self.execution_status is None and self.execution_event_count != 0:
             raise ValueError("Pre-execution Workbench read has execution events")
         if self.execution_status is None and (
-            self.no_progress_count
-            or self.repair_count
-            or self.budget_exhausted
+            self.no_progress_count or self.repair_count or self.budget_exhausted
         ):
             raise ValueError("Pre-execution Workbench read has cycle state")
         if self.coding_delivery is not None and self.execution_status != "succeeded":
@@ -1137,15 +1383,11 @@ class TaskLoopExecutionWorkbenchRead(BaseModel):
             "verified_failure_result_count": sum(
                 item.verified_failure_result_count for item in nodes
             ),
-            "no_progress_count": (
-                read.cycle.no_progress_count if read.cycle is not None else 0
-            ),
+            "no_progress_count": (read.cycle.no_progress_count if read.cycle is not None else 0),
             "no_progress_limit": 3,
             "repair_count": read.cycle.repair_count if read.cycle is not None else 0,
             "maximum_plan_generations": 3,
-            "budget_exhausted": (
-                read.cycle.budget_exhausted if read.cycle is not None else False
-            ),
+            "budget_exhausted": (read.cycle.budget_exhausted if read.cycle is not None else False),
             "nodes": nodes,
             "coding_delivery": read.coding_delivery,
             "recoverable": read.recoverable,

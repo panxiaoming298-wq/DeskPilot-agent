@@ -31,6 +31,7 @@ class TaskLoopAgentAdapterManifest(BaseModel):
         "research_to_html",
         "workspace_file_read",
         "workspace_coding_loop",
+        "workspace_confirmed_file_set",
     ]
     source_local_key: str = Field(min_length=1, max_length=64)
     agent_id: str = Field(min_length=1, max_length=128)
@@ -71,9 +72,7 @@ class TaskLoopAgentAdapterManifest(BaseModel):
             "runtime_enabled": True,
             **values,
         }
-        return cls.model_validate(
-            {**material, "manifest_digest": sha256_digest(material)}
-        )
+        return cls.model_validate({**material, "manifest_digest": sha256_digest(material)})
 
 
 class TaskLoopAgentAdapterRegistry:
@@ -98,6 +97,8 @@ class TaskLoopAgentAdapterRegistry:
         manifest = self._by_route_node.get((route_id, source_local_key))
         if manifest is None and route_id == "workspace_coding_loop":
             manifest = self._bounded_coding_manifest(source_local_key)
+        if manifest is None and route_id == "workspace_confirmed_file_set":
+            manifest = self._confirmed_reader_manifest(source_local_key)
         if (
             manifest is None
             or not manifest.runtime_enabled
@@ -150,11 +151,24 @@ class TaskLoopAgentAdapterRegistry:
             )
         return None
 
-    def manifests(self) -> tuple[TaskLoopAgentAdapterManifest, ...]:
-        return tuple(
-            self._by_route_node[key]
-            for key in sorted(self._by_route_node)
+    @staticmethod
+    def _confirmed_reader_manifest(
+        source_local_key: str,
+    ) -> TaskLoopAgentAdapterManifest | None:
+        if not source_local_key.startswith("inspect_candidate_"):
+            return None
+        return TaskLoopAgentAdapterManifest.build(
+            adapter_id=f"builtin.task-loop.confirmed-{source_local_key}.v1",
+            route_id="workspace_confirmed_file_set",
+            source_local_key=source_local_key,
+            agent_id="builtin.workspace_reader",
+            agent_versions=("1.0.0", "1.1.0", "1.2.0"),
+            capability_id="workspace.file.read.v1",
+            parameter_name="path",
         )
+
+    def manifests(self) -> tuple[TaskLoopAgentAdapterManifest, ...]:
+        return tuple(self._by_route_node[key] for key in sorted(self._by_route_node))
 
     @property
     def snapshot_digest(self) -> str:

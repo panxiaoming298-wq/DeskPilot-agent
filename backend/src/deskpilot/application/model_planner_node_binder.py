@@ -18,9 +18,16 @@ from deskpilot.application.task_loop_agent_adapter_registry import (
     TaskLoopAgentAdapterRegistry,
 )
 from deskpilot.application.turn_planner_runtime import RevalidatedDeferredPlan
+from deskpilot.application.workspace_coding_exploration_binder import (
+    WorkspaceCodingReaderActivationBundle,
+)
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.agent_contracts import AgentToolGrant, BoundAgentRef
-from deskpilot.domain.task_loop import ModelPlannerDraft, ModelPlannerStepBinding
+from deskpilot.domain.task_loop import (
+    ModelPlannerDraft,
+    ModelPlannerNodeMapping,
+    ModelPlannerStepBinding,
+)
 from deskpilot.domain.task_loop_execution import (
     EffectiveNodeAuthority,
     ModelPlannerNodeBinding,
@@ -35,6 +42,7 @@ from deskpilot.domain.task_plans import (
     TaskContract,
 )
 from deskpilot.domain.tool_contracts import ToolRiskLevel
+from deskpilot.domain.workspace_coding_explorations import WorkspaceCodingReaderNodeProof
 
 _CLASSIFICATION_ORDER = {"public": 0, "internal": 1, "sensitive": 2}
 _RISK_ORDER = {
@@ -184,6 +192,184 @@ class ModelPlannerNodeBinder:
             raise ModelPlannerNodeProofRejectedError(
                 "Not every runnable composite node has one exact source-step binding"
             )
+        return tuple(sorted(bindings, key=lambda item: item.composite_node_id))
+
+    def bind_confirmed_readers(
+        self,
+        bundle: WorkspaceCodingReaderActivationBundle,
+    ) -> tuple[ModelPlannerNodeBinding, ...]:
+        """Bind exact confirmed Reader nodes without inventing a model Offer."""
+
+        snapshot = bundle.snapshot
+        proposal = bundle.proposal
+        confirmed = bundle.binding
+        if (
+            confirmed.proposal_id != proposal.proposal_id
+            or confirmed.proposal_digest != proposal.proposal_digest
+            or proposal.snapshot_id != snapshot.snapshot_id
+            or proposal.snapshot_digest != snapshot.snapshot_digest
+        ):
+            raise ModelPlannerNodeProofRejectedError(
+                "Confirmed Reader activation crossed its exploration lineage"
+            )
+        files = {item.relative_path: item for item in snapshot.files}
+        nodes = {item.node_id: item for item in confirmed.expected_plan.nodes}
+        bindings: list[ModelPlannerNodeBinding] = []
+        for mapping in confirmed.mappings:
+            node = nodes.get(mapping.plan_node_id)
+            file_proof = files.get(mapping.relative_path)
+            if (
+                node is None
+                or file_proof is None
+                or file_proof.proof_digest != mapping.source_file_proof_digest
+                or node.local_key != mapping.plan_local_key
+                or node.node_spec_digest != mapping.plan_node_spec_digest
+                or node.kind is not DraftNodeKind.AGENT
+                or node.bound_agent is None
+                or node.bound_agent.agent_id != "builtin.workspace_reader"
+                or node.capability is None
+                or node.capability.capability_id != "workspace.file.read.v1"
+            ):
+                raise ModelPlannerNodeProofRejectedError(
+                    "Confirmed Reader mapping no longer resolves exactly"
+                )
+            try:
+                self._agents.resolve_exact(
+                    node.bound_agent.agent_id,
+                    node.bound_agent.version,
+                    contract_digest=node.bound_agent.contract_digest,
+                    prompt_package_digest=node.bound_agent.prompt_package_digest,
+                )
+                adapter = self._agent_adapters.resolve(
+                    route_id="workspace_confirmed_file_set",
+                    source_local_key=node.local_key,
+                    bound_agent=node.bound_agent,
+                    capability=node.capability,
+                )
+            except (AgentRegistryError, TaskLoopAgentAdapterError) as error:
+                raise ModelPlannerNodeRuntimeIneligibleError(
+                    "Confirmed Reader Agent runtime is no longer eligible"
+                ) from error
+            reader_proof = WorkspaceCodingReaderNodeProof.build(
+                file_set_binding_id=confirmed.binding_id,
+                file_set_binding_digest=confirmed.binding_digest,
+                proposal_id=proposal.proposal_id,
+                proposal_digest=proposal.proposal_digest,
+                snapshot_id=snapshot.snapshot_id,
+                snapshot_digest=snapshot.snapshot_digest,
+                catalog_digest=snapshot.catalog_digest,
+                project_path=snapshot.project_path,
+                ecosystem=snapshot.ecosystem,
+                successor_task_id=confirmed.successor_task_id,
+                confirmation_message_id=confirmed.confirmation_message_id,
+                confirmation_message_digest=confirmed.confirmation_message_digest,
+                ordinal=mapping.ordinal,
+                relative_path=mapping.relative_path,
+                workspace_relative_path=(
+                    mapping.relative_path
+                    if snapshot.project_path == "."
+                    else f"{snapshot.project_path.rstrip('/')}/{mapping.relative_path}"
+                ),
+                source_file_proof_digest=mapping.source_file_proof_digest,
+                plan_id=confirmed.expected_plan.plan_id,
+                plan_manifest_digest=confirmed.expected_plan_manifest_digest,
+                plan_node_id=node.node_id,
+                plan_local_key=node.local_key,
+                plan_node_spec_digest=node.node_spec_digest,
+                reader_agent=node.bound_agent,
+                capability=node.capability,
+            )
+            node_mapping = ModelPlannerNodeMapping.build(
+                source_node_id=node.node_id,
+                source_local_key=node.local_key,
+                source_node_spec_digest=node.node_spec_digest,
+                composite_node_id=node.node_id,
+                composite_local_key=node.local_key,
+                composite_node_spec_digest=node.node_spec_digest,
+            )
+            authority = EffectiveNodeAuthority.build(
+                authority_rule="confirmed_file_set_exact_reader",
+                composite_contract_digest=confirmed.task_contract_digest,
+                source_contract_digest=confirmed.task_contract_digest,
+                node_kind=node.kind,
+                bound_agent=node.bound_agent,
+                bound_tool=node.bound_tool,
+                capability=node.capability,
+                resource_scopes=confirmed.task_contract.resource_scopes,
+                privacy_classification=(confirmed.task_contract.privacy_policy.classification),
+                allowed_provider_locations=(
+                    confirmed.task_contract.privacy_policy.allowed_provider_locations
+                ),
+                allowed_privacy_modes=(
+                    confirmed.task_contract.privacy_policy.allowed_privacy_modes
+                ),
+                external_egress_allowed=(
+                    confirmed.task_contract.privacy_policy.external_egress_allowed
+                ),
+                max_risk_level=confirmed.task_contract.max_risk_level,
+                budget=node.budget,
+            )
+            eligibility = RuntimeEligibilityProof.build(
+                runtime_kind="agent",
+                bound_agent=node.bound_agent,
+                capability=None,
+                executor_id=None,
+                executor_manifest_digest=None,
+                agent_adapter_id=adapter.adapter_id,
+                agent_adapter_manifest_digest=adapter.manifest_digest,
+                registry_snapshot_digest=sha256_digest(
+                    {
+                        "agent_registry_snapshot_digest": (self._agents.snapshot().snapshot_digest),
+                        "agent_adapter_registry_snapshot_digest": (
+                            self._agent_adapters.snapshot_digest
+                        ),
+                    }
+                ),
+            )
+            bound_input = {
+                "path": reader_proof.workspace_relative_path,
+                "project_path": snapshot.project_path,
+                "source_file_proof_digest": mapping.source_file_proof_digest,
+                "workspace_reader_node_proof_digest": reader_proof.proof_digest,
+            }
+            bindings.append(
+                ModelPlannerNodeBinding.build(
+                    source_kind="confirmed_file_set",
+                    task_id=confirmed.successor_task_id,
+                    user_message_id=confirmed.confirmation_message_id,
+                    draft_id=None,
+                    step_binding_id=None,
+                    step_binding_digest=None,
+                    step_ordinal=None,
+                    offer_id=None,
+                    offer_key=None,
+                    offer_digest=None,
+                    recipe=None,
+                    policy_snapshot_digest=None,
+                    source_contract_digest=confirmed.task_contract_digest,
+                    source_plan_id=confirmed.expected_plan.plan_id,
+                    source_plan_manifest_digest=(confirmed.expected_plan_manifest_digest),
+                    source_node_id=node.node_id,
+                    source_node_spec_digest=node.node_spec_digest,
+                    composite_contract_digest=confirmed.task_contract_digest,
+                    composite_plan_id=confirmed.expected_plan.plan_id,
+                    composite_plan_manifest_digest=(confirmed.expected_plan_manifest_digest),
+                    composite_node_id=node.node_id,
+                    composite_node_spec_digest=node.node_spec_digest,
+                    mapping=node_mapping,
+                    parameter_bindings=(),
+                    parameter_bindings_digest=sha256_digest({"parameter_bindings": []}),
+                    bound_input_manifest=bound_input,
+                    bound_input_digest=sha256_digest(
+                        {"parameters": dict(sorted(bound_input.items()))}
+                    ),
+                    effective_authority=authority,
+                    runtime_eligibility=eligibility,
+                    workspace_reader_node_proof=reader_proof,
+                )
+            )
+        if len(bindings) != len(confirmed.mappings):
+            raise ModelPlannerNodeProofRejectedError("Confirmed Reader binding set is incomplete")
         return tuple(sorted(bindings, key=lambda item: item.composite_node_id))
 
     @staticmethod

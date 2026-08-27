@@ -1,5 +1,7 @@
 # 阶段 116B：持久多 Agent 编码循环第八检查点
 
+> 后续状态（2026-08-27）：本页留下的 confirmed Reader TaskLoop 激活、恢复扫描与不重复读取已在[第九检查点](116B-持久多Agent编码循环第九检查点.md)闭合；Reader 证据到新变更提案/确认/后继写计划仍待下一纵切。
+
 ## 1. 检查点结论
 
 第八检查点完成了第七检查点留下的第一个真实执行缺口：`builtin.workspace_coding_explorer@1.0.0` 不再由调用方直接提交一个看似可信的 Decision，而是通过现有 `AgentExecutionRun → AgentNode → AgentInvocation → AgentModelTurn → AgentDecision → AgentResult` 主干持久运行。只有这条链完整结束、所有内容摘要与绑定重新验证通过后，Binder 才会原子生成候选文件集 Proposal。

@@ -73,7 +73,12 @@ from deskpilot.domain.task_loop_execution import (
     TaskLoopExecutionStatus,
     TaskLoopVerifiedResult,
 )
-from deskpilot.domain.task_plans import DraftNodeKind, PlanNodeBudget
+from deskpilot.domain.task_plans import (
+    DraftNodeKind,
+    ExecutablePlan,
+    PlanNodeBudget,
+    TaskContract,
+)
 from deskpilot.domain.workspace_coding_amendments import (
     WorkspaceCodingAmendmentBinding,
 )
@@ -88,6 +93,7 @@ from deskpilot.infrastructure.models import (
     AgentInvocationRecord,
     AgentModelTurnRecord,
     ModelPlannerNodeBindingRecord,
+    TaskContractVersionRecord,
     TaskExecutionNodeRecord,
     TaskExecutionRunRecord,
     TaskLoopCapabilityApprovalRecord,
@@ -96,6 +102,7 @@ from deskpilot.infrastructure.models import (
     TaskLoopExecutionRecord,
     TaskLoopNodeAttemptRecord,
     TaskLoopVerifiedResultRecord,
+    TaskPlanGenerationRecord,
     TaskRecord,
     WorkspaceCodingDeliveryRecord,
     utc_now,
@@ -180,7 +187,10 @@ class TaskLoopExecutionCoordinator:
         command = self._reducer.decide(snapshot)
 
         if command.kind == "activate_plan":
-            await self._activation.activate(task_id)
+            if before.source_kind == "confirmed_file_set":
+                await self._activation.activate_confirmed_readers(task_id)
+            else:
+                await self._activation.activate(task_id)
         elif command.kind == "execute_capability":
             await self._execute_capability(task_id, owner_id, command)
         elif command.kind == "execute_agent":
@@ -317,18 +327,13 @@ class TaskLoopExecutionCoordinator:
                 "Parallel Agent Task Loop runtime is unavailable"
             )
         selected = {
-            item.node_id: item
-            for item in read.nodes
-            if item.node_id in set(command.node_ids)
+            item.node_id: item for item in read.nodes if item.node_id in set(command.node_ids)
         }
-        if (
-            set(selected) != set(command.node_ids)
-            or any(
-                item.kind is not DraftNodeKind.AGENT
-                or item.status != "ready"
-                or not item.dependencies_verified
-                for item in selected.values()
-            )
+        if set(selected) != set(command.node_ids) or any(
+            item.kind is not DraftNodeKind.AGENT
+            or item.status != "ready"
+            or not item.dependencies_verified
+            for item in selected.values()
         ):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Parallel Agent batch changed after reducer selection"
@@ -367,18 +372,16 @@ class TaskLoopExecutionCoordinator:
                 "coordinate_bounded_coding",
             }:
                 await self._agents.run_coding_coordinator_candidate(source)
-            elif is_workspace_coding_reader_key(
-                source.binding.mapping.source_local_key
-            ):
+            elif is_workspace_coding_reader_key(source.binding.mapping.source_local_key):
                 await self._agents.run_workspace_file_candidate(source)
-            elif is_workspace_coding_planner_key(
-                source.binding.mapping.source_local_key
-            ):
+            elif is_workspace_coding_planner_key(source.binding.mapping.source_local_key):
                 await self._agents.run_patch_planner_candidate(source)
             else:
                 raise TaskLoopExecutionCoordinatorProofRejectedError(
                     "Coding Agent node is not registered by the fixed DAG"
                 )
+        elif source.route_id == "workspace_confirmed_file_set":
+            await self._agents.run_workspace_file_candidate(source)
         else:  # pragma: no cover - registry and dataclass Literals are closed.
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Agent adapter returned an unsupported source Route"
@@ -450,13 +453,59 @@ class TaskLoopExecutionCoordinator:
         task_id: str,
         source: SourceBoundAgentClaim,
     ) -> AgentSourcePlanProof:
+        if source.binding.source_kind == "confirmed_file_set":
+            reader_proof = source.binding.workspace_reader_node_proof
+            if reader_proof is None:
+                raise TaskLoopExecutionCoordinatorProofRejectedError(
+                    "Confirmed Reader source lost its exact proof"
+                )
+            async with self._database.session() as session:
+                contract_record = await session.get(
+                    TaskContractVersionRecord,
+                    (task_id, 1),
+                )
+                plan_record = await session.get(
+                    TaskPlanGenerationRecord,
+                    (task_id, 1),
+                )
+            try:
+                contract = (
+                    TaskContract.model_validate(contract_record.manifest)
+                    if contract_record is not None
+                    else None
+                )
+                plan = (
+                    ExecutablePlan.model_validate(plan_record.manifest)
+                    if plan_record is not None
+                    else None
+                )
+            except ValidationError as error:
+                raise TaskLoopExecutionCoordinatorProofRejectedError(
+                    "Confirmed Reader Contract or Plan Schema changed"
+                ) from error
+            if (
+                contract is None
+                or plan is None
+                or contract.digest != source.binding.source_contract_digest
+                or plan.plan_id != reader_proof.plan_id
+                or plan.plan_manifest_digest != reader_proof.plan_manifest_digest
+                or source.binding.source_plan_id != plan.plan_id
+                or source.binding.source_plan_manifest_digest != plan.plan_manifest_digest
+            ):
+                raise TaskLoopExecutionCoordinatorProofRejectedError(
+                    "Confirmed Reader source Contract or Plan changed"
+                )
+            return AgentSourcePlanProof(
+                source_contract=contract,
+                source_plan=plan,
+            )
         if self._turn_planner is None:
             raise TaskLoopExecutionCoordinatorUnavailableError(
                 "Turn Planner proof runtime is unavailable"
             )
         deferred = await self._turn_planner.revalidate_task_loop_plan(task_id)
         ordinal = source.binding.step_ordinal
-        if not 1 <= ordinal <= len(deferred.steps):
+        if ordinal is None or not 1 <= ordinal <= len(deferred.steps):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Agent source step ordinal changed"
             )
@@ -489,7 +538,7 @@ class TaskLoopExecutionCoordinator:
         if node is None or node.kind in {DraftNodeKind.AGENT, DraftNodeKind.CAPABILITY}:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Reducer control target is not a control node"
-        )
+            )
         if node.local_key == "final_acceptance":
             try:
                 result_kinds = await self._preflight_final_results(execution)
@@ -535,23 +584,19 @@ class TaskLoopExecutionCoordinator:
             runnable = {
                 item.node_id
                 for item in nodes
-                if item.node_kind
-                in {DraftNodeKind.AGENT.value, DraftNodeKind.CAPABILITY.value}
+                if item.node_kind in {DraftNodeKind.AGENT.value, DraftNodeKind.CAPABILITY.value}
             }
             records = tuple(
                 (
                     await session.scalars(
                         select(TaskLoopVerifiedResultRecord).where(
-                            TaskLoopVerifiedResultRecord.execution_id
-                            == execution.execution_id
+                            TaskLoopVerifiedResultRecord.execution_id == execution.execution_id
                         )
                     )
                 ).all()
             )
         try:
-            results = tuple(
-                self._verified_result_from_record(item) for item in records
-            )
+            results = tuple(self._verified_result_from_record(item) for item in records)
         except ValidationError as error:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Final ResultRef Schema proof was rejected"
@@ -629,12 +674,16 @@ class TaskLoopExecutionCoordinator:
     @staticmethod
     def _assert_success_semantics(result: TaskLoopVerifiedResult) -> None:
         output = result.output_manifest
-        if result.result_kind in {
-            CapabilityResultKind.WORKSPACE_CHECK.value,
-            CapabilityResultKind.PYTHON_TEST.value,
-            CapabilityResultKind.NODE_TEST.value,
-            CapabilityResultKind.COMMAND_PROFILE.value,
-        } and output.get("status") != "passed":
+        if (
+            result.result_kind
+            in {
+                CapabilityResultKind.WORKSPACE_CHECK.value,
+                CapabilityResultKind.PYTHON_TEST.value,
+                CapabilityResultKind.NODE_TEST.value,
+                CapabilityResultKind.COMMAND_PROFILE.value,
+            }
+            and output.get("status") != "passed"
+        ):
             raise TaskLoopFinalAcceptanceRejectedError(
                 "Verified check evidence does not satisfy final acceptance"
             )
@@ -696,9 +745,7 @@ class TaskLoopExecutionCoordinator:
                 .with_for_update()
             )
             task = await session.scalar(
-                select(TaskRecord)
-                .where(TaskRecord.task_id == execution.task_id)
-                .with_for_update()
+                select(TaskRecord).where(TaskRecord.task_id == execution.task_id).with_for_update()
             )
             if (
                 record.status != "active"
@@ -744,8 +791,7 @@ class TaskLoopExecutionCoordinator:
             (
                 await session.scalars(
                     select(ModelPlannerNodeBindingRecord).where(
-                        ModelPlannerNodeBindingRecord.execution_id
-                        == execution.execution_id
+                        ModelPlannerNodeBindingRecord.execution_id == execution.execution_id
                     )
                 )
             ).all()
@@ -753,7 +799,8 @@ class TaskLoopExecutionCoordinator:
         coding_bindings = tuple(
             item
             for item in bindings
-            if item.recipe_manifest.get("route_id") == "workspace_coding_loop"
+            if item.recipe_manifest is not None
+            and item.recipe_manifest.get("route_id") == "workspace_coding_loop"
         )
         if not coding_bindings:
             return
@@ -784,10 +831,7 @@ class TaskLoopExecutionCoordinator:
             (
                 await session.scalars(
                     select(TaskLoopVerifiedResultRecord)
-                    .where(
-                        TaskLoopVerifiedResultRecord.execution_id
-                        == execution.execution_id
-                    )
+                    .where(TaskLoopVerifiedResultRecord.execution_id == execution.execution_id)
                     .order_by(
                         TaskLoopVerifiedResultRecord.node_id,
                         TaskLoopVerifiedResultRecord.created_at,
@@ -796,9 +840,7 @@ class TaskLoopExecutionCoordinator:
             ).all()
         )
         try:
-            results = tuple(
-                self._verified_result_from_record(item) for item in result_records
-            )
+            results = tuple(self._verified_result_from_record(item) for item in result_records)
         except ValidationError as error:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery ResultRefs are invalid"
@@ -808,8 +850,7 @@ class TaskLoopExecutionCoordinator:
             for item in (
                 await session.scalars(
                     select(TaskLoopNodeAttemptRecord).where(
-                        TaskLoopNodeAttemptRecord.execution_id
-                        == execution.execution_id
+                        TaskLoopNodeAttemptRecord.execution_id == execution.execution_id
                     )
                 )
             ).all()
@@ -830,9 +871,7 @@ class TaskLoopExecutionCoordinator:
             if item.result_kind == CapabilityResultKind.COORDINATION_PLAN.value
         )
         patch_results = tuple(
-            item
-            for item in results
-            if item.result_kind == CapabilityResultKind.PATCH_RECEIPT.value
+            item for item in results if item.result_kind == CapabilityResultKind.PATCH_RECEIPT.value
         )
         proposal_results = tuple(
             item
@@ -849,9 +888,7 @@ class TaskLoopExecutionCoordinator:
             }
         )
         git_results = tuple(
-            item
-            for item in results
-            if item.result_kind == CapabilityResultKind.GIT_COMMIT.value
+            item for item in results if item.result_kind == CapabilityResultKind.GIT_COMMIT.value
         )
         if (
             len(coordinator_results) != 1
@@ -909,8 +946,7 @@ class TaskLoopExecutionCoordinator:
             or len(reader_bindings) != file_count
             or len(reader_nodes) != file_count
             or any(
-                item.depends_on != [coordinator_binding.composite_node_id]
-                for item in reader_nodes
+                item.depends_on != [coordinator_binding.composite_node_id] for item in reader_nodes
             )
             or not isinstance(raw_graph_nodes, list)
             or len(raw_graph_nodes) != (2 * file_count) + 3
@@ -943,17 +979,14 @@ class TaskLoopExecutionCoordinator:
         }
         try:
             readers = tuple(
-                WorkspaceFileRead.model_validate(item.output_manifest)
-                for item in reader_results
+                WorkspaceFileRead.model_validate(item.output_manifest) for item in reader_results
             )
             patch_result = patch_results[0]
             patch_output = WorkspacePatchCapabilityOutput.model_validate(
                 patch_result.output_manifest
             )
             patch_attempt = attempts[patch_result.attempt_id]
-            bound_patch = BoundCapabilityInput.model_validate(
-                patch_attempt.input_manifest
-            )
+            bound_patch = BoundCapabilityInput.model_validate(patch_attempt.input_manifest)
             git_result = git_results[0]
             git_output = WorkspaceGitCommitCapabilityOutput.model_validate(
                 git_result.output_manifest
@@ -964,12 +997,9 @@ class TaskLoopExecutionCoordinator:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery evidence Schema changed"
             ) from error
-        if (
-            patch_output.receipt.status != "committed"
-            or not isinstance(
-                bound_patch.arguments,
-                WorkspacePatchBundleExecutorInput,
-            )
+        if patch_output.receipt.status != "committed" or not isinstance(
+            bound_patch.arguments,
+            WorkspacePatchBundleExecutorInput,
         ):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery has no committed exact Patch"
@@ -1026,9 +1056,7 @@ class TaskLoopExecutionCoordinator:
                 {
                     "path": path,
                     "agent_id": "builtin.workspace_patch_planner",
-                    "agent_version": (
-                        proposal_result.agent_binding_manifest or {}
-                    ).get("version"),
+                    "agent_version": (proposal_result.agent_binding_manifest or {}).get("version"),
                     "model_turn_id": verification["model_turn_id"],
                     "decision_id": verification["decision_id"],
                     "decision_digest": verification["decision_digest"],
@@ -1036,9 +1064,7 @@ class TaskLoopExecutionCoordinator:
                     "verification_digest": proposal_result.verification_digest,
                 }
             )
-        expected_proposals = {
-            item.path: (item.old_text, item.new_text) for item in changes
-        }
+        expected_proposals = {item.path: (item.old_text, item.new_text) for item in changes}
         consumed_proposal_refs = {
             item.result_ref_digest
             for item in bound_patch.dependency_result_refs
@@ -1050,8 +1076,7 @@ class TaskLoopExecutionCoordinator:
             or set(change_receipts) != changed_paths
             or {item.relative_path for item in readers} != changed_paths
             or proposal_changes != expected_proposals
-            or consumed_proposal_refs
-            != {item.result_ref_digest for item in proposal_results}
+            or consumed_proposal_refs != {item.result_ref_digest for item in proposal_results}
         ):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding delivery Patch differs from Reader scope"
@@ -1111,19 +1136,15 @@ class TaskLoopExecutionCoordinator:
         project_prefix = f"{git_output.receipt.project_path.rstrip('/')}/"
         expected_git_paths = tuple(
             sorted(
-                (
-                    item.path.removeprefix(project_prefix)
-                    for item in changes
-                ),
+                (item.path.removeprefix(project_prefix) for item in changes),
                 key=str.casefold,
             )
         )
-        if (
-            tuple(item.relative_path for item in git_output.receipt.paths)
-            != expected_git_paths
-            or tuple(sorted(bound_git.arguments.paths, key=str.casefold))
-            != tuple(sorted((item.path for item in changes), key=str.casefold))
-        ):
+        if tuple(
+            item.relative_path for item in git_output.receipt.paths
+        ) != expected_git_paths or tuple(
+            sorted(bound_git.arguments.paths, key=str.casefold)
+        ) != tuple(sorted((item.path for item in changes), key=str.casefold)):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Workspace coding Git commit differs from the approved Patch scope"
             )
@@ -1132,9 +1153,7 @@ class TaskLoopExecutionCoordinator:
             "expected_head_oid": git_output.receipt.expected_head_oid,
             "commit_oid": git_output.receipt.commit_oid,
             "tree_oid": git_output.receipt.tree_oid,
-            "path_proof_digests": [
-                item.proof_digest for item in git_output.receipt.paths
-            ],
+            "path_proof_digests": [item.proof_digest for item in git_output.receipt.paths],
             "result_ref_digest": git_result.result_ref_digest,
             "verification_digest": git_result.verification_digest,
             "receipt_digest": git_output.receipt.receipt_digest,
@@ -1154,9 +1173,7 @@ class TaskLoopExecutionCoordinator:
             {
                 "path": path,
                 "backup_relative_path": change_receipts[path].backup_relative_path,
-                "previous_version_digest": (
-                    change_receipts[path].previous_version_digest
-                ),
+                "previous_version_digest": (change_receipts[path].previous_version_digest),
                 "version_digest": change_receipts[path].version_digest,
                 "receipt_digest": change_receipts[path].receipt_digest,
             }
@@ -1217,10 +1234,7 @@ class TaskLoopExecutionCoordinator:
         delivery_digest = sha256_digest(manifest)
         existing = await session.scalar(
             select(WorkspaceCodingDeliveryRecord)
-            .where(
-                WorkspaceCodingDeliveryRecord.execution_id
-                == execution.execution_id
-            )
+            .where(WorkspaceCodingDeliveryRecord.execution_id == execution.execution_id)
             .with_for_update()
         )
         if existing is not None:
@@ -1290,18 +1304,13 @@ class TaskLoopExecutionCoordinator:
             return
         async with self._database.session() as session:
             record = await session.scalar(
-                select(TaskLoopCycleEventRecord)
-                .where(
-                    TaskLoopCycleEventRecord.execution_id
-                    == read.execution.execution_id,
-                    TaskLoopCycleEventRecord.sequence
-                    == read.cycle.latest_event_sequence,
+                select(TaskLoopCycleEventRecord).where(
+                    TaskLoopCycleEventRecord.execution_id == read.execution.execution_id,
+                    TaskLoopCycleEventRecord.sequence == read.cycle.latest_event_sequence,
                 )
             )
         if record is None:
-            raise TaskLoopExecutionCoordinatorProofRejectedError(
-                "Repair cycle marker disappeared"
-            )
+            raise TaskLoopExecutionCoordinatorProofRejectedError("Repair cycle marker disappeared")
         event = self._cycle_event_from_record(record)
         target = event.evidence_manifest.get("target_node_id")
         if not isinstance(target, str):
@@ -1332,8 +1341,7 @@ class TaskLoopExecutionCoordinator:
             attempt = await session.scalar(
                 select(TaskLoopNodeAttemptRecord)
                 .where(
-                    TaskLoopNodeAttemptRecord.execution_id
-                    == execution.execution_id,
+                    TaskLoopNodeAttemptRecord.execution_id == execution.execution_id,
                     TaskLoopNodeAttemptRecord.node_id == node_id,
                 )
                 .order_by(TaskLoopNodeAttemptRecord.attempt.desc())
@@ -1343,8 +1351,7 @@ class TaskLoopExecutionCoordinator:
             approval = await session.scalar(
                 select(TaskLoopCapabilityApprovalRecord.approval_id)
                 .where(
-                    TaskLoopCapabilityApprovalRecord.execution_id
-                    == execution.execution_id,
+                    TaskLoopCapabilityApprovalRecord.execution_id == execution.execution_id,
                     TaskLoopCapabilityApprovalRecord.node_id == node_id,
                 )
                 .limit(1)
@@ -1438,8 +1445,7 @@ class TaskLoopExecutionCoordinator:
                 )
         if (
             command.expected_execution_revision != execution.revision
-            or command.source_progress_digest
-            != current_snapshot.semantic_progress_digest
+            or command.source_progress_digest != current_snapshot.semantic_progress_digest
         ):
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Cycle command changed before persistence"
@@ -1492,9 +1498,7 @@ class TaskLoopExecutionCoordinator:
                 .with_for_update()
             )
             latest = (
-                self._cycle_event_from_record(latest_record)
-                if latest_record is not None
-                else None
+                self._cycle_event_from_record(latest_record) if latest_record is not None else None
             )
             if (
                 latest is not None
@@ -1509,8 +1513,7 @@ class TaskLoopExecutionCoordinator:
                         select(func.count())
                         .select_from(TaskLoopCycleEventRecord)
                         .where(
-                            TaskLoopCycleEventRecord.execution_id
-                            == execution.execution_id,
+                            TaskLoopCycleEventRecord.execution_id == execution.execution_id,
                             TaskLoopCycleEventRecord.kind == "repair_started",
                         )
                     )
@@ -1522,9 +1525,7 @@ class TaskLoopExecutionCoordinator:
                     )
             if kind == "repair_completed":
                 latest_target = (
-                    latest.evidence_manifest.get("target_node_id")
-                    if latest is not None
-                    else None
+                    latest.evidence_manifest.get("target_node_id") if latest is not None else None
                 )
                 if (
                     latest is None
@@ -1542,10 +1543,8 @@ class TaskLoopExecutionCoordinator:
                         await session.scalars(
                             select(TaskLoopCycleEventRecord)
                             .where(
-                                TaskLoopCycleEventRecord.execution_id
-                                == execution.execution_id,
-                                TaskLoopCycleEventRecord.kind
-                                == "no_progress_observed",
+                                TaskLoopCycleEventRecord.execution_id == execution.execution_id,
+                                TaskLoopCycleEventRecord.kind == "no_progress_observed",
                                 TaskLoopCycleEventRecord.source_progress_digest
                                 == command.source_progress_digest,
                             )
@@ -1585,9 +1584,7 @@ class TaskLoopExecutionCoordinator:
                 execution_id=execution.execution_id,
                 task_id=execution.task_id,
                 sequence=(latest.sequence + 1 if latest is not None else 1),
-                previous_event_digest=(
-                    latest.event_digest if latest is not None else None
-                ),
+                previous_event_digest=(latest.event_digest if latest is not None else None),
                 kind=kind,
                 plan_generation=execution.plan_generation,
                 source_progress_digest=command.source_progress_digest,
@@ -1632,9 +1629,7 @@ class TaskLoopExecutionCoordinator:
                 .with_for_update()
             )
             task = await session.scalar(
-                select(TaskRecord)
-                .where(TaskRecord.task_id == execution.task_id)
-                .with_for_update()
+                select(TaskRecord).where(TaskRecord.task_id == execution.task_id).with_for_update()
             )
             if run is None or task is None:
                 raise TaskLoopExecutionCoordinatorProofRejectedError(
@@ -1684,9 +1679,7 @@ class TaskLoopExecutionCoordinator:
             .with_for_update()
         )
         if record is None:
-            raise TaskLoopExecutionCoordinatorProofRejectedError(
-                "Task Loop execution disappeared"
-            )
+            raise TaskLoopExecutionCoordinatorProofRejectedError("Task Loop execution disappeared")
         try:
             current = TaskLoopExecution.model_validate(record.manifest)
         except ValidationError as error:
@@ -1787,10 +1780,7 @@ class TaskLoopExecutionCoordinator:
                 (
                     await session.scalars(
                         select(TaskLoopCycleEventRecord)
-                        .where(
-                            TaskLoopCycleEventRecord.execution_id
-                            == execution.execution_id
-                        )
+                        .where(TaskLoopCycleEventRecord.execution_id == execution.execution_id)
                         .order_by(TaskLoopCycleEventRecord.sequence.desc())
                     )
                 ).all()
@@ -1848,8 +1838,7 @@ class TaskLoopExecutionCoordinator:
             attempt = await session.scalar(
                 select(TaskLoopNodeAttemptRecord)
                 .where(
-                    TaskLoopNodeAttemptRecord.execution_id
-                    == execution.execution_id,
+                    TaskLoopNodeAttemptRecord.execution_id == execution.execution_id,
                     TaskLoopNodeAttemptRecord.node_id == node.node_id,
                 )
                 .order_by(TaskLoopNodeAttemptRecord.attempt.desc())
@@ -1858,8 +1847,7 @@ class TaskLoopExecutionCoordinator:
             approval = await session.scalar(
                 select(TaskLoopCapabilityApprovalRecord.approval_id)
                 .where(
-                    TaskLoopCapabilityApprovalRecord.execution_id
-                    == execution.execution_id,
+                    TaskLoopCapabilityApprovalRecord.execution_id == execution.execution_id,
                     TaskLoopCapabilityApprovalRecord.node_id == node.node_id,
                 )
                 .limit(1)
@@ -1898,8 +1886,7 @@ class TaskLoopExecutionCoordinator:
                     )
                     .join(
                         AgentInvocationRecord,
-                        AgentInvocationRecord.invocation_id
-                        == AgentModelTurnRecord.invocation_id,
+                        AgentInvocationRecord.invocation_id == AgentModelTurnRecord.invocation_id,
                     )
                     .where(AgentInvocationRecord.run_id == execution.run_id)
                 )
@@ -1908,8 +1895,7 @@ class TaskLoopExecutionCoordinator:
                 (
                     await session.scalars(
                         select(TaskLoopNodeAttemptRecord).where(
-                            TaskLoopNodeAttemptRecord.execution_id
-                            == execution.execution_id
+                            TaskLoopNodeAttemptRecord.execution_id == execution.execution_id
                         )
                     )
                 ).all()
@@ -1932,8 +1918,7 @@ class TaskLoopExecutionCoordinator:
             "handoffs",
         )
         limits = {
-            field: sum(int(getattr(item, field)) for item in budgets.values())
-            for field in fields
+            field: sum(int(getattr(item, field)) for item in budgets.values()) for field in fields
         }
         nodes_by_id = {item.node_id: item for item in node_records}
         capability_tool_calls = sum(
@@ -1960,14 +1945,13 @@ class TaskLoopExecutionCoordinator:
             item.node_id
             for item in node_records
             if item.status in {"pending", "ready"}
-            and item.node_kind in {
+            and item.node_kind
+            in {
                 DraftNodeKind.AGENT.value,
                 DraftNodeKind.CAPABILITY.value,
             }
         }
-        prepared_nodes = {
-            item.node_id for item in attempts if item.status == "prepared"
-        }
+        prepared_nodes = {item.node_id for item in attempts if item.status == "prepared"}
         attempts_exhausted = any(
             item.node_id in unresolved
             and item.node_id not in prepared_nodes
@@ -1977,8 +1961,7 @@ class TaskLoopExecutionCoordinator:
         resource_exhausted = any(
             used[field] == limits[field]
             and any(
-                node_id in unresolved
-                and int(getattr(budgets[node_id], field)) > 0
+                node_id in unresolved and int(getattr(budgets[node_id], field)) > 0
                 for node_id in budgets
             )
             for field in ("model_calls", "tool_calls", "input_tokens", "output_tokens")
@@ -2010,17 +1993,11 @@ class TaskLoopExecutionCoordinator:
                 channel=(
                     "agent"
                     if node.kind is DraftNodeKind.AGENT
-                    else (
-                        "capability"
-                        if node.kind is DraftNodeKind.CAPABILITY
-                        else "control"
-                    )
+                    else ("capability" if node.kind is DraftNodeKind.CAPABILITY else "control")
                 ),
                 status=node.status,
                 depends_on=tuple(sorted(node.depends_on)),
-                verified_dependency_node_ids=tuple(
-                    sorted(node.verified_dependency_node_ids)
-                ),
+                verified_dependency_node_ids=tuple(sorted(node.verified_dependency_node_ids)),
                 candidate_present=node.candidate_present,
                 verified_result_present=node.verified_result_present,
                 attempt_count=node.attempt_count,
@@ -2034,9 +2011,7 @@ class TaskLoopExecutionCoordinator:
             execution_status=execution.status,
             execution_revision=execution.revision,
             nodes=nodes,
-            active_claim_count=sum(
-                item.status in {"claimed", "running"} for item in nodes
-            ),
+            active_claim_count=sum(item.status in {"claimed", "running"} for item in nodes),
             pending_user_revision=(
                 execution.revision if execution.status == "awaiting_user" else None
             ),

@@ -673,9 +673,7 @@ class CapabilityExecutionRuntime:
         )
         approval_record = await session.scalar(
             select(TaskLoopCapabilityApprovalRecord)
-            .where(
-                TaskLoopCapabilityApprovalRecord.attempt_id == attempt.attempt_id
-            )
+            .where(TaskLoopCapabilityApprovalRecord.attempt_id == attempt.attempt_id)
             .with_for_update()
         )
         if node is None or approval_record is None:
@@ -724,8 +722,7 @@ class CapabilityExecutionRuntime:
             or approval.attempt != attempt.attempt
             or approval.plan_generation != execution.plan_generation
             or approval.input_binding_digest != current_input.binding_digest
-            or approval.executor_manifest_digest
-            != registration.manifest.manifest_digest
+            or approval.executor_manifest_digest != registration.manifest.manifest_digest
             or registration.manifest.approval_requirement
             is not CapabilityApprovalRequirement.EXACT_CONFIRMATION_DIGEST
         ):
@@ -834,10 +831,7 @@ class CapabilityExecutionRuntime:
             )
             execution_record = await session.scalar(
                 select(TaskLoopExecutionRecord)
-                .where(
-                    TaskLoopExecutionRecord.execution_id
-                    == work.execution.execution_id
-                )
+                .where(TaskLoopExecutionRecord.execution_id == work.execution.execution_id)
                 .with_for_update()
             )
             if execution_record is None:
@@ -851,8 +845,7 @@ class CapabilityExecutionRuntime:
                 )
             existing = await session.scalar(
                 select(TaskLoopCapabilityApprovalRecord).where(
-                    TaskLoopCapabilityApprovalRecord.execution_id
-                    == work.execution.execution_id,
+                    TaskLoopCapabilityApprovalRecord.execution_id == work.execution.execution_id,
                     TaskLoopCapabilityApprovalRecord.node_id == work.plan_node.node_id,
                 )
             )
@@ -959,8 +952,7 @@ class CapabilityExecutionRuntime:
                     await session.scalars(
                         select(TaskLoopCapabilityApprovalRecord)
                         .where(
-                            TaskLoopCapabilityApprovalRecord.execution_id
-                            == execution.execution_id,
+                            TaskLoopCapabilityApprovalRecord.execution_id == execution.execution_id,
                             TaskLoopCapabilityApprovalRecord.status == "pending",
                         )
                         .with_for_update()
@@ -1060,8 +1052,7 @@ class CapabilityExecutionRuntime:
                 approval_record = await session.scalar(
                     select(TaskLoopCapabilityApprovalRecord)
                     .where(
-                        TaskLoopCapabilityApprovalRecord.approval_id
-                        == work.approval.approval_id
+                        TaskLoopCapabilityApprovalRecord.approval_id == work.approval.approval_id
                     )
                     .with_for_update()
                 )
@@ -1076,8 +1067,7 @@ class CapabilityExecutionRuntime:
                     or current_approval.status != "approved"
                     or not isinstance(receipt, dict)
                     or receipt.get("task_id") != work.execution.task_id
-                    or receipt.get("confirmation_digest")
-                    != current_approval.confirmation_digest
+                    or receipt.get("confirmation_digest") != current_approval.confirmation_digest
                 ):
                     raise CapabilityExecutionRuntimeProofRejectedError(
                         "Approved capability result changed its exact preview authority"
@@ -1176,9 +1166,10 @@ class CapabilityExecutionRuntime:
         )
         failure_code = (
             "WORKSPACE_COMMAND_STEP_FAILED"
+            if verified_failure and candidate.result_kind is CapabilityResultKind.COMMAND_PROFILE
+            else "CAPABILITY_CHECK_FAILED"
             if verified_failure
-            and candidate.result_kind is CapabilityResultKind.COMMAND_PROFILE
-            else "CAPABILITY_CHECK_FAILED" if verified_failure else None
+            else None
         )
         failure_receipt = (
             {
@@ -1259,9 +1250,7 @@ class CapabilityExecutionRuntime:
                 verified_at=now,
                 receipt_manifest=failure_receipt,
                 receipt_digest=(
-                    sha256_digest(failure_receipt)
-                    if failure_receipt is not None
-                    else None
+                    sha256_digest(failure_receipt) if failure_receipt is not None else None
                 ),
                 error_code=failure_code,
                 error_digest=(
@@ -1461,13 +1450,10 @@ class CapabilityExecutionRuntime:
                 .with_for_update()
             )
             approval = (
-                self._approval_from_record(approval_record)
-                if approval_record is not None
-                else None
+                self._approval_from_record(approval_record) if approval_record is not None else None
             )
             receipt_reconcile = (
-                registration.manifest.recovery_policy
-                is CapabilityRecoveryPolicy.RECEIPT_RECONCILE
+                registration.manifest.recovery_policy is CapabilityRecoveryPolicy.RECEIPT_RECONCILE
                 and approval is not None
                 and approval.status == "approved"
                 and approval.execution_id == execution.execution_id
@@ -1744,6 +1730,10 @@ class CapabilityExecutionRuntime:
         execution: TaskLoopExecution,
         node_binding: ModelPlannerNodeBinding,
     ) -> WorkspaceCommandPlanStepProof | None:
+        if node_binding.recipe is None:
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Capability node lost its model-planner source recipe"
+            )
         if node_binding.recipe.route_id != "workspace_command_profile":
             return None
         if self._command_plans is None:
@@ -1754,10 +1744,7 @@ class CapabilityExecutionRuntime:
             (
                 await session.scalars(
                     select(WorkspaceCommandPlanBindingRecord)
-                    .where(
-                        WorkspaceCommandPlanBindingRecord.draft_id
-                        == execution.draft_id
-                    )
+                    .where(WorkspaceCommandPlanBindingRecord.draft_id == execution.draft_id)
                     .order_by(WorkspaceCommandPlanBindingRecord.group_ordinal)
                 )
             ).all()
@@ -1778,16 +1765,14 @@ class CapabilityExecutionRuntime:
             command_binding.task_id != execution.task_id
             or command_binding.draft_id != execution.draft_id
             or command_binding.expected_plan_id != execution.plan_id
-            or command_binding.expected_plan_manifest_digest
-            != execution.plan_manifest_digest
+            or command_binding.expected_plan_manifest_digest != execution.plan_manifest_digest
             or mapping.step_binding_id != node_binding.step_binding_id
             or mapping.step_binding_digest != node_binding.step_binding_digest
             or mapping.step_ordinal != node_binding.step_ordinal
             or mapping.offer_id != node_binding.offer_id
             or mapping.offer_key != node_binding.offer_key
             or mapping.offer_digest != node_binding.offer_digest
-            or mapping.composite_node_spec_digest
-            != node_binding.composite_node_spec_digest
+            or mapping.composite_node_spec_digest != node_binding.composite_node_spec_digest
         ):
             raise CapabilityExecutionRuntimeProofRejectedError(
                 "Workspace command Plan step changed its exact node binding"
@@ -2206,10 +2191,15 @@ class CapabilityExecutionRuntime:
             "bound_input_digest",
             "binding_digest",
         )
+        recipe = binding.recipe
+        if recipe is None:
+            raise CapabilityExecutionRuntimeProofRejectedError(
+                "Capability node binding lost its source recipe"
+            )
         if (
             any(getattr(record, field) != getattr(binding, field) for field in direct_fields)
-            or record.recipe_manifest != binding.recipe.model_dump(mode="json")
-            or record.recipe_digest != binding.recipe.route_manifest_digest
+            or record.recipe_manifest != recipe.model_dump(mode="json")
+            or record.recipe_digest != recipe.route_manifest_digest
             or record.mapping_manifest != binding.mapping.model_dump(mode="json")
             or record.mapping_digest != binding.mapping.mapping_digest
             or record.parameter_bindings_manifest
@@ -2264,8 +2254,7 @@ class CapabilityExecutionRuntime:
             or record.mappings_manifest
             != [item.model_dump(mode="json") for item in binding.mappings]
             or record.manifest != binding.model_dump(mode="json")
-            or CapabilityExecutionRuntime._aware(record.created_at)
-            != binding.created_at
+            or CapabilityExecutionRuntime._aware(record.created_at) != binding.created_at
         ):
             raise CapabilityExecutionRuntimeProofRejectedError(
                 "Workspace command Plan binding columns changed"

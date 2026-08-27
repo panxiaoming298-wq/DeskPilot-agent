@@ -32,6 +32,12 @@ from deskpilot.application.turn_planner_runtime import (
     TurnPlannerRuntime,
     TurnPlannerRuntimeError,
 )
+from deskpilot.application.workspace_coding_exploration_binder import (
+    WorkspaceCodingExplorationBinder,
+    WorkspaceCodingExplorationBindingError,
+    WorkspaceCodingExplorationNotFoundError,
+    WorkspaceCodingReaderActivationBundle,
+)
 from deskpilot.application.workspace_command_plan_binder import (
     WorkspaceCommandPlanBinder,
     WorkspaceCommandPlanBindingError,
@@ -66,6 +72,9 @@ from deskpilot.domain.task_plans import DraftNodeKind, ExecutablePlan, TaskContr
 from deskpilot.domain.workspace_coding_amendments import (
     WorkspaceCodingAmendmentBinding,
 )
+from deskpilot.domain.workspace_coding_explorations import (
+    WorkspaceCodingFileSetPlanBinding,
+)
 from deskpilot.domain.workspace_command_plans import WorkspaceCommandPlanBinding
 from deskpilot.domain.workspace_files import WorkspacePatchPreview, WorkspacePatchReceipt
 from deskpilot.infrastructure.database import Database
@@ -93,6 +102,7 @@ from deskpilot.infrastructure.models import (
     TurnRouteRecord,
     WorkspaceCodingAmendmentBindingRecord,
     WorkspaceCodingDeliveryRecord,
+    WorkspaceCodingFileSetPlanBindingRecord,
 )
 
 
@@ -129,6 +139,7 @@ class TaskLoopActivationRuntime:
         node_binder: ModelPlannerNodeBinder,
         *,
         command_plans: WorkspaceCommandPlanBinder | None = None,
+        workspace_coding_explorations: WorkspaceCodingExplorationBinder | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._database = database
@@ -138,6 +149,7 @@ class TaskLoopActivationRuntime:
         self._execution = execution
         self._node_binder = node_binder
         self._command_plans = command_plans
+        self._workspace_coding_explorations = workspace_coding_explorations
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def activate(self, task_id: str) -> TaskLoopExecution:
@@ -207,6 +219,7 @@ class TaskLoopActivationRuntime:
                         session,
                         existing,
                         draft=bundle.draft,
+                        confirmed=None,
                         expected_bindings=bindings,
                     )
 
@@ -257,6 +270,7 @@ class TaskLoopActivationRuntime:
                         execution.execution_id,
                     ),
                     draft=bundle.draft,
+                    confirmed=None,
                     expected_bindings=bindings,
                 )
         except IntegrityError:
@@ -276,6 +290,128 @@ class TaskLoopActivationRuntime:
                 "Atomic Plan or Run activation was rejected"
             ) from error
 
+    async def activate_confirmed_readers(self, task_id: str) -> TaskLoopExecution:
+        """Activate a confirmed read-only Plan in the existing TaskLoop FSM."""
+
+        bundle = await self._required_confirmed_reader_bundle(task_id)
+        try:
+            bindings = self._node_binder.bind_confirmed_readers(bundle)
+            # Re-scan immediately before the write boundary. A changed file,
+            # Catalog, confirmation, Agent or Plan must never inherit the old proof.
+            current = await self._required_confirmed_reader_bundle(task_id)
+            if current != bundle:
+                raise TaskLoopActivationProofRejectedError(
+                    "Confirmed Reader authority changed before activation"
+                )
+            bindings = self._node_binder.bind_confirmed_readers(current)
+        except TaskLoopActivationError:
+            raise
+        except (
+            WorkspaceCodingExplorationBindingError,
+            ModelPlannerNodeBindingError,
+            ValidationError,
+            ValueError,
+        ) as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Confirmed Reader activation preflight proof was rejected"
+            ) from error
+
+        confirmed = current.binding
+        try:
+            async with self._database.session() as session, session.begin():
+                source_record = await session.scalar(
+                    select(WorkspaceCodingFileSetPlanBindingRecord)
+                    .where(
+                        WorkspaceCodingFileSetPlanBindingRecord.binding_id == confirmed.binding_id
+                    )
+                    .with_for_update()
+                )
+                existing = await session.scalar(
+                    select(TaskLoopExecutionRecord)
+                    .where(TaskLoopExecutionRecord.task_id == task_id)
+                    .with_for_update()
+                )
+                if source_record is None:
+                    raise TaskLoopActivationNotFoundError(
+                        "Confirmed Reader Plan binding disappeared"
+                    )
+                try:
+                    locked_binding = WorkspaceCodingFileSetPlanBinding.model_validate(
+                        source_record.manifest
+                    )
+                except ValidationError as error:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Confirmed Reader Plan binding Schema changed"
+                    ) from error
+                if (
+                    locked_binding != confirmed
+                    or source_record.binding_digest != confirmed.binding_digest
+                    or source_record.successor_task_id != task_id
+                    or source_record.plan_id != confirmed.expected_plan.plan_id
+                    or source_record.plan_manifest_digest != confirmed.expected_plan_manifest_digest
+                ):
+                    raise TaskLoopActivationProofRejectedError(
+                        "Locked confirmed Reader authority changed"
+                    )
+                if existing is not None:
+                    return await self._read_exact(
+                        session,
+                        existing,
+                        draft=None,
+                        confirmed=current,
+                        expected_bindings=bindings,
+                    )
+                run = await self._execution.start_exact_in_session(
+                    session,
+                    confirmed.expected_plan,
+                )
+                created_at = self._now()
+                execution, event = TaskLoopExecution.activate_confirmed_file_set(
+                    source_binding_id=confirmed.binding_id,
+                    source_binding_digest=confirmed.binding_digest,
+                    task_id=task_id,
+                    plan_id=confirmed.expected_plan.plan_id,
+                    plan_manifest_digest=confirmed.expected_plan_manifest_digest,
+                    run_id=run.run_id,
+                    bindings=bindings,
+                    created_at=created_at,
+                )
+                session.add(self._execution_record(execution))
+                await session.flush()
+                session.add_all(
+                    self._binding_record(item, execution.execution_id, created_at)
+                    for item in bindings
+                )
+                session.add(self._event_record(event))
+                await session.flush()
+                return await self._read_exact(
+                    session,
+                    await self._required_execution_record(
+                        session,
+                        execution.execution_id,
+                    ),
+                    draft=None,
+                    confirmed=current,
+                    expected_bindings=bindings,
+                )
+        except IntegrityError:
+            read = await self.get(task_id)
+            if read is None or read.execution is None:
+                raise TaskLoopActivationConflictError(
+                    "Concurrent confirmed Reader activation did not converge"
+                ) from None
+            if read.execution.source_binding_id != confirmed.binding_id:
+                raise TaskLoopActivationConflictError(
+                    "Concurrent activation selected another source binding"
+                ) from None
+            return read.execution
+        except TaskLoopActivationError:
+            raise
+        except AgentRuntimeError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Confirmed Reader Run activation was rejected"
+            ) from error
+
     async def cancel_for_amendment(self, task_id: str) -> TaskLoopExecutionRead | None:
         """Fence the old Run first, then seal its TaskLoop execution as cancelled."""
 
@@ -292,10 +428,7 @@ class TaskLoopActivationRuntime:
         async with self._database.session() as session, session.begin():
             record = await session.scalar(
                 select(TaskLoopExecutionRecord)
-                .where(
-                    TaskLoopExecutionRecord.execution_id
-                    == execution.execution_id
-                )
+                .where(TaskLoopExecutionRecord.execution_id == execution.execution_id)
                 .with_for_update()
             )
             if record is None:
@@ -304,10 +437,10 @@ class TaskLoopActivationRuntime:
                 )
             persisted = TaskLoopExecution.model_validate(record.manifest)
             if persisted.status != "cancelled":
-                if (
-                    persisted.execution_digest != execution.execution_digest
-                    or persisted.status in {"failed", "succeeded"}
-                ):
+                if persisted.execution_digest != execution.execution_digest or persisted.status in {
+                    "failed",
+                    "succeeded",
+                }:
                     raise TaskLoopActivationConflictError(
                         "Task Loop execution changed during amendment fencing"
                     )
@@ -329,23 +462,17 @@ class TaskLoopActivationRuntime:
                             await session.scalars(
                                 select(AgentModelTurnRecord)
                                 .where(
-                                    AgentModelTurnRecord.invocation_id.in_(
-                                        invocation_ids
-                                    ),
+                                    AgentModelTurnRecord.invocation_id.in_(invocation_ids),
                                     AgentModelTurnRecord.status == "dispatching",
                                 )
                                 .with_for_update()
                             )
                         ).all()
                     )
-                unknown_invocations = {
-                    item.invocation_id for item in unknown_turns
-                }
+                unknown_invocations = {item.invocation_id for item in unknown_turns}
                 for turn in unknown_turns:
                     turn.status = "outcome_unknown"
-                    turn.stable_error_code = (
-                        "CONTRACT_AMENDMENT_DURING_DISPATCH"
-                    )
+                    turn.stable_error_code = "CONTRACT_AMENDMENT_DURING_DISPATCH"
                     turn.updated_at = now
                     dispatch = await session.scalar(
                         select(ModelDispatchAttemptRecord)
@@ -357,17 +484,14 @@ class TaskLoopActivationRuntime:
                     )
                     if dispatch is not None:
                         dispatch.status = "outcome_unknown"
-                        dispatch.stable_error_code = (
-                            "CONTRACT_AMENDMENT_DURING_DISPATCH"
-                        )
+                        dispatch.stable_error_code = "CONTRACT_AMENDMENT_DURING_DISPATCH"
                         dispatch.updated_at = now
                 attempts = tuple(
                     (
                         await session.scalars(
                             select(TaskLoopNodeAttemptRecord)
                             .where(
-                                TaskLoopNodeAttemptRecord.execution_id
-                                == execution.execution_id,
+                                TaskLoopNodeAttemptRecord.execution_id == execution.execution_id,
                                 TaskLoopNodeAttemptRecord.status.in_(
                                     (
                                         "prepared",
@@ -381,17 +505,12 @@ class TaskLoopActivationRuntime:
                         )
                     ).all()
                 )
-                invocation_by_attempt = {
-                    (item.node_id, item.attempt): item for item in invocations
-                }
+                invocation_by_attempt = {(item.node_id, item.attempt): item for item in invocations}
                 for attempt_record in attempts:
                     attempt = self._attempt_from_record(attempt_record)
-                    invocation = invocation_by_attempt.get(
-                        (attempt.node_id, attempt.attempt)
-                    )
+                    invocation = invocation_by_attempt.get((attempt.node_id, attempt.attempt))
                     outcome_unknown = bool(
-                        invocation is not None
-                        and invocation.invocation_id in unknown_invocations
+                        invocation is not None and invocation.invocation_id in unknown_invocations
                     )
                     error_code = (
                         "CONTRACT_AMENDMENT_OUTCOME_UNKNOWN"
@@ -404,11 +523,7 @@ class TaskLoopActivationRuntime:
                     )
                     material.update(
                         {
-                            "status": (
-                                "outcome_unknown"
-                                if outcome_unknown
-                                else "cancelled"
-                            ),
+                            "status": ("outcome_unknown" if outcome_unknown else "cancelled"),
                             "revision": attempt.revision + 1,
                             "claim_owner_id": None,
                             "claim_acquired_at": None,
@@ -447,11 +562,7 @@ class TaskLoopActivationRuntime:
         """Bind an already fenced generation to one same-conversation user turn."""
 
         current = await self.get(source_task_id)
-        if (
-            current is None
-            or current.execution is None
-            or current.execution.status != "cancelled"
-        ):
+        if current is None or current.execution is None or current.execution.status != "cancelled":
             raise TaskLoopActivationNotEligibleError(
                 "Workspace coding amendment source is not terminal cancelled"
             )
@@ -460,23 +571,15 @@ class TaskLoopActivationRuntime:
             async with self._database.session() as session, session.begin():
                 source_execution = await session.scalar(
                     select(TaskLoopExecutionRecord)
-                    .where(
-                        TaskLoopExecutionRecord.execution_id
-                        == execution.execution_id
-                    )
+                    .where(TaskLoopExecutionRecord.execution_id == execution.execution_id)
                     .with_for_update()
                 )
                 if source_execution is None:
                     raise TaskLoopActivationNotFoundError(
                         "Workspace coding amendment source execution is missing"
                     )
-                persisted_execution = TaskLoopExecution.model_validate(
-                    source_execution.manifest
-                )
-                if (
-                    persisted_execution != execution
-                    or persisted_execution.status != "cancelled"
-                ):
+                persisted_execution = TaskLoopExecution.model_validate(source_execution.manifest)
+                if persisted_execution != execution or persisted_execution.status != "cancelled":
                     raise TaskLoopActivationConflictError(
                         "Workspace coding amendment source execution changed"
                     )
@@ -528,14 +631,11 @@ class TaskLoopActivationRuntime:
                     contract_record is None
                     or plan_record is None
                     or plan_record.status != "active"
-                    or contract_record.contract_digest
-                    != planning_state.active_contract_digest
-                    or plan_record.plan_manifest_digest
-                    != planning_state.active_plan_digest
+                    or contract_record.contract_digest != planning_state.active_contract_digest
+                    or plan_record.plan_manifest_digest != planning_state.active_plan_digest
                     or execution.plan_generation != plan_record.generation
                     or execution.plan_id != plan_record.plan_id
-                    or execution.plan_manifest_digest
-                    != plan_record.plan_manifest_digest
+                    or execution.plan_manifest_digest != plan_record.plan_manifest_digest
                     or plan_record.contract_version != contract_record.version
                     or plan_record.contract_digest != contract_record.contract_digest
                 ):
@@ -547,8 +647,7 @@ class TaskLoopActivationRuntime:
                     contract.task_id != source_task_id
                     or contract.version != contract_record.version
                     or contract.contract_id != contract_record.contract_id
-                    or contract.previous_contract_digest
-                    != contract_record.previous_contract_digest
+                    or contract.previous_contract_digest != contract_record.previous_contract_digest
                     or contract.digest != contract_record.contract_digest
                 ):
                     raise TaskLoopActivationProofRejectedError(
@@ -608,16 +707,14 @@ class TaskLoopActivationRuntime:
                     "created_at": self._aware(successor_message.created_at),
                 }
                 if (
-                    successor_message.conversation_id
-                    != source_task.conversation_id
+                    successor_message.conversation_id != source_task.conversation_id
                     or successor_message.task_id != successor_task_id
                     or successor_message.role != "user"
                     or successor_message.status != "active"
                     or successor_message.content is None
                     or successor_message.content_ref is not None
                     or successor_task.goal != successor_message.content
-                    or successor_message.message_digest
-                    != sha256_digest(message_material)
+                    or successor_message.message_digest != sha256_digest(message_material)
                 ):
                     raise TaskLoopActivationProofRejectedError(
                         "Workspace coding amendment successor message changed"
@@ -636,9 +733,7 @@ class TaskLoopActivationRuntime:
                     successor_user_message_id=successor_message.message_id,
                     successor_user_message_digest=successor_message.message_digest,
                     created_at=(
-                        existing_binding.created_at
-                        if existing_binding is not None
-                        else self._now()
+                        existing_binding.created_at if existing_binding is not None else self._now()
                     ),
                 )
                 if existing_binding is not None:
@@ -667,8 +762,7 @@ class TaskLoopActivationRuntime:
         current_steps: tuple[RevalidatedOfferStep, ...],
     ) -> None:
         has_command = any(
-            item.route.route_id == "workspace_command_profile"
-            for item in current_steps
+            item.route.route_id == "workspace_command_profile" for item in current_steps
         )
         if not has_command:
             if bundle.command_plans:
@@ -700,8 +794,11 @@ class TaskLoopActivationRuntime:
             raise TaskLoopActivationProofRejectedError(
                 "Persisted Task Loop proof was rejected during execution recovery"
             ) from error
+        confirmed: WorkspaceCodingReaderActivationBundle | None = None
         if bundle is None:
-            return None
+            confirmed = await self._confirmed_reader_bundle(task_id)
+            if confirmed is None:
+                return None
         async with self._database.session() as session:
             records = tuple(
                 (
@@ -712,6 +809,22 @@ class TaskLoopActivationRuntime:
                     )
                 ).all()
             )
+            if confirmed is not None:
+                if not records:
+                    return self._pre_confirmed_reader_read(confirmed)
+                if len(records) != 1:
+                    raise TaskLoopActivationProofRejectedError(
+                        "Confirmed Reader Task has more than one execution"
+                    )
+                return await self._read_internal(
+                    session,
+                    records[0],
+                    loop=None,
+                    draft=None,
+                    confirmed=confirmed,
+                    command_plans=(),
+                )
+            assert bundle is not None
             if bundle.loop.status != "planned" or bundle.draft is None:
                 if records:
                     raise TaskLoopActivationProofRejectedError(
@@ -733,6 +846,7 @@ class TaskLoopActivationRuntime:
                 records[0],
                 loop=bundle.loop,
                 draft=bundle.draft,
+                confirmed=None,
                 command_plans=bundle.command_plans,
             )
 
@@ -742,10 +856,10 @@ class TaskLoopActivationRuntime:
         if not 1 <= limit <= 1_000:
             raise ValueError("Task Loop execution recovery limit is invalid")
         async with self._database.session() as session:
-            candidates = tuple(
+            model_candidates = tuple(
                 (
-                    await session.scalars(
-                        select(TaskLoopRecord.task_id)
+                    await session.execute(
+                        select(TaskLoopRecord.task_id, TaskLoopRecord.updated_at)
                         .outerjoin(
                             TaskLoopExecutionRecord,
                             TaskLoopExecutionRecord.loop_id == TaskLoopRecord.loop_id,
@@ -774,6 +888,48 @@ class TaskLoopActivationRuntime:
                     )
                 ).all()
             )
+            confirmed_candidates = tuple(
+                (
+                    await session.execute(
+                        select(
+                            WorkspaceCodingFileSetPlanBindingRecord.successor_task_id,
+                            WorkspaceCodingFileSetPlanBindingRecord.created_at,
+                        )
+                        .outerjoin(
+                            TaskLoopExecutionRecord,
+                            TaskLoopExecutionRecord.source_binding_id
+                            == WorkspaceCodingFileSetPlanBindingRecord.binding_id,
+                        )
+                        .where(
+                            or_(
+                                TaskLoopExecutionRecord.execution_id.is_(None),
+                                TaskLoopExecutionRecord.status.in_(
+                                    (
+                                        "active",
+                                        "paused",
+                                        "awaiting_user",
+                                        "repairing",
+                                    )
+                                ),
+                            )
+                        )
+                        .order_by(
+                            WorkspaceCodingFileSetPlanBindingRecord.created_at,
+                            WorkspaceCodingFileSetPlanBindingRecord.successor_task_id,
+                        )
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        candidates = tuple(
+            dict.fromkeys(
+                task_id
+                for task_id, _created_at in sorted(
+                    (*model_candidates, *confirmed_candidates),
+                    key=lambda item: (item[1], item[0]),
+                )
+            )
+        )[:limit]
         recovered: list[str] = []
         for candidate in candidates:
             read = await self.get(candidate)
@@ -784,6 +940,30 @@ class TaskLoopActivationRuntime:
             if read.recoverable:
                 recovered.append(candidate)
         return tuple(dict.fromkeys(recovered))
+
+    async def _confirmed_reader_bundle(
+        self,
+        task_id: str,
+    ) -> WorkspaceCodingReaderActivationBundle | None:
+        if self._workspace_coding_explorations is None:
+            return None
+        try:
+            return await self._workspace_coding_explorations.get_reader_activation_bundle(task_id)
+        except WorkspaceCodingExplorationNotFoundError:
+            return None
+        except WorkspaceCodingExplorationBindingError as error:
+            raise TaskLoopActivationProofRejectedError(
+                "Confirmed Reader source proof was rejected"
+            ) from error
+
+    async def _required_confirmed_reader_bundle(
+        self,
+        task_id: str,
+    ) -> WorkspaceCodingReaderActivationBundle:
+        bundle = await self._confirmed_reader_bundle(task_id)
+        if bundle is None:
+            raise TaskLoopActivationNotFoundError("Task has no confirmed Reader Plan")
+        return bundle
 
     def _pre_execution_read(
         self,
@@ -835,6 +1015,58 @@ class TaskLoopActivationRuntime:
         )
 
     @staticmethod
+    def _pre_confirmed_reader_read(
+        bundle: WorkspaceCodingReaderActivationBundle,
+    ) -> TaskLoopExecutionRead:
+        binding = bundle.binding
+        nodes = tuple(
+            TaskLoopExecutionNodeRead.build(
+                node_id=node.node_id,
+                local_key=node.local_key,
+                kind=node.kind,
+                status="ready" if not node.depends_on else "pending",
+                depends_on=node.depends_on,
+                verified_dependency_node_ids=(),
+                dependency_count=len(node.depends_on),
+                verified_dependency_count=0,
+                dependencies_verified=not node.depends_on,
+                attempt_count=0,
+                max_attempts=node.budget.retries + 1,
+                candidate_present=False,
+                verified_result_present=False,
+                created_at=binding.created_at,
+                updated_at=binding.created_at,
+            )
+            for node in sorted(
+                binding.expected_plan.nodes,
+                key=lambda item: item.local_key,
+            )
+        )
+        return TaskLoopExecutionRead.build(
+            task_id=binding.successor_task_id,
+            source_kind="confirmed_file_set",
+            loop_id=None,
+            source_binding_id=binding.binding_id,
+            source_binding_digest=binding.binding_digest,
+            loop_status="planned",
+            phase="plan",
+            loop_revision=1,
+            loop_event_count=1,
+            loop_progress_digest=sha256_digest(
+                {
+                    "source_kind": "confirmed_file_set",
+                    "source_binding_id": binding.binding_id,
+                    "source_binding_digest": binding.binding_digest,
+                }
+            ),
+            execution=None,
+            nodes=nodes,
+            recoverable=True,
+            created_at=binding.created_at,
+            updated_at=binding.created_at,
+        )
+
+    @staticmethod
     def _command_node_projection(
         command_plans: tuple[WorkspaceCommandPlanBinding, ...],
     ) -> dict[str, dict[str, object]]:
@@ -865,15 +1097,26 @@ class TaskLoopActivationRuntime:
         session: AsyncSession,
         record: TaskLoopExecutionRecord,
         *,
-        loop: TaskLoop,
-        draft: ModelPlannerDraft,
+        loop: TaskLoop | None,
+        draft: ModelPlannerDraft | None,
+        confirmed: WorkspaceCodingReaderActivationBundle | None,
         command_plans: tuple[WorkspaceCommandPlanBinding, ...],
     ) -> TaskLoopExecutionRead:
+        if (loop is None or draft is None) is (confirmed is None):
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution read has no unique source kind"
+            )
+        confirmed_binding = confirmed.binding if confirmed is not None else None
         execution = await self._read_exact(
             session,
             record,
             draft=draft,
-            expected_bindings=None,
+            confirmed=confirmed,
+            expected_bindings=(
+                self._node_binder.bind_confirmed_readers(confirmed)
+                if confirmed is not None
+                else None
+            ),
         )
         binding_records = tuple(
             (
@@ -938,10 +1181,7 @@ class TaskLoopActivationRuntime:
             (
                 await session.scalars(
                     select(TaskLoopCapabilityApprovalRecord)
-                    .where(
-                        TaskLoopCapabilityApprovalRecord.execution_id
-                        == execution.execution_id
-                    )
+                    .where(TaskLoopCapabilityApprovalRecord.execution_id == execution.execution_id)
                     .order_by(TaskLoopCapabilityApprovalRecord.created_at)
                 )
             ).all()
@@ -1010,17 +1250,12 @@ class TaskLoopActivationRuntime:
             (
                 await session.scalars(
                     select(TaskLoopCycleEventRecord)
-                    .where(
-                        TaskLoopCycleEventRecord.execution_id
-                        == execution.execution_id
-                    )
+                    .where(TaskLoopCycleEventRecord.execution_id == execution.execution_id)
                     .order_by(TaskLoopCycleEventRecord.sequence)
                 )
             ).all()
         )
-        cycle_events = tuple(
-            self._cycle_event_from_record(item) for item in cycle_records
-        )
+        cycle_events = tuple(self._cycle_event_from_record(item) for item in cycle_records)
         for index, event in enumerate(cycle_events, start=1):
             previous = cycle_events[index - 2] if index > 1 else None
             if (
@@ -1031,9 +1266,7 @@ class TaskLoopActivationRuntime:
                 or event.previous_event_digest
                 != (previous.event_digest if previous is not None else None)
             ):
-                raise TaskLoopActivationProofRejectedError(
-                    "Task Loop cycle event chain changed"
-                )
+                raise TaskLoopActivationProofRejectedError("Task Loop cycle event chain changed")
 
         node_reads: list[TaskLoopExecutionNodeRead] = []
         for node in node_records:
@@ -1067,19 +1300,23 @@ class TaskLoopActivationRuntime:
             node_approval = approvals_by_node.get(node.node_id)
             if node_approval is not None and latest_attempt is not None:
                 valid_approval_state = (
-                    node_approval.status == "pending"
-                    and execution.status == "awaiting_user"
-                    and node.status == "waiting_user"
-                    and latest_attempt.status == "prepared"
-                ) or (
-                    node_approval.status == "approved"
-                    and execution.status == "active"
-                    and node.status in {"ready", "running"}
-                    and latest_attempt.status in {"prepared", "running"}
-                ) or (
-                    node_approval.status == "consumed"
-                    and node.status in {"awaiting_verification", "verified"}
-                    and latest_attempt.status in {"awaiting_verification", "verified"}
+                    (
+                        node_approval.status == "pending"
+                        and execution.status == "awaiting_user"
+                        and node.status == "waiting_user"
+                        and latest_attempt.status == "prepared"
+                    )
+                    or (
+                        node_approval.status == "approved"
+                        and execution.status == "active"
+                        and node.status in {"ready", "running"}
+                        and latest_attempt.status in {"prepared", "running"}
+                    )
+                    or (
+                        node_approval.status == "consumed"
+                        and node.status in {"awaiting_verification", "verified"}
+                        and latest_attempt.status in {"awaiting_verification", "verified"}
+                    )
                 )
                 if not valid_approval_state:
                     raise TaskLoopActivationProofRejectedError(
@@ -1195,8 +1432,7 @@ class TaskLoopActivationRuntime:
         latest_cycle = cycle_events[-1] if cycle_events else None
         no_progress_count = 0
         if latest_cycle is not None and (
-            latest_cycle.evidence_manifest.get("node_state_digest")
-            == node_state_digest
+            latest_cycle.evidence_manifest.get("node_state_digest") == node_state_digest
         ):
             if latest_cycle.kind == "no_progress_observed":
                 value = latest_cycle.evidence_manifest.get("observation_count")
@@ -1210,14 +1446,30 @@ class TaskLoopActivationRuntime:
         cycle = TaskLoopCycleRead.build(
             no_progress_count=no_progress_count,
             repair_count=sum(item.kind == "repair_started" for item in cycle_events),
-            budget_exhausted=any(
-                item.kind == "budget_exhausted" for item in cycle_events
-            ),
+            budget_exhausted=any(item.kind == "budget_exhausted" for item in cycle_events),
             latest_event_kind=(latest_cycle.kind if latest_cycle is not None else None),
             latest_event_sequence=(latest_cycle.sequence if latest_cycle is not None else 0),
         )
+        if loop is not None:
+            source_created_at = loop.created_at
+            source_updated_at = loop.updated_at
+            source_progress_digest = loop.progress_digest
+        else:
+            if confirmed_binding is None:
+                raise TaskLoopActivationProofRejectedError(
+                    "Confirmed Reader execution lost its file-set binding"
+                )
+            source_created_at = confirmed_binding.created_at
+            source_updated_at = confirmed_binding.created_at
+            source_progress_digest = sha256_digest(
+                {
+                    "source_kind": "confirmed_file_set",
+                    "source_binding_id": confirmed_binding.binding_id,
+                    "source_binding_digest": confirmed_binding.binding_digest,
+                }
+            )
         updated_at = max(
-            loop.updated_at,
+            source_updated_at,
             execution.updated_at,
             *(item.updated_at for item in node_reads),
             *(item.updated_at for item in approvals_by_node.values()),
@@ -1246,9 +1498,7 @@ class TaskLoopActivationRuntime:
                     )
                 candidate_output = attempt.candidate_manifest.get("output_manifest")
                 receipt = (
-                    candidate_output.get("receipt")
-                    if isinstance(candidate_output, dict)
-                    else None
+                    candidate_output.get("receipt") if isinstance(candidate_output, dict) else None
                 )
             if isinstance(preview, WorkspacePatchPreview):
                 workspace_patch = preview
@@ -1272,8 +1522,7 @@ class TaskLoopActivationRuntime:
                     ) from error
         delivery_record = await session.scalar(
             select(WorkspaceCodingDeliveryRecord).where(
-                WorkspaceCodingDeliveryRecord.execution_id
-                == execution.execution_id
+                WorkspaceCodingDeliveryRecord.execution_id == execution.execution_id
             )
         )
         coding_delivery = (
@@ -1282,7 +1531,8 @@ class TaskLoopActivationRuntime:
             else None
         )
         is_coding_loop = any(
-            item.recipe.route_id == "workspace_coding_loop" for item in bindings
+            item.recipe is not None and item.recipe.route_id == "workspace_coding_loop"
+            for item in bindings
         )
         if execution.status == "succeeded" and is_coding_loop and coding_delivery is None:
             raise TaskLoopActivationProofRejectedError(
@@ -1292,12 +1542,15 @@ class TaskLoopActivationRuntime:
             updated_at = max(updated_at, self._aware(delivery_record.created_at))
         return TaskLoopExecutionRead.build(
             task_id=execution.task_id,
+            source_kind=execution.source_kind,
             loop_id=execution.loop_id,
-            loop_status=loop.status,
+            source_binding_id=execution.source_binding_id,
+            source_binding_digest=execution.source_binding_digest,
+            loop_status=loop.status if loop is not None else "planned",
             phase=phase,
-            loop_revision=loop.revision,
-            loop_event_count=loop.event_count,
-            loop_progress_digest=loop.progress_digest,
+            loop_revision=loop.revision if loop is not None else 1,
+            loop_event_count=loop.event_count if loop is not None else 1,
+            loop_progress_digest=source_progress_digest,
             execution=execution,
             cycle=cycle,
             workspace_patch=workspace_patch,
@@ -1305,7 +1558,7 @@ class TaskLoopActivationRuntime:
             coding_delivery=coding_delivery,
             nodes=tuple(node_reads),
             recoverable=execution.status in {"active", "paused", "awaiting_user", "repairing"},
-            created_at=loop.created_at,
+            created_at=source_created_at,
             updated_at=updated_at,
         )
 
@@ -1355,10 +1608,7 @@ class TaskLoopActivationRuntime:
                 )
             ):
                 raise ValueError("Coding delivery collections must be arrays")
-            changes = tuple(
-                WorkspaceCodingChangeRead.model_validate(item)
-                for item in raw_changes
-            )
+            changes = tuple(WorkspaceCodingChangeRead.model_validate(item) for item in raw_changes)
             coordinator = WorkspaceCodingCoordinatorEvidenceRead.model_validate(
                 {
                     "agent_id": raw_coordinator["agent_id"],
@@ -1367,9 +1617,7 @@ class TaskLoopActivationRuntime:
                     "output_node_key": raw_coordinator["output_node_key"],
                     "graph_digest": raw_coordinator["graph_digest"],
                     "decision_digest": raw_coordinator["decision_digest"],
-                    "verification_digest": raw_coordinator[
-                        "verification_digest"
-                    ],
+                    "verification_digest": raw_coordinator["verification_digest"],
                 }
             )
             planners = tuple(
@@ -1404,9 +1652,7 @@ class TaskLoopActivationRuntime:
                     {
                         "attempt": item["attempt"],
                         "status": item["status"],
-                        "failure_receipt_digest": item[
-                            "failure_receipt_digest"
-                        ],
+                        "failure_receipt_digest": item["failure_receipt_digest"],
                     }
                 )
                 for item in raw_failures
@@ -1466,8 +1712,7 @@ class TaskLoopActivationRuntime:
             or len(rollbacks) != record.changed_file_count
             or len(tests) != record.test_run_count
             or len(failures) != record.failure_count
-            or bool(manifest.get("rollback_available"))
-            is not record.rollback_available
+            or bool(manifest.get("rollback_available")) is not record.rollback_available
         ):
             raise TaskLoopActivationProofRejectedError(
                 "Workspace coding delivery projection counts changed"
@@ -1477,13 +1722,9 @@ class TaskLoopActivationRuntime:
             changed_files=changed_files,
             changes=tuple(sorted(changes, key=lambda item: item.path)),
             coordinator_evidence=coordinator,
-            patch_planner_evidence=tuple(
-                sorted(planners, key=lambda item: item.path)
-            ),
+            patch_planner_evidence=tuple(sorted(planners, key=lambda item: item.path)),
             tests=tuple(sorted(tests, key=lambda item: item.attempt)),
-            failure_repair_history=tuple(
-                sorted(failures, key=lambda item: item.attempt)
-            ),
+            failure_repair_history=tuple(sorted(failures, key=lambda item: item.attempt)),
             git_commit=git_commit_evidence,
             remaining_risks=risks,
             rollback_points=tuple(sorted(rollbacks, key=lambda item: item.path)),
@@ -1516,9 +1757,7 @@ class TaskLoopActivationRuntime:
             or record.evidence_digest != event.evidence_digest
             or record.event_digest != event.event_digest
         ):
-            raise TaskLoopActivationProofRejectedError(
-                "Task Loop cycle event columns changed"
-            )
+            raise TaskLoopActivationProofRejectedError("Task Loop cycle event columns changed")
         return event
 
     @classmethod
@@ -1617,6 +1856,7 @@ class TaskLoopActivationRuntime:
                 session,
                 record,
                 draft=draft,
+                confirmed=None,
                 expected_bindings=bindings,
             )
 
@@ -1625,7 +1865,8 @@ class TaskLoopActivationRuntime:
         session: AsyncSession,
         record: TaskLoopExecutionRecord,
         *,
-        draft: ModelPlannerDraft,
+        draft: ModelPlannerDraft | None,
+        confirmed: WorkspaceCodingReaderActivationBundle | None,
         expected_bindings: tuple[ModelPlannerNodeBinding, ...] | None,
     ) -> TaskLoopExecution:
         try:
@@ -1637,8 +1878,11 @@ class TaskLoopActivationRuntime:
         expected_record = self._execution_record(execution)
         for field in (
             "execution_id",
+            "source_kind",
             "loop_id",
             "draft_id",
+            "source_binding_id",
+            "source_binding_digest",
             "task_id",
             "plan_id",
             "plan_generation",
@@ -1658,7 +1902,11 @@ class TaskLoopActivationRuntime:
                 raise TaskLoopActivationProofRejectedError(
                     "Task Loop execution columns diverge from its manifest"
                 )
-        if (
+        if (draft is None) is (confirmed is None):
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution has no unique sealed source"
+            )
+        if draft is not None and (
             self._aware(record.created_at) != execution.created_at
             or self._aware(record.updated_at) != execution.updated_at
             or execution.draft_id != draft.draft_id
@@ -1667,6 +1915,18 @@ class TaskLoopActivationRuntime:
         ):
             raise TaskLoopActivationProofRejectedError(
                 "Task Loop execution scope differs from the sealed Draft"
+            )
+        if confirmed is not None and (
+            self._aware(record.created_at) != execution.created_at
+            or self._aware(record.updated_at) != execution.updated_at
+            or execution.source_kind != "confirmed_file_set"
+            or execution.source_binding_id != confirmed.binding.binding_id
+            or execution.source_binding_digest != confirmed.binding.binding_digest
+            or execution.plan_id != confirmed.binding.expected_plan.plan_id
+            or execution.plan_manifest_digest != confirmed.binding.expected_plan_manifest_digest
+        ):
+            raise TaskLoopActivationProofRejectedError(
+                "Task Loop execution scope differs from the confirmed Reader Plan"
             )
         events = tuple(
             (
@@ -1896,8 +2156,11 @@ class TaskLoopActivationRuntime:
     def _execution_record(execution: TaskLoopExecution) -> TaskLoopExecutionRecord:
         return TaskLoopExecutionRecord(
             execution_id=execution.execution_id,
+            source_kind=execution.source_kind,
             loop_id=execution.loop_id,
             draft_id=execution.draft_id,
+            source_binding_id=execution.source_binding_id,
+            source_binding_digest=execution.source_binding_digest,
             task_id=execution.task_id,
             plan_id=execution.plan_id,
             plan_generation=execution.plan_generation,
@@ -2002,14 +2265,10 @@ class TaskLoopActivationRuntime:
             source_plan_generation=binding.source_plan_generation,
             source_plan_digest=binding.source_plan_digest,
             source_execution_digest=binding.source_execution_digest,
-            source_execution_event_digest=(
-                binding.source_execution_event_digest
-            ),
+            source_execution_event_digest=(binding.source_execution_event_digest),
             successor_task_id=binding.successor_task_id,
             successor_user_message_id=binding.successor_user_message_id,
-            successor_user_message_digest=(
-                binding.successor_user_message_digest
-            ),
+            successor_user_message_digest=(binding.successor_user_message_digest),
             manifest=binding.model_dump(mode="json"),
             amendment_digest=binding.amendment_digest,
             created_at=binding.created_at,
@@ -2061,6 +2320,7 @@ class TaskLoopActivationRuntime:
     ) -> ModelPlannerNodeBindingRecord:
         return ModelPlannerNodeBindingRecord(
             node_binding_id=binding.node_binding_id,
+            source_kind=binding.source_kind,
             execution_id=execution_id,
             task_id=binding.task_id,
             user_message_id=binding.user_message_id,
@@ -2071,9 +2331,33 @@ class TaskLoopActivationRuntime:
             offer_id=binding.offer_id,
             offer_key=binding.offer_key,
             offer_digest=binding.offer_digest,
-            recipe_manifest=binding.recipe.model_dump(mode="json"),
-            recipe_digest=binding.recipe.route_manifest_digest,
+            recipe_manifest=(
+                binding.recipe.model_dump(mode="json") if binding.recipe is not None else None
+            ),
+            recipe_digest=(
+                binding.recipe.route_manifest_digest if binding.recipe is not None else None
+            ),
             policy_snapshot_digest=binding.policy_snapshot_digest,
+            source_binding_id=(
+                binding.workspace_reader_node_proof.file_set_binding_id
+                if binding.workspace_reader_node_proof is not None
+                else None
+            ),
+            source_binding_digest=(
+                binding.workspace_reader_node_proof.file_set_binding_digest
+                if binding.workspace_reader_node_proof is not None
+                else None
+            ),
+            workspace_reader_node_proof_manifest=(
+                binding.workspace_reader_node_proof.model_dump(mode="json")
+                if binding.workspace_reader_node_proof is not None
+                else None
+            ),
+            workspace_reader_node_proof_digest=(
+                binding.workspace_reader_node_proof.proof_digest
+                if binding.workspace_reader_node_proof is not None
+                else None
+            ),
             source_contract_digest=binding.source_contract_digest,
             source_plan_id=binding.source_plan_id,
             source_plan_manifest_digest=binding.source_plan_manifest_digest,
@@ -2152,6 +2436,7 @@ class TaskLoopActivationRuntime:
         )
         for field in (
             "node_binding_id",
+            "source_kind",
             "execution_id",
             "task_id",
             "user_message_id",
@@ -2165,6 +2450,10 @@ class TaskLoopActivationRuntime:
             "recipe_manifest",
             "recipe_digest",
             "policy_snapshot_digest",
+            "source_binding_id",
+            "source_binding_digest",
+            "workspace_reader_node_proof_manifest",
+            "workspace_reader_node_proof_digest",
             "source_contract_digest",
             "source_plan_id",
             "source_plan_manifest_digest",
@@ -2324,8 +2613,7 @@ class TaskLoopActivationRuntime:
         expected_result_id = f"tlr_{sha256_digest(result_id_material)}"
         capability_manifest = result_ref.capability.model_dump(mode="json")
         verified_failure = bool(
-            result.result_kind
-            in {"workspace_check", "python_test", "node_test", "command_profile"}
+            result.result_kind in {"workspace_check", "python_test", "node_test", "command_profile"}
             and result.output_manifest.get("status") != "passed"
         )
         if (

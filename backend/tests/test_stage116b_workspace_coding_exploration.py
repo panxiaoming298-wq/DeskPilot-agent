@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import func, select, update
 
 from deskpilot.agents.builtins import create_builtin_agent_registry
@@ -12,12 +16,27 @@ from deskpilot.application.agent_model_loop import (
     AgentModelLoopOutcomeUnknownError,
     AgentModelLoopRuntime,
 )
+from deskpilot.application.builtin_capability_executors import (
+    create_builtin_capability_executor_registry,
+)
 from deskpilot.application.capability_catalog import (
     create_builtin_capability_catalog,
 )
 from deskpilot.application.model_gateway import ModelGateway
+from deskpilot.application.model_planner_node_binder import ModelPlannerNodeBinder
 from deskpilot.application.plan_compilation_service import PlanCompilationService
 from deskpilot.application.plan_compiler import PlanCompiler
+from deskpilot.application.task_loop_activation_runtime import (
+    TaskLoopActivationProofRejectedError,
+    TaskLoopActivationRuntime,
+)
+from deskpilot.application.task_loop_agent_adapter_registry import (
+    create_task_loop_agent_adapter_registry,
+)
+from deskpilot.application.task_loop_agent_runtime import TaskLoopAgentRuntime
+from deskpilot.application.task_loop_execution_coordinator import (
+    TaskLoopExecutionCoordinator,
+)
 from deskpilot.application.workspace_coding_exploration_binder import (
     WorkspaceCodingExplorationBinder,
     WorkspaceCodingExplorationProofRejectedError,
@@ -44,10 +63,16 @@ from deskpilot.infrastructure.models import (
     AgentModelTurnRecord,
     ConversationMessageRecord,
     ConversationRecord,
+    ModelPlannerNodeBindingRecord,
     TaskContractVersionRecord,
+    TaskExecutionRunRecord,
+    TaskLoopExecutionRecord,
+    TaskLoopNodeAttemptRecord,
+    TaskLoopVerifiedResultRecord,
     TaskPlanGenerationRecord,
     TaskPlanningStateRecord,
     TaskRecord,
+    WorkspaceAgentResultRecord,
     WorkspaceCodingExplorationProposalRecord,
     WorkspaceCodingExplorationSnapshotRecord,
     WorkspaceCodingExplorerRunBindingRecord,
@@ -58,6 +83,19 @@ from deskpilot.model_providers.fake import FakeModelProvider
 from deskpilot.tools import create_builtin_registry
 
 NOW = datetime(2026, 8, 26, 6, 0, tzinfo=UTC)
+
+
+def _alembic_config(path: Path) -> Config:
+    config = Config()
+    config.set_main_option(
+        "script_location",
+        (Path(__file__).parents[1] / "src/deskpilot/infrastructure/migrations").as_posix(),
+    )
+    config.set_main_option(
+        "sqlalchemy.url",
+        f"sqlite+aiosqlite:///{path.as_posix()}",
+    )
+    return config
 
 
 def _write_python_project(root: Path) -> None:
@@ -161,6 +199,60 @@ class _CountingFailureProvider(FakeModelProvider):
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self.calls += 1
         return await super().complete(request)
+
+
+class _NoModelTaskLoops:
+    async def get_bundle(self, _task_id: str) -> None:
+        return None
+
+
+class _CountingWorkspaceFileRuntime(WorkspaceFileRuntime):
+    def __init__(self, root: str) -> None:
+        super().__init__(root)
+        self.read_paths: list[str] = []
+
+    def read(self, relative_path: str):  # type: ignore[no-untyped-def]
+        self.read_paths.append(relative_path)
+        return super().read(relative_path)
+
+
+def _confirmed_reader_coordinator(
+    database: Database,
+    binder: WorkspaceCodingExplorationBinder,
+    planning: PlanCompilationService,
+    explorer: WorkspaceCodingExplorerRuntime,
+    workspace: WorkspaceFileRuntime,
+) -> tuple[TaskLoopActivationRuntime, TaskLoopExecutionCoordinator]:
+    executors = create_builtin_capability_executor_registry(binder._capabilities)  # noqa: SLF001
+    adapters = create_task_loop_agent_adapter_registry(
+        research_available=False,
+        workspace_file_available=True,
+    )
+    activation = TaskLoopActivationRuntime(
+        database,
+        _NoModelTaskLoops(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        planning,
+        explorer._execution,  # noqa: SLF001
+        ModelPlannerNodeBinder(
+            binder._agents,  # noqa: SLF001
+            executors,
+            adapters,
+        ),
+        workspace_coding_explorations=binder,
+        clock=lambda: NOW,
+    )
+    agents = TaskLoopAgentRuntime(
+        database,
+        explorer._execution,  # noqa: SLF001
+        adapters,
+        workspace=workspace,
+    )
+    return activation, TaskLoopExecutionCoordinator(
+        database,
+        activation,
+        agents=agents,
+    )
 
 
 async def _seed_task(
@@ -369,6 +461,228 @@ async def test_confirmation_atomically_persists_exact_read_only_reader_plan_and_
                 AgentDecisionRecord,
             ):
                 assert await session.scalar(select(func.count()).select_from(record_type)) == 1
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_reader_plan_uses_persistent_task_loop_and_restart_skips_verified_files(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    _write_python_project(workspace_root)
+    database, binder, planning, explorer = await _services(tmp_path)
+    conversation_id = f"cnv_{'8' * 32}"
+    source_task_id, source_message_id = await _seed_task(
+        database,
+        suffix="8",
+        conversation_id=conversation_id,
+        goal="确认候选后持久读取，不授予修改权限",
+        create_conversation=True,
+    )
+    workspace = _CountingWorkspaceFileRuntime(str(workspace_root))
+    try:
+        snapshot = await binder.prepare(
+            task_id=source_task_id,
+            user_message_id=source_message_id,
+            project_path="project",
+            ecosystem="python",
+            test_path="tests/test_app.py",
+        )
+        proposal = await explorer.run(snapshot.snapshot_id)
+        successor_task_id, confirmation_message_id = await _seed_task(
+            database,
+            suffix="9",
+            conversation_id=conversation_id,
+            goal=f"确认候选文件集：{proposal.proposal_id}",
+            create_conversation=False,
+        )
+        binding = await binder.confirm(
+            proposal.proposal_id,
+            successor_task_id=successor_task_id,
+            confirmation_message_id=confirmation_message_id,
+        )
+        activation, coordinator = _confirmed_reader_coordinator(
+            database,
+            binder,
+            planning,
+            explorer,
+            workspace,
+        )
+
+        pre_execution = await activation.get(successor_task_id)
+        assert pre_execution is not None
+        assert pre_execution.source_kind == "confirmed_file_set"
+        assert pre_execution.execution is None
+        assert pre_execution.phase == "plan"
+        assert await activation.recoverable_task_ids() == (successor_task_id,)
+
+        activated = await coordinator.advance(successor_task_id, "reader-activator")
+        assert activated.command.kind == "activate_plan"
+        assert activated.read.execution is not None
+        assert activated.read.execution.source_binding_id == binding.binding_id
+        async with database.session() as session:
+            node_binding_records = tuple(
+                (
+                    await session.scalars(
+                        select(ModelPlannerNodeBindingRecord).where(
+                            ModelPlannerNodeBindingRecord.execution_id
+                            == activated.read.execution.execution_id
+                        )
+                    )
+                ).all()
+            )
+        assert len(node_binding_records) == 2
+        assert all(item.source_kind == "confirmed_file_set" for item in node_binding_records)
+        assert all(item.draft_id is None for item in node_binding_records)
+        assert all(item.step_binding_id is None for item in node_binding_records)
+        assert all(
+            item.workspace_reader_node_proof_manifest is not None for item in node_binding_records
+        )
+
+        source_a = workspace_root / "project" / "src" / "a.py"
+        source_a_stat = source_a.stat()
+        source_a.write_text("VALUE_A = 99\n", encoding="utf-8")
+        with pytest.raises(
+            TaskLoopActivationProofRejectedError,
+            match="Confirmed Reader source proof",
+        ):
+            await coordinator.advance(successor_task_id, "drifted-reader-worker")
+        source_a.write_text("VALUE_A = 1\n", encoding="utf-8")
+        os.utime(
+            source_a,
+            ns=(source_a_stat.st_atime_ns, source_a_stat.st_mtime_ns),
+        )
+
+        executed = await coordinator.advance(successor_task_id, "reader-workers")
+        assert executed.command.kind == "execute_agent_batch"
+        assert len(executed.command.node_ids) == 2
+        assert sorted(workspace.read_paths) == [
+            "project/src/a.py",
+            "project/src/b.py",
+        ]
+
+        restarted_activation, restarted = _confirmed_reader_coordinator(
+            database,
+            binder,
+            planning,
+            explorer,
+            workspace,
+        )
+        recovered = await restarted_activation.get(successor_task_id)
+        assert recovered is not None
+        assert recovered.execution == executed.read.execution
+        for index in range(8):
+            advanced = await restarted.advance(
+                successor_task_id,
+                f"reader-restart-{index}",
+            )
+            if advanced.read.execution is not None and (
+                advanced.read.execution.status == "succeeded"
+            ):
+                break
+        else:
+            pytest.fail("Confirmed Reader Plan did not reach terminal success")
+
+        assert sorted(workspace.read_paths) == [
+            "project/src/a.py",
+            "project/src/b.py",
+        ]
+        assert advanced.read.execution is not None
+        assert advanced.read.execution.status == "succeeded"
+        assert sum(item.verified_result_present for item in advanced.read.nodes) == 2
+        assert all(
+            item.status == "verified" for item in advanced.read.nodes if item.kind.value == "agent"
+        )
+        assert await restarted_activation.recoverable_task_ids() == ()
+        async with database.session() as session:
+            execution_record = await session.scalar(
+                select(TaskLoopExecutionRecord).where(
+                    TaskLoopExecutionRecord.task_id == successor_task_id
+                )
+            )
+            assert execution_record is not None
+            assert execution_record.source_kind == "confirmed_file_set"
+            assert execution_record.loop_id is None
+            assert execution_record.draft_id is None
+            assert execution_record.source_binding_id == binding.binding_id
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(TaskExecutionRunRecord)
+                    .where(TaskExecutionRunRecord.task_id == successor_task_id)
+                )
+                == 1
+            )
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(TaskLoopNodeAttemptRecord)
+                    .where(TaskLoopNodeAttemptRecord.execution_id == execution_record.execution_id)
+                )
+                == 2
+            )
+            attempts = tuple(
+                (
+                    await session.scalars(
+                        select(TaskLoopNodeAttemptRecord).where(
+                            TaskLoopNodeAttemptRecord.execution_id == execution_record.execution_id
+                        )
+                    )
+                ).all()
+            )
+            proof_digests = {
+                item.workspace_reader_node_proof_digest for item in node_binding_records
+            }
+            assert None not in proof_digests
+            assert {
+                item.input_manifest["workspace_reader_node_proof_digest"] for item in attempts
+            } == proof_digests
+            assert {
+                item.context_manifest["workspace_reader_node_proof_digest"] for item in attempts
+            } == proof_digests
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(TaskLoopVerifiedResultRecord)
+                    .where(
+                        TaskLoopVerifiedResultRecord.execution_id == execution_record.execution_id
+                    )
+                )
+                == 2
+            )
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(WorkspaceAgentResultRecord)
+                    .where(WorkspaceAgentResultRecord.run_id == execution_record.run_id)
+                )
+                == 2
+            )
+        tampered = node_binding_records[0]
+        async with database.session() as session, session.begin():
+            await session.execute(
+                update(ModelPlannerNodeBindingRecord)
+                .where(ModelPlannerNodeBindingRecord.node_binding_id == tampered.node_binding_id)
+                .values(workspace_reader_node_proof_digest="f" * 64)
+            )
+        with pytest.raises(
+            TaskLoopActivationProofRejectedError,
+            match="node binding",
+        ):
+            await restarted_activation.get(successor_task_id)
+
+        await database.dispose()
+        with pytest.raises(
+            RuntimeError,
+            match=r"DESKPILOT_DOWNGRADE_UNSAFE.*Restore the reviewed stage backup",
+        ):
+            await asyncio.to_thread(
+                command.downgrade,
+                _alembic_config(tmp_path / "exploration.db"),
+                "0062_workspace_coding_explorer_turns",
+            )
     finally:
         await database.dispose()
 

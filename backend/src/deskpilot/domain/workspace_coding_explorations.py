@@ -15,6 +15,7 @@ from deskpilot.domain.task_plans import (
     PLAN_ID_PATTERN,
     PLAN_NODE_ID_PATTERN,
     TASK_ID_PATTERN,
+    CapabilityRef,
     DraftPlan,
     ExecutablePlan,
     TaskContract,
@@ -25,6 +26,7 @@ WORKSPACE_CODING_EXPLORATION_PROPOSAL_ID_PATTERN = r"^wxp_[0-9a-f]{64}$"
 WORKSPACE_CODING_EXPLORER_RUN_BINDING_ID_PATTERN = r"^wxr_[0-9a-f]{64}$"
 WORKSPACE_CODING_EXPLORER_TURN_PROOF_ID_PATTERN = r"^wxt_[0-9a-f]{64}$"
 WORKSPACE_CODING_FILE_SET_BINDING_ID_PATTERN = r"^wxb_[0-9a-f]{64}$"
+WORKSPACE_CODING_READER_NODE_PROOF_ID_PATTERN = r"^wxn_[0-9a-f]{64}$"
 
 
 def _safe_relative_path(value: str) -> PurePosixPath:
@@ -526,6 +528,78 @@ class WorkspaceCodingFileSetPlanBinding(BaseModel):
         return cls(**base, binding_digest=sha256_digest(base))
 
 
+class WorkspaceCodingReaderNodeProof(BaseModel):
+    """Exact confirmed file-set authority for one persistent Reader node."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-coding-reader-node-proof.v1"] = (
+        "deskpilot.workspace-coding-reader-node-proof.v1"
+    )
+    proof_id: str = Field(pattern=WORKSPACE_CODING_READER_NODE_PROOF_ID_PATTERN)
+    file_set_binding_id: str = Field(pattern=WORKSPACE_CODING_FILE_SET_BINDING_ID_PATTERN)
+    file_set_binding_digest: str = Field(pattern=DIGEST_PATTERN)
+    proposal_id: str = Field(pattern=WORKSPACE_CODING_EXPLORATION_PROPOSAL_ID_PATTERN)
+    proposal_digest: str = Field(pattern=DIGEST_PATTERN)
+    snapshot_id: str = Field(pattern=WORKSPACE_CODING_EXPLORATION_SNAPSHOT_ID_PATTERN)
+    snapshot_digest: str = Field(pattern=DIGEST_PATTERN)
+    catalog_digest: str = Field(pattern=DIGEST_PATTERN)
+    project_path: str = Field(min_length=1, max_length=32_767)
+    ecosystem: Literal["python", "node"]
+    successor_task_id: str = Field(pattern=TASK_ID_PATTERN)
+    confirmation_message_id: str = Field(pattern=MESSAGE_ID_PATTERN)
+    confirmation_message_digest: str = Field(pattern=DIGEST_PATTERN)
+    ordinal: int = Field(ge=1, le=8)
+    relative_path: str = Field(min_length=1, max_length=500)
+    workspace_relative_path: str = Field(min_length=1, max_length=32_767)
+    source_file_proof_digest: str = Field(pattern=DIGEST_PATTERN)
+    plan_id: str = Field(pattern=PLAN_ID_PATTERN)
+    plan_manifest_digest: str = Field(pattern=DIGEST_PATTERN)
+    plan_node_id: str = Field(pattern=PLAN_NODE_ID_PATTERN)
+    plan_local_key: str = Field(pattern=r"^inspect_candidate_[0-9]{2}$")
+    plan_node_spec_digest: str = Field(pattern=DIGEST_PATTERN)
+    reader_agent: BoundAgentRef
+    capability: CapabilityRef
+    proof_digest: str = Field(pattern=DIGEST_PATTERN)
+
+    @model_validator(mode="after")
+    def scope_and_digest_match(self) -> Self:
+        _safe_relative_path(self.relative_path)
+        _safe_relative_path(self.workspace_relative_path)
+        expected_workspace_path = (
+            self.relative_path
+            if self.project_path == "."
+            else f"{self.project_path.rstrip('/')}/{self.relative_path}"
+        )
+        if (
+            self.plan_local_key != f"inspect_candidate_{self.ordinal:02d}"
+            or self.workspace_relative_path != expected_workspace_path
+            or self.reader_agent.agent_id != "builtin.workspace_reader"
+            or self.capability.capability_id != "workspace.file.read.v1"
+        ):
+            raise ValueError("Confirmed Reader node proof authority changed")
+        values = self.model_dump(mode="json")
+        identity = {
+            key: value for key, value in values.items() if key not in {"proof_id", "proof_digest"}
+        }
+        if self.proof_id != _content_id("wxn", identity):
+            raise ValueError("Confirmed Reader node proof identity changed")
+        material = {key: value for key, value in values.items() if key != "proof_digest"}
+        if self.proof_digest != sha256_digest(material):
+            raise ValueError("Confirmed Reader node proof digest changed")
+        return self
+
+    @classmethod
+    def build(cls, **values: Any) -> Self:
+        base = {
+            "schema_version": "deskpilot.workspace-coding-reader-node-proof.v1",
+            **values,
+        }
+        proof_id = _content_id("wxn", base)
+        material = {**base, "proof_id": proof_id}
+        return cls(**material, proof_digest=sha256_digest(material))
+
+
 class WorkspaceCodingExplorationWorkbenchRead(BaseModel):
     """Redacted Workbench projection for the source and confirmed successor Task."""
 
@@ -724,4 +798,5 @@ __all__ = [
     "WorkspaceCodingExplorerTurnProof",
     "WorkspaceCodingFileSetNodeMapping",
     "WorkspaceCodingFileSetPlanBinding",
+    "WorkspaceCodingReaderNodeProof",
 ]

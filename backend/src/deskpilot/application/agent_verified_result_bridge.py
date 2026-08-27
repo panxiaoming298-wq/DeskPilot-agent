@@ -40,6 +40,7 @@ from deskpilot.domain.task_plans import (
     ExecutablePlanNode,
     TaskContract,
 )
+from deskpilot.domain.workspace_coding_explorations import WorkspaceCodingReaderNodeProof
 from deskpilot.domain.workspace_files import WorkspaceFileRead
 from deskpilot.infrastructure.models import (
     AgentDecisionRecord,
@@ -76,7 +77,7 @@ class AgentVerifiedResultSourceBindingError(AgentVerifiedResultBridgeError):
 class AgentVerifiedResultPlanProof:
     """Existing immutable authority and execution records for one Agent node."""
 
-    step_binding: ModelPlannerStepBinding
+    step_binding: ModelPlannerStepBinding | None
     source_contract: TaskContract
     source_plan: ExecutablePlan
     composite_plan: ExecutablePlan
@@ -84,6 +85,7 @@ class AgentVerifiedResultPlanProof:
     node: TaskExecutionNodeRecord
     invocation: AgentInvocationRecord
     result: AgentResultRecord
+    workspace_reader_node_proof: WorkspaceCodingReaderNodeProof | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +238,23 @@ class AgentVerifiedResultBridge:
                 "Workspace Reader result Schema was rejected"
             ) from error
         cls._assert_agent_result_record(plan_proof, result)
-        bound_path = cls._parameter(plan_proof.step_binding, source_parameter_name)
+        reader_node_proof = plan_proof.workspace_reader_node_proof
+        if reader_node_proof is not None:
+            bound_path = reader_node_proof.workspace_relative_path
+            source_binding_digest = reader_node_proof.proof_digest
+            source_binding_material = {
+                "source_binding_digest": source_binding_digest,
+            }
+        else:
+            if plan_proof.step_binding is None:
+                raise AgentVerifiedResultSourceBindingError(
+                    "Workspace Reader has no immutable source binding"
+                )
+            bound_path = cls._parameter(plan_proof.step_binding, source_parameter_name)
+            source_binding_digest = plan_proof.step_binding.step_binding_digest
+            source_binding_material = {
+                "step_binding_digest": source_binding_digest,
+            }
         if workspace.relative_path != bound_path:
             raise AgentVerifiedResultSourceBindingError(
                 "Workspace path does not match the immutable source-step binding"
@@ -261,7 +279,7 @@ class AgentVerifiedResultBridge:
         verification_digest = sha256_digest(
             {
                 "schema_version": "deskpilot.workspace-reader-verification-proof.v1",
-                "step_binding_digest": plan_proof.step_binding.step_binding_digest,
+                **source_binding_material,
                 "plan_manifest_digest": plan_proof.composite_plan.plan_manifest_digest,
                 "node_spec_digest": plan_proof.node.node_spec_digest,
                 "invocation_id": plan_proof.invocation.invocation_id,
@@ -347,8 +365,7 @@ class AgentVerifiedResultBridge:
             or change.old_text != expected_change.get("old_text")
             or change.new_text != expected_change.get("new_text")
             or result.output != expected_output
-            or result.evidence_refs
-            != (f"agent-decision:{decision.decision_id}",)
+            or result.evidence_refs != (f"agent-decision:{decision.decision_id}",)
             or result.limitation_codes
             or result.input_digest != turn.request_digest
             or result.model_response_digest != turn.response_digest
@@ -361,7 +378,7 @@ class AgentVerifiedResultBridge:
         verification_digest = sha256_digest(
             {
                 "schema_version": "deskpilot.workspace-patch-planner-verification-proof.v1",
-                "step_binding_digest": plan_proof.step_binding.step_binding_digest,
+                "step_binding_digest": cls._required_step(plan_proof).step_binding_digest,
                 "plan_manifest_digest": plan_proof.composite_plan.plan_manifest_digest,
                 "node_spec_digest": plan_proof.node.node_spec_digest,
                 "invocation_id": plan_proof.invocation.invocation_id,
@@ -395,9 +412,7 @@ class AgentVerifiedResultBridge:
         plan_proof: AgentVerifiedResultPlanProof,
         verification_proof: WorkspaceCodingCoordinatorVerificationProof,
         *,
-        expected_proposal: (
-            AgentProposeTaskGraphDecision | WorkspaceBoundedCodingGraphDecision
-        ),
+        expected_proposal: (AgentProposeTaskGraphDecision | WorkspaceBoundedCodingGraphDecision),
         expected_graph_binding_id: str,
         allow_pending_node_transition: bool = False,
     ) -> VerifiedCapabilityResultRef:
@@ -420,9 +435,7 @@ class AgentVerifiedResultBridge:
         )
         try:
             result = AgentOutputResult.model_validate(plan_proof.result.manifest)
-            proposal = type(expected_proposal).model_validate(
-                verification_proof.decision.manifest
-            )
+            proposal = type(expected_proposal).model_validate(verification_proof.decision.manifest)
         except ValidationError as error:
             raise AgentVerifiedResultProofRejectedError(
                 "Workspace coding Coordinator proof Schema was rejected"
@@ -477,7 +490,7 @@ class AgentVerifiedResultBridge:
                     if bounded
                     else "deskpilot.workspace-coding-coordinator-verification-proof.v1"
                 ),
-                "step_binding_digest": plan_proof.step_binding.step_binding_digest,
+                "step_binding_digest": cls._required_step(plan_proof).step_binding_digest,
                 "plan_manifest_digest": plan_proof.composite_plan.plan_manifest_digest,
                 "node_spec_digest": plan_proof.node.node_spec_digest,
                 "invocation_id": plan_proof.invocation.invocation_id,
@@ -498,9 +511,7 @@ class AgentVerifiedResultBridge:
             producer_attempt=plan_proof.invocation.attempt,
             capability=resolved.capability,
             result_kind=CapabilityResultKind.COORDINATION_PLAN,
-            result_schema_digest=sha256_digest(
-                type(expected_proposal).model_json_schema()
-            ),
+            result_schema_digest=sha256_digest(type(expected_proposal).model_json_schema()),
             result_digest=result.result_digest,
             verification_digest=verification_digest,
         )
@@ -516,7 +527,20 @@ class AgentVerifiedResultBridge:
         expected_capability_id: str,
         allow_pending_node_transition: bool,
     ) -> _ResolvedPlanProof:
+        if proof.workspace_reader_node_proof is not None:
+            return cls._resolve_confirmed_reader_proof(
+                proof,
+                expected_route_id=expected_route_id,
+                expected_source_local_key=expected_source_local_key,
+                expected_agent_id=expected_agent_id,
+                expected_capability_id=expected_capability_id,
+                allow_pending_node_transition=allow_pending_node_transition,
+            )
         step = proof.step_binding
+        if step is None:
+            raise AgentVerifiedResultSourceBindingError(
+                "Agent bridge has no immutable source binding"
+            )
         source_plan = proof.source_plan
         composite_plan = proof.composite_plan
         run = proof.run
@@ -613,6 +637,97 @@ class AgentVerifiedResultBridge:
             capability=source_node.capability,
         )
 
+    @classmethod
+    def _resolve_confirmed_reader_proof(
+        cls,
+        proof: AgentVerifiedResultPlanProof,
+        *,
+        expected_route_id: str,
+        expected_source_local_key: str,
+        expected_agent_id: str,
+        expected_capability_id: str,
+        allow_pending_node_transition: bool,
+    ) -> _ResolvedPlanProof:
+        reader = proof.workspace_reader_node_proof
+        if reader is None or proof.step_binding is not None:
+            raise AgentVerifiedResultSourceBindingError(
+                "Confirmed Reader source proof shape changed"
+            )
+        source_plan = proof.source_plan
+        composite_plan = proof.composite_plan
+        run = proof.run
+        node = proof.node
+        invocation = proof.invocation
+        if (
+            expected_route_id != "workspace_confirmed_file_set"
+            or expected_source_local_key != reader.plan_local_key
+            or expected_agent_id != "builtin.workspace_reader"
+            or expected_capability_id != "workspace.file.read.v1"
+            or proof.source_contract.task_id != run.task_id
+            or proof.source_contract.digest != source_plan.task_contract.digest
+            or source_plan != composite_plan
+            or source_plan.plan_id != reader.plan_id
+            or source_plan.plan_manifest_digest != reader.plan_manifest_digest
+            or source_plan.producer.kind != "trusted_template"
+            or run.task_id != reader.successor_task_id
+            or run.plan_generation != 1
+            or run.plan_digest != reader.plan_manifest_digest
+            or run.status not in {"active", "awaiting_verification", "paused", "succeeded"}
+        ):
+            raise AgentVerifiedResultSourceBindingError("Confirmed Reader Plan lineage changed")
+        composite_node = cls._plan_node(composite_plan, reader.plan_node_id)
+        if (
+            composite_node.local_key != reader.plan_local_key
+            or composite_node.node_spec_digest != reader.plan_node_spec_digest
+            or composite_node.kind is not DraftNodeKind.AGENT
+            or composite_node.bound_agent != reader.reader_agent
+            or composite_node.capability != reader.capability
+            or reader.reader_agent.agent_id != expected_agent_id
+            or reader.capability.capability_id != expected_capability_id
+            or node.run_id != run.run_id
+            or node.node_id != composite_node.node_id
+            or node.local_key != composite_node.local_key
+            or node.node_kind != composite_node.kind.value
+            or node.node_spec_digest != composite_node.node_spec_digest
+            or tuple(node.depends_on) != composite_node.depends_on
+            or node.bound_agent != reader.reader_agent.model_dump(mode="json")
+            or node.capability != reader.capability.model_dump(mode="json")
+            or node.status
+            not in (
+                {"verified", "awaiting_verification"}
+                if allow_pending_node_transition
+                else {"verified"}
+            )
+            or invocation.run_id != run.run_id
+            or invocation.node_id != node.node_id
+            or invocation.attempt != node.attempt_count
+            or invocation.parent_invocation_id is not None
+            or invocation.agent_id != reader.reader_agent.agent_id
+            or invocation.agent_version != reader.reader_agent.version
+            or invocation.agent_contract_digest != reader.reader_agent.contract_digest
+            or invocation.prompt_package_digest != reader.reader_agent.prompt_package_digest
+            or invocation.execution_status != "result_submitted"
+            or invocation.verification_status != "verified"
+            or invocation.result_id != proof.result.result_id
+        ):
+            raise AgentVerifiedResultProofRejectedError(
+                "Confirmed Reader Invocation or node proof changed"
+            )
+        mapping = ModelPlannerNodeMapping.build(
+            source_node_id=composite_node.node_id,
+            source_local_key=composite_node.local_key,
+            source_node_spec_digest=composite_node.node_spec_digest,
+            composite_node_id=composite_node.node_id,
+            composite_local_key=composite_node.local_key,
+            composite_node_spec_digest=composite_node.node_spec_digest,
+        )
+        return _ResolvedPlanProof(
+            mapping=mapping,
+            source_node=composite_node,
+            composite_node=composite_node,
+            capability=reader.capability,
+        )
+
     @staticmethod
     def _plan_node(plan: ExecutablePlan, node_id: str) -> ExecutablePlanNode:
         node = next((item for item in plan.nodes if item.node_id == node_id), None)
@@ -623,7 +738,11 @@ class AgentVerifiedResultBridge:
         return node
 
     @staticmethod
-    def _parameter(binding: ModelPlannerStepBinding, name: str) -> str:
+    def _parameter(binding: ModelPlannerStepBinding | None, name: str) -> str:
+        if binding is None:
+            raise AgentVerifiedResultSourceBindingError(
+                "Agent proof has no model-planner step binding"
+            )
         matches = tuple(
             item.value for item in binding.parameter_bindings if item.parameter_name == name
         )
@@ -632,6 +751,14 @@ class AgentVerifiedResultBridge:
                 f"Source-step binding requires exactly one {name} parameter"
             )
         return matches[0]
+
+    @staticmethod
+    def _required_step(proof: AgentVerifiedResultPlanProof) -> ModelPlannerStepBinding:
+        if proof.step_binding is None:
+            raise AgentVerifiedResultSourceBindingError(
+                "Agent proof has no model-planner step binding"
+            )
+        return proof.step_binding
 
     @staticmethod
     def _assert_agent_result_record(

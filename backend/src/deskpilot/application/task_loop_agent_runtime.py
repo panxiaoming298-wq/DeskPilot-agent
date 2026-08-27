@@ -123,6 +123,7 @@ AgentSourceRoute = Literal[
     "research_to_html",
     "workspace_file_read",
     "workspace_coding_loop",
+    "workspace_confirmed_file_set",
 ]
 AgentSourceParameter = Literal[
     "goal",
@@ -331,9 +332,7 @@ class TaskLoopAgentRuntime:
                 TaskLoopNodeAttemptRecord.status == "awaiting_verification",
             )
             if node_id is not None:
-                attempt_query = attempt_query.where(
-                    TaskLoopNodeAttemptRecord.node_id == node_id
-                )
+                attempt_query = attempt_query.where(TaskLoopNodeAttemptRecord.node_id == node_id)
             attempts = tuple(
                 (
                     await session.scalars(
@@ -373,9 +372,7 @@ class TaskLoopAgentRuntime:
             self._assert_bound_node(execution, binding, profile, node)
             handoff_record = await session.get(AgentHandoffRecord, invocation.handoff_id)
             if handoff_record is None:
-                raise TaskLoopAgentProofRejectedError(
-                    "Pending Agent verification lost its Handoff"
-                )
+                raise TaskLoopAgentProofRejectedError("Pending Agent verification lost its Handoff")
             try:
                 handoff = HandoffEnvelope.model_validate(handoff_record.manifest)
             except ValidationError as error:
@@ -486,9 +483,7 @@ class TaskLoopAgentRuntime:
         """
 
         if not self._is_workspace_file_source(source):
-            raise TaskLoopAgentConflictError(
-                "Source-bound claim is not a Workspace file-read node"
-            )
+            raise TaskLoopAgentConflictError("Source-bound claim is not a Workspace file-read node")
         if self._workspace is None:
             raise TaskLoopAgentRuntimeUnavailableError("Workspace runtime is unavailable")
         await self._mark_attempt_running(source)
@@ -517,9 +512,7 @@ class TaskLoopAgentRuntime:
         """Persist a deterministic Workspace candidate without minting ResultRef."""
 
         if not self._is_workspace_file_source(source):
-            raise TaskLoopAgentConflictError(
-                "Source-bound claim is not a Workspace file-read node"
-            )
+            raise TaskLoopAgentConflictError("Source-bound claim is not a Workspace file-read node")
         if self._workspace is None:
             raise TaskLoopAgentRuntimeUnavailableError("Workspace runtime is unavailable")
         await self._mark_attempt_running(source)
@@ -551,8 +544,7 @@ class TaskLoopAgentRuntime:
         profile = self._profile(source.binding)
         if (
             profile.route_id != "workspace_coding_loop"
-            or profile.source_local_key
-            not in {"coordinate_coding", "coordinate_bounded_coding"}
+            or profile.source_local_key not in {"coordinate_coding", "coordinate_bounded_coding"}
             or profile.agent_id
             not in {
                 "builtin.workspace_coordinator",
@@ -585,20 +577,12 @@ class TaskLoopAgentRuntime:
             source.claimed.claim_owner_id,
             source.claimed.claim_fencing_token,
         )
-        request_id = (
-            "task-loop-coordinate-"
-            f"{source.claimed.invocation.invocation_id[-20:]}"
-        )
+        request_id = f"task-loop-coordinate-{source.claimed.invocation.invocation_id[-20:]}"
         privacy_mode = cast(PrivacyMode, task.privacy_mode)
         offered_capabilities = [
-            cast(dict[str, object], item.model_dump(mode="json"))
-            for item in expected.nodes
+            cast(dict[str, object], item.model_dump(mode="json")) for item in expected.nodes
         ]
-        proposal: (
-            AgentProposeTaskGraphDecision
-            | WorkspaceBoundedCodingGraphDecision
-            | object
-        )
+        proposal: AgentProposeTaskGraphDecision | WorkspaceBoundedCodingGraphDecision | object
         if isinstance(expected, WorkspaceBoundedCodingGraphDecision):
             request = build_bounded_coding_coordinator_model_request(
                 request_id=request_id,
@@ -709,17 +693,14 @@ class TaskLoopAgentRuntime:
             record = await session.scalar(
                 select(TaskPlanGenerationRecord).where(
                     TaskPlanGenerationRecord.task_id == source.binding.task_id,
-                    TaskPlanGenerationRecord.plan_id
-                    == source.binding.composite_plan_id,
+                    TaskPlanGenerationRecord.plan_id == source.binding.composite_plan_id,
                     TaskPlanGenerationRecord.plan_manifest_digest
                     == source.binding.composite_plan_manifest_digest,
                     TaskPlanGenerationRecord.status == "active",
                 )
             )
         if task is None or record is None:
-            raise TaskLoopAgentProofRejectedError(
-                "Coding Coordinator lost its active sealed Plan"
-            )
+            raise TaskLoopAgentProofRejectedError("Coding Coordinator lost its active sealed Plan")
         try:
             plan = ExecutablePlan.model_validate(record.manifest)
         except ValidationError as error:
@@ -752,9 +733,7 @@ class TaskLoopAgentRuntime:
             if item.local_key.startswith(prefix)
         }
         if set(keys) - set(by_key) or coordinator_key not in by_key:
-            raise TaskLoopAgentProofRejectedError(
-                "Coding Coordinator fixed Plan nodes changed"
-            )
+            raise TaskLoopAgentProofRejectedError("Coding Coordinator fixed Plan nodes changed")
         node_id_to_key = {item.node_id: key for key, item in by_key.items()}
         input_specs: dict[str, tuple[str, str]] = {
             "apply_patch": ("route_patch_test_spec", "patch_bundle"),
@@ -795,23 +774,15 @@ class TaskLoopAgentRuntime:
             "commit_git": "workspace.git.commit.v1",
         }
         expected_capabilities.update(
-            {
-                key: "workspace.file.read.v1"
-                for key in workspace_coding_reader_keys(file_count)
-            }
+            {key: "workspace.file.read.v1" for key in workspace_coding_reader_keys(file_count)}
         )
         expected_capabilities.update(
-            {
-                key: "workspace.patch.propose.v1"
-                for key in workspace_coding_planner_keys(file_count)
-            }
+            {key: "workspace.patch.propose.v1" for key in workspace_coding_planner_keys(file_count)}
         )
         expected_dependencies: dict[str, tuple[str, ...]] = {
             **{key: () for key in workspace_coding_reader_keys(file_count)},
             **{
-                workspace_coding_planner_key(index): (
-                    workspace_coding_reader_key(index),
-                )
+                workspace_coding_planner_key(index): (workspace_coding_reader_key(index),)
                 for index in range(1, file_count + 1)
             },
             "apply_patch": workspace_coding_planner_keys(file_count),
@@ -819,9 +790,7 @@ class TaskLoopAgentRuntime:
             "commit_git": ("run_fixed_test",),
         }
         if binding.bound_input_manifest.get("test_kind") not in {"python", "node"}:
-            raise TaskLoopAgentProofRejectedError(
-                "Coding Coordinator fixed test ecosystem changed"
-            )
+            raise TaskLoopAgentProofRejectedError("Coding Coordinator fixed test ecosystem changed")
         proposals: list[dict[str, object]] = []
         known = set(keys)
         for key in keys:
@@ -897,14 +866,22 @@ class TaskLoopAgentRuntime:
             )
             persisted_result = await session.get(AgentResultRecord, result.result_id)
             turns = tuple(
-                (await session.scalars(select(AgentModelTurnRecord).where(
-                    AgentModelTurnRecord.invocation_id == result.invocation_id
-                ))).all()
+                (
+                    await session.scalars(
+                        select(AgentModelTurnRecord).where(
+                            AgentModelTurnRecord.invocation_id == result.invocation_id
+                        )
+                    )
+                ).all()
             )
             decisions = tuple(
-                (await session.scalars(select(AgentDecisionRecord).where(
-                    AgentDecisionRecord.invocation_id == result.invocation_id
-                ))).all()
+                (
+                    await session.scalars(
+                        select(AgentDecisionRecord).where(
+                            AgentDecisionRecord.invocation_id == result.invocation_id
+                        )
+                    )
+                ).all()
             )
             if (
                 invocation is None
@@ -988,9 +965,7 @@ class TaskLoopAgentRuntime:
             "limitation_codes": (),
             "input_digest": request_digest,
             "model_response_digest": response_digest,
-            "output_schema_digest": sha256_digest(
-                type(proposal).model_json_schema()
-            ),
+            "output_schema_digest": sha256_digest(type(proposal).model_json_schema()),
         }
         return AgentOutputResult.model_validate(
             {**material, "result_digest": sha256_digest(material)}
@@ -1015,8 +990,8 @@ class TaskLoopAgentRuntime:
             raise TaskLoopAgentRuntimeUnavailableError(
                 "Patch Planner Model Turn runtime is unavailable"
             )
-        task, workspace, upstream_result_ref, expected_change = (
-            await self._patch_planner_context(source)
+        task, workspace, upstream_result_ref, expected_change = await self._patch_planner_context(
+            source
         )
         await self._mark_attempt_running(source)
         await self._execution.start_invocation(
@@ -1044,10 +1019,7 @@ class TaskLoopAgentRuntime:
         }
         patch_binding_id = f"ptb_{sha256_digest(patch_binding_material)}"
         request = build_patch_planner_model_request(
-            request_id=(
-                "task-loop-patch-"
-                f"{source.claimed.invocation.invocation_id[-20:]}"
-            ),
+            request_id=(f"task-loop-patch-{source.claimed.invocation.invocation_id[-20:]}"),
             task_id=source.binding.task_id,
             privacy_mode=cast(PrivacyMode, task.privacy_mode),
             budget=source.claimed.handoff.budget_allocation,
@@ -1158,8 +1130,7 @@ class TaskLoopAgentRuntime:
                 (
                     await session.scalars(
                         select(TaskLoopVerifiedResultRecord).where(
-                            TaskLoopVerifiedResultRecord.execution_id
-                            == source.execution_id,
+                            TaskLoopVerifiedResultRecord.execution_id == source.execution_id,
                             TaskLoopVerifiedResultRecord.node_id == dependency_id,
                             TaskLoopVerifiedResultRecord.result_kind == "workspace_file",
                         )
@@ -1173,9 +1144,7 @@ class TaskLoopAgentRuntime:
             record = records[0]
             try:
                 workspace = WorkspaceFileRead.model_validate(record.output_manifest)
-                result_ref = VerifiedCapabilityResultRef.model_validate(
-                    record.result_ref_manifest
-                )
+                result_ref = VerifiedCapabilityResultRef.model_validate(record.result_ref_manifest)
             except ValidationError as error:
                 raise TaskLoopAgentProofRejectedError(
                     "Patch Planner Reader proof Schema was rejected"
@@ -1219,10 +1188,7 @@ class TaskLoopAgentRuntime:
             )
             node = await session.scalar(
                 select(TaskExecutionNodeRecord)
-                .where(
-                    TaskExecutionNodeRecord.node_id
-                    == source.binding.composite_node_id
-                )
+                .where(TaskExecutionNodeRecord.node_id == source.binding.composite_node_id)
                 .with_for_update()
             )
             persisted_result = await session.get(AgentResultRecord, result.result_id)
@@ -1257,9 +1223,7 @@ class TaskLoopAgentRuntime:
             turn = turns[0]
             decision = decisions[0]
             try:
-                proposal = WorkspacePatchSubmitProposalDecision.model_validate(
-                    decision.manifest
-                )
+                proposal = WorkspacePatchSubmitProposalDecision.model_validate(decision.manifest)
             except ValidationError as error:
                 raise TaskLoopAgentProofRejectedError(
                     "Patch Planner decision Schema was rejected"
@@ -1349,9 +1313,7 @@ class TaskLoopAgentRuntime:
     ) -> dict[str, str]:
         raw = binding.bound_input_manifest.get("changes_json")
         if not isinstance(raw, str):
-            raise TaskLoopAgentProofRejectedError(
-                "Coding Patch Planner has no sealed change Offer"
-            )
+            raise TaskLoopAgentProofRejectedError("Coding Patch Planner has no sealed change Offer")
         try:
             changes = json.loads(raw)
         except json.JSONDecodeError as error:
@@ -1466,6 +1428,7 @@ class TaskLoopAgentRuntime:
                     node=node,
                     invocation=invocation,
                     result=result,
+                    workspace_reader_node_proof=(binding.workspace_reader_node_proof),
                 )
                 profile = self._profile(binding)
                 output_manifest: dict[str, object]
@@ -1483,9 +1446,7 @@ class TaskLoopAgentRuntime:
                     )
                     output_manifest = dict(result.manifest)
                     verification_manifest = {
-                        "schema_version": (
-                            "deskpilot.agent-result-verification-reference.v1"
-                        ),
+                        "schema_version": ("deskpilot.agent-result-verification-reference.v1"),
                         "verification_run_id": (
                             verification_proof.verification.verification_run_id
                         ),
@@ -1510,8 +1471,7 @@ class TaskLoopAgentRuntime:
                     graph_digest = sha256_digest(
                         {
                             "nodes": [
-                                item.model_dump(mode="json")
-                                for item in expected_proposal.nodes
+                                item.model_dump(mode="json") for item in expected_proposal.nodes
                             ],
                             "output_node_key": expected_proposal.output_node_key,
                         }
@@ -1523,14 +1483,12 @@ class TaskLoopAgentRuntime:
                         }
                     )
                     graph_binding_id = f"tgb_{graph_binding_digest}"
-                    result_ref = (
-                        AgentVerifiedResultBridge.workspace_coding_coordinator(
-                            plan_proof,
-                            coordinator_proof,
-                            expected_proposal=expected_proposal,
-                            expected_graph_binding_id=graph_binding_id,
-                            allow_pending_node_transition=True,
-                        )
+                    result_ref = AgentVerifiedResultBridge.workspace_coding_coordinator(
+                        plan_proof,
+                        coordinator_proof,
+                        expected_proposal=expected_proposal,
+                        expected_graph_binding_id=graph_binding_id,
+                        allow_pending_node_transition=True,
                     )
                     parsed_result = AgentOutputResult.model_validate(result.manifest)
                     output_manifest = {
@@ -1538,9 +1496,7 @@ class TaskLoopAgentRuntime:
                         "result_digest": result.result_digest,
                     }
                     verification_manifest = {
-                        "schema_version": (
-                            "deskpilot.agent-result-verification-reference.v1"
-                        ),
+                        "schema_version": ("deskpilot.agent-result-verification-reference.v1"),
                         "model_turn_id": coordinator_proof.model_turn.turn_id,
                         "decision_id": coordinator_proof.decision.decision_id,
                         "decision_digest": coordinator_proof.decision.decision_digest,
@@ -1571,9 +1527,7 @@ class TaskLoopAgentRuntime:
                         "result_digest": result.result_digest,
                     }
                     verification_manifest = {
-                        "schema_version": (
-                            "deskpilot.agent-result-verification-reference.v1"
-                        ),
+                        "schema_version": ("deskpilot.agent-result-verification-reference.v1"),
                         "model_turn_id": patch_proof.model_turn.turn_id,
                         "decision_id": patch_proof.decision.decision_id,
                         "decision_digest": patch_proof.decision.decision_digest,
@@ -1592,16 +1546,10 @@ class TaskLoopAgentRuntime:
                     )
                     output_manifest = dict(workspace_proof.workspace_result.manifest)
                     verification_manifest = {
-                        "schema_version": (
-                            "deskpilot.agent-result-verification-reference.v1"
-                        ),
-                        "workspace_invocation_id": (
-                            workspace_proof.workspace_result.invocation_id
-                        ),
+                        "schema_version": ("deskpilot.agent-result-verification-reference.v1"),
+                        "workspace_invocation_id": (workspace_proof.workspace_result.invocation_id),
                         "verification_digest": result_ref.verification_digest,
-                        "workspace_result_digest": (
-                            workspace_proof.workspace_result.result_digest
-                        ),
+                        "workspace_result_digest": (workspace_proof.workspace_result.result_digest),
                         "agent_result_digest": result.result_digest,
                     }
 
@@ -1630,11 +1578,7 @@ class TaskLoopAgentRuntime:
                         TaskLoopVerifiedResultRecord.attempt_id == attempt.attempt_id
                     )
                 )
-                created_at = (
-                    self._aware(existing.created_at)
-                    if existing is not None
-                    else utc_now()
-                )
+                created_at = self._aware(existing.created_at) if existing is not None else utc_now()
                 result_ref_identity = {
                     "attempt_id": attempt.attempt_id,
                     "result_ref_digest": result_ref.result_ref_digest,
@@ -1739,10 +1683,7 @@ class TaskLoopAgentRuntime:
             )
             node = await session.scalar(
                 select(TaskExecutionNodeRecord)
-                .where(
-                    TaskExecutionNodeRecord.node_id
-                    == source.binding.composite_node_id
-                )
+                .where(TaskExecutionNodeRecord.node_id == source.binding.composite_node_id)
                 .with_for_update()
             )
             run = await session.scalar(
@@ -1751,9 +1692,7 @@ class TaskLoopAgentRuntime:
                 .with_for_update()
             )
             if record is None or node is None or run is None:
-                raise TaskLoopAgentNotFoundError(
-                    "Rejected Agent attempt, node, or Run disappeared"
-                )
+                raise TaskLoopAgentNotFoundError("Rejected Agent attempt, node, or Run disappeared")
             previous = self._attempt_from_record(record)
             if (
                 previous.execution_id != source.execution_id
@@ -1810,18 +1749,12 @@ class TaskLoopAgentRuntime:
         async with self._database.session() as session, session.begin():
             record = await session.scalar(
                 select(TaskLoopNodeAttemptRecord)
-                .where(
-                    TaskLoopNodeAttemptRecord.attempt_id
-                    == source.attempt.attempt_id
-                )
+                .where(TaskLoopNodeAttemptRecord.attempt_id == source.attempt.attempt_id)
                 .with_for_update()
             )
             node = await session.scalar(
                 select(TaskExecutionNodeRecord)
-                .where(
-                    TaskExecutionNodeRecord.node_id
-                    == source.binding.composite_node_id
-                )
+                .where(TaskExecutionNodeRecord.node_id == source.binding.composite_node_id)
                 .with_for_update()
             )
             run = await session.scalar(
@@ -1832,8 +1765,7 @@ class TaskLoopAgentRuntime:
             invocation = await session.scalar(
                 select(AgentInvocationRecord)
                 .where(
-                    AgentInvocationRecord.invocation_id
-                    == source.claimed.invocation.invocation_id
+                    AgentInvocationRecord.invocation_id == source.claimed.invocation.invocation_id
                 )
                 .with_for_update()
             )
@@ -1912,18 +1844,12 @@ class TaskLoopAgentRuntime:
         async with self._database.session() as session, session.begin():
             record = await session.scalar(
                 select(TaskLoopNodeAttemptRecord)
-                .where(
-                    TaskLoopNodeAttemptRecord.attempt_id
-                    == source.attempt.attempt_id
-                )
+                .where(TaskLoopNodeAttemptRecord.attempt_id == source.attempt.attempt_id)
                 .with_for_update()
             )
             node = await session.scalar(
                 select(TaskExecutionNodeRecord)
-                .where(
-                    TaskExecutionNodeRecord.node_id
-                    == source.binding.composite_node_id
-                )
+                .where(TaskExecutionNodeRecord.node_id == source.binding.composite_node_id)
                 .with_for_update()
             )
             run = await session.scalar(
@@ -1934,8 +1860,7 @@ class TaskLoopAgentRuntime:
             invocation = await session.scalar(
                 select(AgentInvocationRecord)
                 .where(
-                    AgentInvocationRecord.invocation_id
-                    == source.claimed.invocation.invocation_id
+                    AgentInvocationRecord.invocation_id == source.claimed.invocation.invocation_id
                 )
                 .with_for_update()
             )
@@ -2004,22 +1929,16 @@ class TaskLoopAgentRuntime:
         execution = self._execution_from_record(record)
         if execution.status != "active":
             return None
-        node_statement = (
-            select(TaskExecutionNodeRecord)
-            .where(
-                TaskExecutionNodeRecord.run_id == execution.run_id,
-                TaskExecutionNodeRecord.status == "ready",
-                TaskExecutionNodeRecord.runtime_enabled.is_(True),
-                TaskExecutionNodeRecord.bound_agent.is_not(None),
-            )
+        node_statement = select(TaskExecutionNodeRecord).where(
+            TaskExecutionNodeRecord.run_id == execution.run_id,
+            TaskExecutionNodeRecord.status == "ready",
+            TaskExecutionNodeRecord.runtime_enabled.is_(True),
+            TaskExecutionNodeRecord.bound_agent.is_not(None),
         )
         if node_id is not None:
-            node_statement = node_statement.where(
-                TaskExecutionNodeRecord.node_id == node_id
-            )
+            node_statement = node_statement.where(TaskExecutionNodeRecord.node_id == node_id)
         node = await session.scalar(
-            node_statement.order_by(TaskExecutionNodeRecord.local_key)
-            .limit(1)
+            node_statement.order_by(TaskExecutionNodeRecord.local_key).limit(1)
         )
         if node is None:
             return None
@@ -2098,15 +2017,15 @@ class TaskLoopAgentRuntime:
                 "node_spec_digest": node.node_spec_digest,
                 "node_binding_id": binding.node_binding_id,
                 "node_binding_digest": binding.binding_digest,
-                "effective_authority_digest": (
-                    binding.effective_authority.authority_digest
-                ),
-                "runtime_eligibility_digest": (
-                    binding.runtime_eligibility.eligibility_digest
-                ),
+                "effective_authority_digest": (binding.effective_authority.authority_digest),
+                "runtime_eligibility_digest": (binding.runtime_eligibility.eligibility_digest),
                 "invocation_id": claimed.invocation.invocation_id,
                 "invocation_attempt": claimed.invocation.attempt,
             }
+            if binding.workspace_reader_node_proof is not None:
+                context_manifest["workspace_reader_node_proof_digest"] = (
+                    binding.workspace_reader_node_proof.proof_digest
+                )
             created_at = utc_now()
             attempt = self._build_attempt(
                 {
@@ -2179,9 +2098,7 @@ class TaskLoopAgentRuntime:
             if record.status == "awaiting_verification":
                 return
             if record.status != "running":
-                raise TaskLoopAgentConflictError(
-                    "Task Loop attempt did not enter running state"
-                )
+                raise TaskLoopAgentConflictError("Task Loop attempt did not enter running state")
             invocation = await session.get(
                 AgentInvocationRecord,
                 source.claimed.invocation.invocation_id,
@@ -2192,9 +2109,7 @@ class TaskLoopAgentRuntime:
                 )
             result_record = await session.get(AgentResultRecord, invocation.result_id)
             if result_record is None:
-                raise TaskLoopAgentProofRejectedError(
-                    "Research Agent Result record is missing"
-                )
+                raise TaskLoopAgentProofRejectedError("Research Agent Result record is missing")
             try:
                 result = AgentResult.model_validate(result_record.manifest)
             except ValidationError as error:
@@ -2262,9 +2177,7 @@ class TaskLoopAgentRuntime:
                     )
                 return
             if record.status != "running":
-                raise TaskLoopAgentConflictError(
-                    "Workspace Agent attempt is not running"
-                )
+                raise TaskLoopAgentConflictError("Workspace Agent attempt is not running")
             previous = self._attempt_from_record(record)
             now = utc_now()
             material = previous.model_dump(mode="python", exclude={"attempt_digest"})
@@ -2299,9 +2212,7 @@ class TaskLoopAgentRuntime:
         async with self._database.session() as session, session.begin():
             invocation = await session.scalar(
                 select(AgentInvocationRecord)
-                .where(
-                    AgentInvocationRecord.invocation_id == result.invocation_id
-                )
+                .where(AgentInvocationRecord.invocation_id == result.invocation_id)
                 .with_for_update()
             )
             node = await session.scalar(
@@ -2391,9 +2302,7 @@ class TaskLoopAgentRuntime:
             "limitation_codes": (),
             "input_digest": source.attempt.input_digest,
             "model_response_digest": response_digest,
-            "output_schema_digest": sha256_digest(
-                WorkspaceFileRead.model_json_schema()
-            ),
+            "output_schema_digest": sha256_digest(WorkspaceFileRead.model_json_schema()),
         }
         return AgentOutputResult.model_validate(
             {**material, "result_digest": sha256_digest(material)}
@@ -2444,7 +2353,7 @@ class TaskLoopAgentRuntime:
     ) -> tuple[
         TaskLoopExecution,
         ModelPlannerNodeBinding,
-        ModelPlannerStepBinding,
+        ModelPlannerStepBinding | None,
         ExecutablePlan,
     ]:
         execution_record = await session.scalar(
@@ -2458,29 +2367,31 @@ class TaskLoopAgentRuntime:
             .with_for_update()
         )
         if execution_record is None or binding_record is None:
-            raise TaskLoopAgentNotFoundError(
-                "Task Loop execution or Agent binding disappeared"
-            )
+            raise TaskLoopAgentNotFoundError("Task Loop execution or Agent binding disappeared")
         execution = self._execution_from_record(execution_record)
         binding = self._binding_from_record(binding_record)
         if binding != source.binding or binding_record.execution_id != execution.execution_id:
-            raise TaskLoopAgentProofRejectedError(
-                "Source-bound Agent binding changed after claim"
-            )
-        step_record = await session.get(
-            ModelPlannerStepBindingRecord,
-            binding.step_binding_id,
-        )
+            raise TaskLoopAgentProofRejectedError("Source-bound Agent binding changed after claim")
         plan_record = await session.get(
             TaskPlanGenerationRecord,
             (execution.task_id, execution.plan_generation),
         )
-        if step_record is None or plan_record is None:
-            raise TaskLoopAgentProofRejectedError(
-                "Source step or composite Plan record is missing"
-            )
-        step = self._step_from_record(step_record)
+        if plan_record is None:
+            raise TaskLoopAgentProofRejectedError("Composite Plan record is missing")
         composite_plan = self._plan_from_record(plan_record)
+        step: ModelPlannerStepBinding | None = None
+        if binding.source_kind == "model_planner":
+            if binding.step_binding_id is None:
+                raise TaskLoopAgentProofRejectedError(
+                    "Model Planner Agent binding lost its step id"
+                )
+            step_record = await session.get(
+                ModelPlannerStepBindingRecord,
+                binding.step_binding_id,
+            )
+            if step_record is None:
+                raise TaskLoopAgentProofRejectedError("Source step record is missing")
+            step = self._step_from_record(step_record)
         self._assert_source_plan_proof(
             execution,
             binding,
@@ -2500,24 +2411,20 @@ class TaskLoopAgentRuntime:
             (
                 await session.scalars(
                     select(ResearchSessionRecord).where(
-                        ResearchSessionRecord.invocation_id
-                        == plan.invocation.invocation_id
+                        ResearchSessionRecord.invocation_id == plan.invocation.invocation_id
                     )
                 )
             ).all()
         )
         if len(research_records) != 1:
-            raise TaskLoopAgentProofRejectedError(
-                "Research Invocation has no unique session proof"
-            )
+            raise TaskLoopAgentProofRejectedError("Research Invocation has no unique session proof")
         research = research_records[0]
         search_calls = tuple(
             (
                 await session.scalars(
                     select(ResearchSearchCallRecord)
                     .where(
-                        ResearchSearchCallRecord.research_session_id
-                        == research.research_session_id
+                        ResearchSearchCallRecord.research_session_id == research.research_session_id
                     )
                     .order_by(ResearchSearchCallRecord.attempt)
                 )
@@ -2551,10 +2458,7 @@ class TaskLoopAgentRuntime:
             (
                 await session.scalars(
                     select(ResearchClaimRecord)
-                    .where(
-                        ResearchClaimRecord.research_session_id
-                        == research.research_session_id
-                    )
+                    .where(ResearchClaimRecord.research_session_id == research.research_session_id)
                     .order_by(ResearchClaimRecord.claim_id)
                 )
             ).all()
@@ -2564,8 +2468,7 @@ class TaskLoopAgentRuntime:
                 await session.scalars(
                     select(ResearchCitationRecord)
                     .where(
-                        ResearchCitationRecord.research_session_id
-                        == research.research_session_id
+                        ResearchCitationRecord.research_session_id == research.research_session_id
                     )
                     .order_by(ResearchCitationRecord.citation_id)
                 )
@@ -2588,8 +2491,7 @@ class TaskLoopAgentRuntime:
                 await session.scalars(
                     select(ClaimVerdictRecord)
                     .where(
-                        ClaimVerdictRecord.verification_run_id
-                        == verification.verification_run_id
+                        ClaimVerdictRecord.verification_run_id == verification.verification_run_id
                     )
                     .order_by(ClaimVerdictRecord.claim_id)
                 )
@@ -2597,14 +2499,10 @@ class TaskLoopAgentRuntime:
         )
         policy = plan.source_contract.research
         if policy is None:
-            raise TaskLoopAgentProofRejectedError(
-                "Research source Contract has no research policy"
-            )
+            raise TaskLoopAgentProofRejectedError("Research source Contract has no research policy")
         query = binding.bound_input_manifest.get("goal")
         if query is None:
-            raise TaskLoopAgentProofRejectedError(
-                "Research source binding lost its goal"
-            )
+            raise TaskLoopAgentProofRejectedError("Research source binding lost its goal")
         return ResearchAgentVerificationProof(
             research=research,
             search_call=search_calls[0],
@@ -2645,8 +2543,7 @@ class TaskLoopAgentRuntime:
             (
                 await session.scalars(
                     select(AgentModelTurnRecord).where(
-                        AgentModelTurnRecord.invocation_id
-                        == invocation.invocation_id
+                        AgentModelTurnRecord.invocation_id == invocation.invocation_id
                     )
                 )
             ).all()
@@ -2655,8 +2552,7 @@ class TaskLoopAgentRuntime:
             (
                 await session.scalars(
                     select(AgentDecisionRecord).where(
-                        AgentDecisionRecord.invocation_id
-                        == invocation.invocation_id
+                        AgentDecisionRecord.invocation_id == invocation.invocation_id
                     )
                 )
             ).all()
@@ -2679,8 +2575,7 @@ class TaskLoopAgentRuntime:
             (
                 await session.scalars(
                     select(AgentModelTurnRecord).where(
-                        AgentModelTurnRecord.invocation_id
-                        == invocation.invocation_id
+                        AgentModelTurnRecord.invocation_id == invocation.invocation_id
                     )
                 )
             ).all()
@@ -2689,8 +2584,7 @@ class TaskLoopAgentRuntime:
             (
                 await session.scalars(
                     select(AgentDecisionRecord).where(
-                        AgentDecisionRecord.invocation_id
-                        == invocation.invocation_id
+                        AgentDecisionRecord.invocation_id == invocation.invocation_id
                     )
                 )
             ).all()
@@ -2709,25 +2603,47 @@ class TaskLoopAgentRuntime:
         cls,
         execution: TaskLoopExecution,
         binding: ModelPlannerNodeBinding,
-        step: ModelPlannerStepBinding,
+        step: ModelPlannerStepBinding | None,
         composite_plan: ExecutablePlan,
         proof: AgentSourcePlanProof,
     ) -> None:
         profile = cls._profile(binding)
+        if binding.source_kind == "confirmed_file_set":
+            reader = binding.workspace_reader_node_proof
+            composite_node = next(
+                (
+                    item
+                    for item in composite_plan.nodes
+                    if item.node_id == binding.composite_node_id
+                ),
+                None,
+            )
+            if (
+                step is not None
+                or reader is None
+                or proof.source_contract.digest != binding.source_contract_digest
+                or proof.source_plan != composite_plan
+                or composite_plan.plan_id != execution.plan_id
+                or composite_plan.plan_manifest_digest != execution.plan_manifest_digest
+                or reader.plan_id != composite_plan.plan_id
+                or reader.plan_manifest_digest != composite_plan.plan_manifest_digest
+                or reader.plan_node_id != binding.composite_node_id
+                or reader.plan_local_key != profile.source_local_key
+                or composite_node is None
+                or composite_node.node_spec_digest != reader.plan_node_spec_digest
+            ):
+                raise TaskLoopAgentProofRejectedError(
+                    "Confirmed Reader Contract, Plan, mapping or node proof changed"
+                )
+            return
+        if step is None or binding.recipe is None:
+            raise TaskLoopAgentProofRejectedError("Model Planner Agent source proof is incomplete")
         source_node = next(
-            (
-                item
-                for item in proof.source_plan.nodes
-                if item.node_id == binding.source_node_id
-            ),
+            (item for item in proof.source_plan.nodes if item.node_id == binding.source_node_id),
             None,
         )
         composite_node = next(
-            (
-                item
-                for item in composite_plan.nodes
-                if item.node_id == binding.composite_node_id
-            ),
+            (item for item in composite_plan.nodes if item.node_id == binding.composite_node_id),
             None,
         )
         if (
@@ -2737,25 +2653,20 @@ class TaskLoopAgentRuntime:
             or step.recipe != binding.recipe
             or step.parameter_bindings != binding.parameter_bindings
             or step.source_plan_id != proof.source_plan.plan_id
-            or step.source_plan_manifest_digest
-            != proof.source_plan.plan_manifest_digest
+            or step.source_plan_manifest_digest != proof.source_plan.plan_manifest_digest
             or proof.source_contract.digest != binding.source_contract_digest
             or proof.source_plan.task_contract.digest != proof.source_contract.digest
             or proof.source_plan.plan_id != binding.source_plan_id
-            or proof.source_plan.plan_manifest_digest
-            != binding.source_plan_manifest_digest
+            or proof.source_plan.plan_manifest_digest != binding.source_plan_manifest_digest
             or composite_plan.plan_id != execution.plan_id
-            or composite_plan.plan_manifest_digest
-            != execution.plan_manifest_digest
+            or composite_plan.plan_manifest_digest != execution.plan_manifest_digest
             or composite_plan.plan_id != binding.composite_plan_id
-            or composite_plan.plan_manifest_digest
-            != binding.composite_plan_manifest_digest
+            or composite_plan.plan_manifest_digest != binding.composite_plan_manifest_digest
             or source_node is None
             or composite_node is None
             or source_node.local_key != profile.source_local_key
             or source_node.node_spec_digest != binding.source_node_spec_digest
-            or composite_node.node_spec_digest
-            != binding.composite_node_spec_digest
+            or composite_node.node_spec_digest != binding.composite_node_spec_digest
         ):
             raise TaskLoopAgentProofRejectedError(
                 "Agent source recipe, step, Contract, or Plan proof changed"
@@ -2774,12 +2685,17 @@ class TaskLoopAgentRuntime:
         capability = authority.capability
         try:
             if bound_agent is None or capability is None:
-                raise TaskLoopAgentAdapterError(
-                    "Agent binding has no exact Agent or Capability"
-                )
+                raise TaskLoopAgentAdapterError("Agent binding has no exact Agent or Capability")
+            route_id = (
+                "workspace_confirmed_file_set"
+                if binding.source_kind == "confirmed_file_set"
+                else binding.recipe.route_id
+                if binding.recipe is not None
+                else ""
+            )
             adapter = self._adapters.resolve(
-                route_id=binding.recipe.route_id,
-                source_local_key=binding.mapping.source_local_key,
+                route_id=route_id,
+                source_local_key=profile.source_local_key,
                 bound_agent=bound_agent,
                 capability=capability,
             )
@@ -2790,12 +2706,16 @@ class TaskLoopAgentRuntime:
         if (
             binding.task_id != execution.task_id
             or binding.composite_plan_id != execution.plan_id
-            or binding.composite_plan_manifest_digest
-            != execution.plan_manifest_digest
+            or binding.composite_plan_manifest_digest != execution.plan_manifest_digest
             or binding.composite_node_id != node.node_id
             or binding.composite_node_spec_digest != node.node_spec_digest
             or binding.mapping.source_local_key != profile.source_local_key
-            or authority.authority_rule != "composite_intersection_source_step"
+            or authority.authority_rule
+            != (
+                "confirmed_file_set_exact_reader"
+                if binding.source_kind == "confirmed_file_set"
+                else "composite_intersection_source_step"
+            )
             or authority.node_kind.value != "agent"
             or bound_agent is None
             or bound_agent.agent_id != profile.agent_id
@@ -2817,12 +2737,26 @@ class TaskLoopAgentRuntime:
             )
         values = binding.bound_input_manifest
         if not values.get(profile.parameter_name):
-            raise TaskLoopAgentProofRejectedError(
-                "Agent source-step input shape changed"
-            )
-        parameter_values = {
-            item.parameter_name: item.value for item in binding.parameter_bindings
-        }
+            raise TaskLoopAgentProofRejectedError("Agent source-step input shape changed")
+        if binding.source_kind == "confirmed_file_set":
+            proof = binding.workspace_reader_node_proof
+            if (
+                proof is None
+                or values
+                != {
+                    "path": proof.workspace_relative_path,
+                    "project_path": proof.project_path,
+                    "source_file_proof_digest": proof.source_file_proof_digest,
+                    "workspace_reader_node_proof_digest": proof.proof_digest,
+                }
+                or proof.plan_node_id != node.node_id
+                or proof.plan_node_spec_digest != node.node_spec_digest
+                or proof.reader_agent != bound_agent
+                or proof.capability != capability
+            ):
+                raise TaskLoopAgentProofRejectedError("Confirmed Reader exact input proof changed")
+            return
+        parameter_values = {item.parameter_name: item.value for item in binding.parameter_bindings}
         fixed_names: set[str] = set()
         if profile.route_id == "workspace_coding_loop":
             fixed_names.add("test_kind")
@@ -2831,19 +2765,14 @@ class TaskLoopAgentRuntime:
         if (
             set(values) != set(parameter_values) | fixed_names
             or any(values.get(name) != value for name, value in parameter_values.items())
-            or (
-                fixed_names
-                and values.get("test_kind") not in {"python", "node"}
-            )
+            or (fixed_names and values.get("test_kind") not in {"python", "node"})
             or (
                 "file_count" in fixed_names
                 and values.get("file_count")
                 not in {str(item) for item in range(3, WORKSPACE_CODING_MAX_FILES + 1)}
             )
         ):
-            raise TaskLoopAgentProofRejectedError(
-                "Agent source-step parameter binding changed"
-            )
+            raise TaskLoopAgentProofRejectedError("Agent source-step parameter binding changed")
 
     @classmethod
     def _assert_claim(
@@ -2891,12 +2820,8 @@ class TaskLoopAgentRuntime:
                 persisted.status != "verified"
                 and persisted.claim_owner_id != source.claimed.claim_owner_id
             )
-            or (
-                persisted.status == "verified"
-                and persisted.claim_owner_id is not None
-            )
-            or persisted.claim_fencing_token
-            != source.claimed.claim_fencing_token
+            or (persisted.status == "verified" and persisted.claim_owner_id is not None)
+            or persisted.claim_fencing_token != source.claimed.claim_fencing_token
             or run.task_id != execution.task_id
             or run.plan_generation != execution.plan_generation
             or run.plan_digest != execution.plan_manifest_digest
@@ -2913,7 +2838,7 @@ class TaskLoopAgentRuntime:
         binding: ModelPlannerNodeBinding,
         profile: _AgentProfile,
     ) -> dict[str, object]:
-        return {
+        material: dict[str, object] = {
             "schema_version": "deskpilot.source-bound-agent-input.v1",
             "route_id": profile.route_id,
             "parameter_name": profile.parameter_name,
@@ -2921,9 +2846,34 @@ class TaskLoopAgentRuntime:
             "bound_input_digest": binding.bound_input_digest,
             "node_binding_digest": binding.binding_digest,
         }
+        if binding.workspace_reader_node_proof is not None:
+            material["workspace_reader_node_proof_digest"] = (
+                binding.workspace_reader_node_proof.proof_digest
+            )
+            material["source_file_proof_digest"] = (
+                binding.workspace_reader_node_proof.source_file_proof_digest
+            )
+        return material
 
     @staticmethod
     def _profile(binding: ModelPlannerNodeBinding) -> _AgentProfile:
+        if binding.source_kind == "confirmed_file_set":
+            proof = binding.workspace_reader_node_proof
+            if proof is None:
+                raise TaskLoopAgentProofRejectedError(
+                    "Confirmed Reader binding lost its exact node proof"
+                )
+            return _AgentProfile(
+                route_id="workspace_confirmed_file_set",
+                source_local_key=proof.plan_local_key,
+                parameter_name="path",
+                agent_id="builtin.workspace_reader",
+                capability_id="workspace.file.read.v1",
+            )
+        if binding.recipe is None:
+            raise TaskLoopAgentProofRejectedError(
+                "Model Planner Agent binding lost its source recipe"
+            )
         profile = _PROFILES.get(
             (
                 cast(AgentSourceRoute, binding.recipe.route_id),
@@ -2970,12 +2920,17 @@ class TaskLoopAgentRuntime:
     @staticmethod
     def _is_workspace_file_source(source: SourceBoundAgentClaim) -> bool:
         return (
-            source.route_id == "workspace_file_read"
-            and source.binding.mapping.source_local_key == "workspace_file_read"
-        ) or (
-            source.route_id == "workspace_coding_loop"
-            and is_workspace_coding_reader_key(
-                source.binding.mapping.source_local_key
+            (
+                source.route_id == "workspace_file_read"
+                and source.binding.mapping.source_local_key == "workspace_file_read"
+            )
+            or (
+                source.route_id == "workspace_coding_loop"
+                and is_workspace_coding_reader_key(source.binding.mapping.source_local_key)
+            )
+            or (
+                source.route_id == "workspace_confirmed_file_set"
+                and source.binding.workspace_reader_node_proof is not None
             )
         )
 
@@ -2984,8 +2939,11 @@ class TaskLoopAgentRuntime:
         execution = TaskLoopExecution.model_validate(record.manifest)
         for field in (
             "execution_id",
+            "source_kind",
             "loop_id",
             "draft_id",
+            "source_binding_id",
+            "source_binding_digest",
             "task_id",
             "plan_id",
             "plan_generation",
@@ -3021,9 +2979,7 @@ class TaskLoopAgentRuntime:
                 prompt_package_digest=record.prompt_package_digest,
             ),
             execution_status=InvocationExecutionStatus(record.execution_status),
-            verification_status=InvocationVerificationStatus(
-                record.verification_status
-            ),
+            verification_status=InvocationVerificationStatus(record.verification_status),
             result_id=record.result_id,
             created_at=record.created_at,
             started_at=record.started_at,
@@ -3037,6 +2993,7 @@ class TaskLoopAgentRuntime:
         binding = ModelPlannerNodeBinding.model_validate(record.manifest)
         direct_fields = (
             "node_binding_id",
+            "source_kind",
             "task_id",
             "user_message_id",
             "draft_id",
@@ -3066,8 +3023,34 @@ class TaskLoopAgentRuntime:
                 "Model Planner node-binding columns changed from its manifest"
             )
         if (
-            record.recipe_manifest != binding.recipe.model_dump(mode="json")
-            or record.recipe_digest != binding.recipe.route_manifest_digest
+            record.recipe_manifest
+            != (binding.recipe.model_dump(mode="json") if binding.recipe is not None else None)
+            or record.recipe_digest
+            != (binding.recipe.route_manifest_digest if binding.recipe is not None else None)
+            or record.source_binding_id
+            != (
+                binding.workspace_reader_node_proof.file_set_binding_id
+                if binding.workspace_reader_node_proof is not None
+                else None
+            )
+            or record.source_binding_digest
+            != (
+                binding.workspace_reader_node_proof.file_set_binding_digest
+                if binding.workspace_reader_node_proof is not None
+                else None
+            )
+            or record.workspace_reader_node_proof_manifest
+            != (
+                binding.workspace_reader_node_proof.model_dump(mode="json")
+                if binding.workspace_reader_node_proof is not None
+                else None
+            )
+            or record.workspace_reader_node_proof_digest
+            != (
+                binding.workspace_reader_node_proof.proof_digest
+                if binding.workspace_reader_node_proof is not None
+                else None
+            )
             or record.mapping_manifest != binding.mapping.model_dump(mode="json")
             or record.mapping_digest != binding.mapping.mapping_digest
             or record.parameter_bindings_manifest
@@ -3075,12 +3058,10 @@ class TaskLoopAgentRuntime:
             or record.bound_input_manifest != binding.bound_input_manifest
             or record.effective_authority_manifest
             != binding.effective_authority.model_dump(mode="json")
-            or record.effective_authority_digest
-            != binding.effective_authority.authority_digest
+            or record.effective_authority_digest != binding.effective_authority.authority_digest
             or record.runtime_eligibility_manifest
             != binding.runtime_eligibility.model_dump(mode="json")
-            or record.runtime_eligibility_digest
-            != binding.runtime_eligibility.eligibility_digest
+            or record.runtime_eligibility_digest != binding.runtime_eligibility.eligibility_digest
         ):
             raise TaskLoopAgentProofRejectedError(
                 "Model Planner node-binding proof manifests changed"
@@ -3104,14 +3085,12 @@ class TaskLoopAgentRuntime:
             or record.recipe_digest != step.recipe.route_manifest_digest
             or record.policy_snapshot_digest != step.policy_snapshot_digest
             or record.source_plan_id != step.source_plan_id
-            or record.source_plan_manifest_digest
-            != step.source_plan_manifest_digest
+            or record.source_plan_manifest_digest != step.source_plan_manifest_digest
             or record.source_plan_binding_snapshot_digest
             != step.source_plan_binding_snapshot_digest
             or record.parameter_bindings_manifest
             != [item.model_dump(mode="json") for item in step.parameter_bindings]
-            or record.parameter_bindings_digest
-            != step.parameter_bindings_digest
+            or record.parameter_bindings_digest != step.parameter_bindings_digest
             or record.node_mappings_manifest
             != [item.model_dump(mode="json") for item in step.node_mappings]
             or record.node_mappings_digest != step.node_mappings_digest
@@ -3221,13 +3200,9 @@ class TaskLoopAgentRuntime:
                 raise TaskLoopAgentProofRejectedError(
                     "Task Loop attempt columns changed from its manifest"
                 )
-        expected = cls._build_attempt(
-            attempt.model_dump(mode="python", exclude={"attempt_digest"})
-        )
+        expected = cls._build_attempt(attempt.model_dump(mode="python", exclude={"attempt_digest"}))
         if expected != attempt:
-            raise TaskLoopAgentProofRejectedError(
-                "Task Loop attempt digest changed"
-            )
+            raise TaskLoopAgentProofRejectedError("Task Loop attempt digest changed")
         return attempt
 
     @classmethod
@@ -3270,14 +3245,10 @@ class TaskLoopAgentRuntime:
             "running",
             "awaiting_verification",
         }:
-            raise TaskLoopAgentConflictError(
-                "Task Loop attempt cannot transition to verified"
-            )
+            raise TaskLoopAgentConflictError("Task Loop attempt cannot transition to verified")
         receipt_digest = sha256_digest(receipt_manifest)
         if receipt_manifest["result_ref_digest"] != result_ref.result_ref_digest:
-            raise TaskLoopAgentProofRejectedError(
-                "Agent verification receipt ResultRef changed"
-            )
+            raise TaskLoopAgentProofRejectedError("Agent verification receipt ResultRef changed")
         now = utc_now()
         candidate_digest = cast(str, candidate_manifest["candidate_digest"])
         verification_digest = cast(
@@ -3294,9 +3265,7 @@ class TaskLoopAgentRuntime:
                 "claim_expires_at": None,
                 "candidate_manifest": candidate_manifest,
                 "candidate_digest": candidate_digest,
-                "candidate_recorded_at": (
-                    previous.candidate_recorded_at or now
-                ),
+                "candidate_recorded_at": (previous.candidate_recorded_at or now),
                 "verification_manifest": verification_manifest,
                 "verification_digest": verification_digest,
                 "verified_at": now,
@@ -3339,12 +3308,9 @@ class TaskLoopAgentRuntime:
             or attempt.verification_digest != result_ref.verification_digest
             or record.receipt_manifest is None
             or record.receipt_digest != sha256_digest(record.receipt_manifest)
-            or record.receipt_manifest.get("result_ref_digest")
-            != result_ref.result_ref_digest
+            or record.receipt_manifest.get("result_ref_digest") != result_ref.result_ref_digest
         ):
-            raise TaskLoopAgentProofRejectedError(
-                "Recovered Task Loop verified attempt changed"
-            )
+            raise TaskLoopAgentProofRejectedError("Recovered Task Loop verified attempt changed")
 
     @staticmethod
     def _assert_verified_record(
@@ -3387,9 +3353,7 @@ class TaskLoopAgentRuntime:
             ),
         )
         if actual != expected:
-            raise TaskLoopAgentProofRejectedError(
-                "Recovered Task Loop ResultRef changed"
-            )
+            raise TaskLoopAgentProofRejectedError("Recovered Task Loop ResultRef changed")
 
     @staticmethod
     def _aware(value: datetime) -> datetime:

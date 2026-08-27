@@ -1052,12 +1052,25 @@ class TaskLoopExecutionRecord(Base):
             name="ck_task_loop_execution_versions",
         ),
         CheckConstraint(
+            "(source_kind = 'model_planner' AND loop_id IS NOT NULL AND "
+            "draft_id IS NOT NULL AND source_binding_id IS NULL AND "
+            "source_binding_digest IS NULL) OR "
+            "(source_kind = 'confirmed_file_set' AND loop_id IS NULL AND "
+            "draft_id IS NULL AND source_binding_id IS NOT NULL AND "
+            "source_binding_digest IS NOT NULL)",
+            name="ck_task_loop_execution_source",
+        ),
+        CheckConstraint(
             "status IN ('active', 'paused', 'awaiting_user', 'repairing', "
             "'failed', 'succeeded', 'cancelled')",
             name="ck_task_loop_execution_status",
         ),
         UniqueConstraint("loop_id", name="uq_task_loop_execution_loop"),
         UniqueConstraint("draft_id", name="uq_task_loop_execution_draft"),
+        UniqueConstraint(
+            "source_binding_id",
+            name="uq_task_loop_execution_source_binding",
+        ),
         UniqueConstraint("run_id", name="uq_task_loop_execution_run"),
         UniqueConstraint("execution_digest", name="uq_task_loop_execution_digest"),
         Index(
@@ -1069,10 +1082,23 @@ class TaskLoopExecutionRecord(Base):
     )
 
     execution_id: Mapped[str] = mapped_column(String(68), primary_key=True)
-    loop_id: Mapped[str] = mapped_column(ForeignKey("task_loops.loop_id", ondelete="RESTRICT"))
-    draft_id: Mapped[str] = mapped_column(
-        ForeignKey("model_planner_drafts.draft_id", ondelete="RESTRICT")
+    source_kind: Mapped[str] = mapped_column(String(32), default="model_planner")
+    loop_id: Mapped[str | None] = mapped_column(
+        ForeignKey("task_loops.loop_id", ondelete="RESTRICT"),
+        nullable=True,
     )
+    draft_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_planner_drafts.draft_id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    source_binding_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "workspace_coding_file_set_plan_bindings.binding_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    source_binding_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"))
     plan_id: Mapped[str] = mapped_column(String(68))
     plan_generation: Mapped[int] = mapped_column(Integer)
@@ -1155,6 +1181,25 @@ class ModelPlannerNodeBindingRecord(Base):
     __tablename__ = "model_planner_node_bindings"
     __table_args__ = (
         CheckConstraint("step_ordinal BETWEEN 1 AND 8", name="ck_model_planner_node_step"),
+        CheckConstraint(
+            "(source_kind = 'model_planner' AND draft_id IS NOT NULL AND "
+            "step_binding_id IS NOT NULL AND step_binding_digest IS NOT NULL AND "
+            "step_ordinal IS NOT NULL AND offer_id IS NOT NULL AND offer_key IS NOT NULL AND "
+            "offer_digest IS NOT NULL AND recipe_manifest IS NOT NULL AND "
+            "recipe_digest IS NOT NULL AND policy_snapshot_digest IS NOT NULL AND "
+            "source_binding_id IS NULL AND source_binding_digest IS NULL AND "
+            "workspace_reader_node_proof_manifest IS NULL AND "
+            "workspace_reader_node_proof_digest IS NULL) OR "
+            "(source_kind = 'confirmed_file_set' AND draft_id IS NULL AND "
+            "step_binding_id IS NULL AND step_binding_digest IS NULL AND "
+            "step_ordinal IS NULL AND offer_id IS NULL AND offer_key IS NULL AND "
+            "offer_digest IS NULL AND recipe_manifest IS NULL AND recipe_digest IS NULL AND "
+            "policy_snapshot_digest IS NULL AND source_binding_id IS NOT NULL AND "
+            "source_binding_digest IS NOT NULL AND "
+            "workspace_reader_node_proof_manifest IS NOT NULL AND "
+            "workspace_reader_node_proof_digest IS NOT NULL)",
+            name="ck_model_planner_node_source",
+        ),
         UniqueConstraint(
             "execution_id",
             "composite_node_id",
@@ -1175,6 +1220,7 @@ class ModelPlannerNodeBindingRecord(Base):
     )
 
     node_binding_id: Mapped[str] = mapped_column(String(68), primary_key=True)
+    source_kind: Mapped[str] = mapped_column(String(32), default="model_planner")
     execution_id: Mapped[str] = mapped_column(
         ForeignKey("task_loop_executions.execution_id", ondelete="CASCADE")
     )
@@ -1182,25 +1228,47 @@ class ModelPlannerNodeBindingRecord(Base):
     user_message_id: Mapped[str] = mapped_column(
         ForeignKey("conversation_messages.message_id", ondelete="RESTRICT")
     )
-    draft_id: Mapped[str] = mapped_column(
-        ForeignKey("model_planner_drafts.draft_id", ondelete="RESTRICT")
+    draft_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_planner_drafts.draft_id", ondelete="RESTRICT"),
+        nullable=True,
     )
-    step_binding_id: Mapped[str] = mapped_column(
+    step_binding_id: Mapped[str | None] = mapped_column(
         ForeignKey(
             "model_planner_step_bindings.step_binding_id",
             ondelete="RESTRICT",
-        )
+        ),
+        nullable=True,
     )
-    step_binding_digest: Mapped[str] = mapped_column(String(64))
-    step_ordinal: Mapped[int] = mapped_column(Integer)
-    offer_id: Mapped[str] = mapped_column(
-        ForeignKey("turn_planning_offers.offer_id", ondelete="RESTRICT")
+    step_binding_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    step_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    offer_id: Mapped[str | None] = mapped_column(
+        ForeignKey("turn_planning_offers.offer_id", ondelete="RESTRICT"),
+        nullable=True,
     )
-    offer_key: Mapped[str] = mapped_column(String(68))
-    offer_digest: Mapped[str] = mapped_column(String(64))
-    recipe_manifest: Mapped[dict[str, Any]] = mapped_column(JSON)
-    recipe_digest: Mapped[str] = mapped_column(String(64))
-    policy_snapshot_digest: Mapped[str] = mapped_column(String(64))
+    offer_key: Mapped[str | None] = mapped_column(String(68), nullable=True)
+    offer_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    recipe_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True),
+        nullable=True,
+    )
+    recipe_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    policy_snapshot_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_binding_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "workspace_coding_file_set_plan_bindings.binding_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    source_binding_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    workspace_reader_node_proof_manifest: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True),
+        nullable=True,
+    )
+    workspace_reader_node_proof_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     source_contract_digest: Mapped[str] = mapped_column(String(64))
     source_plan_id: Mapped[str] = mapped_column(String(68))
     source_plan_manifest_digest: Mapped[str] = mapped_column(String(64))

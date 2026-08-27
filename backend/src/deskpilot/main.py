@@ -525,6 +525,7 @@ def create_app(
                 task_loop_agent_adapters,
             ),
             command_plans=workspace_command_plan_binder,
+            workspace_coding_explorations=workspace_coding_explorations,
         )
         task_loop_capability_runtime = CapabilityExecutionRuntime(
             database,
