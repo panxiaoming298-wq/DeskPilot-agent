@@ -1,0 +1,17 @@
+schema_version: deskpilot.workspace-coding-sidecar-soak-suite.v1
+suite_id: deskpilot.workspace-coding-sidecar-supervisor-canary
+version: 1
+resilience_suite_digest: 789538e203ccb812fb142264a583dbde81de4840d0cc18ac68c2ba78e2f0d349
+scenario:
+  scenario_id: python.command-plan.supervised-sidecar-canary
+  resilience_scenario_id: python.command-plan.process-faults
+  command_project_path: backend
+  command_profile_ids: [python.ruff.v1, python.mypy.v1]
+  observation_seconds: 5
+  poll_interval_ms: 250
+  expected_restart_count: 1
+  expected_process_generations: 2
+  supervisor_restart_budget: 3
+  automatic_workbench_after_restart: true
+  no_automatic_replay: true
+  max_advances: 24

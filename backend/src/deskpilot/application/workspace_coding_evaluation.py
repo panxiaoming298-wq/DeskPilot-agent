@@ -10,6 +10,7 @@ from yaml.tokens import AliasToken, AnchorToken
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.workspace_coding_evaluations import (
     WorkspaceCodingGoldenResilienceSuite,
+    WorkspaceCodingGoldenSidecarSoakSuite,
     WorkspaceCodingGoldenSuite,
 )
 
@@ -31,6 +32,13 @@ class WorkspaceCodingGoldenResilienceSuiteBundle:
     suite: WorkspaceCodingGoldenResilienceSuite
     suite_digest: str
     workspace: WorkspaceCodingGoldenSuiteBundle
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceCodingGoldenSidecarSoakSuiteBundle:
+    suite: WorkspaceCodingGoldenSidecarSoakSuite
+    suite_digest: str
+    resilience: WorkspaceCodingGoldenResilienceSuiteBundle
 
 
 def _read_strict_yaml(suite_path: Path) -> object:
@@ -128,4 +136,57 @@ class WorkspaceCodingGoldenResilienceSuiteLoader:
             suite=suite,
             suite_digest=sha256_digest(suite.model_dump(mode="json")),
             workspace=workspace,
+        )
+
+
+class WorkspaceCodingGoldenSidecarSoakSuiteLoader:
+    """Bind one real-clock supervisor canary to the exact resilience suite."""
+
+    def __init__(
+        self,
+        suite_path: Path | None = None,
+        *,
+        resilience_loader: WorkspaceCodingGoldenResilienceSuiteLoader | None = None,
+    ) -> None:
+        self._suite_path = suite_path or (
+            Path(__file__).parents[1]
+            / "evaluations"
+            / "workspace_coding_sidecar_soak_v1.yaml"
+        )
+        self._resilience_loader = (
+            resilience_loader or WorkspaceCodingGoldenResilienceSuiteLoader()
+        )
+
+    def load(self) -> WorkspaceCodingGoldenSidecarSoakSuiteBundle:
+        resilience = self._resilience_loader.load()
+        try:
+            suite = WorkspaceCodingGoldenSidecarSoakSuite.model_validate(
+                _read_strict_yaml(self._suite_path)
+            )
+        except WorkspaceCodingEvaluationError:
+            raise
+        except ValidationError as error:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding sidecar soak suite failed strict validation"
+            ) from error
+        scenario = suite.scenario
+        bound = resilience.suite.scenario
+        if suite.resilience_suite_digest != resilience.suite_digest:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding sidecar soak suite crossed its resilience digest"
+            )
+        if (
+            scenario.resilience_scenario_id != bound.scenario_id
+            or scenario.command_project_path != bound.command_project_path
+            or scenario.command_profile_ids != bound.command_profile_ids
+            or scenario.max_advances != bound.max_advances
+            or scenario.no_automatic_replay != bound.no_automatic_replay
+        ):
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding sidecar soak scenario crossed its resilience authority"
+            )
+        return WorkspaceCodingGoldenSidecarSoakSuiteBundle(
+            suite=suite,
+            suite_digest=sha256_digest(suite.model_dump(mode="json")),
+            resilience=resilience,
         )

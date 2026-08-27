@@ -166,6 +166,20 @@ def _profile_catalog() -> CommandProfileCatalog:
     return catalog
 
 
+def _settings() -> Settings:
+    control_path = os.environ.get("DESKPILOT_GOLDEN_WORKBENCH_RUNTIME_CONTROL_PATH")
+    if not control_path:
+        return Settings()
+    value = Path(control_path).read_text(encoding="utf-8").strip().lower()
+    if value not in {"true", "false"}:
+        raise RuntimeError("Golden Workbench runtime control must be true or false")
+    return Settings(
+        workbench_runtime_enabled=value == "true",
+        workbench_runtime_poll_interval_seconds=0.01,
+        workbench_runtime_claim_ttl_seconds=5,
+    )
+
+
 def main() -> None:
     profile_ids = tuple(
         cast(CommandProfileId, value)
@@ -182,7 +196,7 @@ def main() -> None:
         _required_path("DESKPILOT_GOLDEN_PROVIDER_CALLS_PATH"),
     )
     app = create_app(
-        Settings(),
+        _settings(),
         model_provider=provider,
         command_profile_catalog=_profile_catalog(),
         workspace_command_runtime=runtime,

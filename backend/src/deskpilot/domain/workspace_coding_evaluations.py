@@ -185,3 +185,46 @@ class WorkspaceCodingGoldenResilienceSuite(BaseModel):
     version: Literal[1] = 1
     workspace_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     scenario: WorkspaceCommandGoldenResilienceScenario
+
+
+class WorkspaceCodingSidecarSoakScenario(BaseModel):
+    """Short real-clock supervisor canary; it grants no execution authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    resilience_scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    command_project_path: str = Field(min_length=1, max_length=500)
+    command_profile_ids: tuple[CommandProfileId, ...] = Field(min_length=2, max_length=6)
+    observation_seconds: int = Field(ge=2, le=30)
+    poll_interval_ms: int = Field(ge=100, le=1_000)
+    expected_restart_count: Literal[1] = 1
+    expected_process_generations: Literal[2] = 2
+    supervisor_restart_budget: Literal[3] = 3
+    automatic_workbench_after_restart: Literal[True] = True
+    no_automatic_replay: Literal[True] = True
+    max_advances: int = Field(default=24, ge=8, le=60)
+
+    _project_path_is_relative = field_validator("command_project_path")(
+        _strict_relative_path
+    )
+
+    @model_validator(mode="after")
+    def bounded_observation_matrix(self) -> Self:
+        if len(set(self.command_profile_ids)) != len(self.command_profile_ids):
+            raise ValueError("Sidecar soak command profiles must be unique")
+        if self.observation_seconds * 1_000 % self.poll_interval_ms:
+            raise ValueError("Sidecar soak observation must contain complete polling intervals")
+        if self.observation_seconds * 1_000 // self.poll_interval_ms < 4:
+            raise ValueError("Sidecar soak observation requires at least four samples")
+        return self
+
+
+class WorkspaceCodingGoldenSidecarSoakSuite(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-coding-sidecar-soak-suite.v1"]
+    suite_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    version: Literal[1] = 1
+    resilience_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scenario: WorkspaceCodingSidecarSoakScenario

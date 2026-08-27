@@ -19,3 +19,6 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 tauri = { version = "2.11.3", features = ["tray-icon"] }
+
+[dev-dependencies]
+serde_json = "1"
