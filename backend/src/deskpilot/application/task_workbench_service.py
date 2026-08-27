@@ -21,6 +21,9 @@ from deskpilot.application.artifact_export_runtime import (
     ArtifactExportRuntime,
 )
 from deskpilot.application.capability_catalog import CapabilityCatalog
+from deskpilot.application.capability_execution_runtime import (
+    CapabilityExecutionRuntimeError,
+)
 from deskpilot.application.context_memory_runtime import ContextMemoryRuntime
 from deskpilot.application.long_term_memory_runtime import (
     LongTermMemoryError,
@@ -1094,7 +1097,10 @@ class TaskWorkbenchService:
                     task_id,
                     f"workbench:{task_id}",
                 )
-            except TaskLoopExecutionCoordinatorError as error:
+            except (
+                CapabilityExecutionRuntimeError,
+                TaskLoopExecutionCoordinatorError,
+            ) as error:
                 raise TaskWorkbenchConflictError(str(error)) from error
             return await self.get(task_id)
         if any(

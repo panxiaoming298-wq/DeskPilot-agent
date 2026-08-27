@@ -285,7 +285,16 @@ class TaskLoopExecutionCoordinator:
             raise TaskLoopExecutionCoordinatorUnavailableError(
                 "Capability Task Loop runtime is unavailable"
             )
-        outcome = await self._capabilities.run_once(task_id, owner_id)
+        # Capability execution may include a cold, isolated runtime build before
+        # the bounded command itself starts.  Use the same maximum claim window
+        # as other synchronous Workbench effects so a valid long-running result
+        # can be fenced into persistence instead of becoming outcome-unknown at
+        # the legacy 60-second default boundary.
+        outcome = await self._capabilities.run_once(
+            task_id,
+            owner_id,
+            lease_seconds=600,
+        )
         if outcome is None or outcome.node_id != command.node_id:
             raise TaskLoopExecutionCoordinatorProofRejectedError(
                 "Capability runtime did not claim the reducer-selected node"
