@@ -49,7 +49,8 @@ jobs:
           Set-Location backend
           uv run pytest `
             tests/test_stage116b_workspace_coding_frozen_release_soak.py `
-            tests/test_stage116b_workspace_coding_frozen_command_task.py
+            tests/test_stage116b_workspace_coding_frozen_command_task.py `
+            tests/test_stage116b_workspace_coding_frozen_command_recovery.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run ruff check src tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

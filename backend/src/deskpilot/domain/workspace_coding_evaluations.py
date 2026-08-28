@@ -410,3 +410,61 @@ class WorkspaceCodingGoldenFrozenCommandTaskSuite(BaseModel):
     version: Literal[1] = 1
     frozen_release_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     scenario: WorkspaceCodingFrozenCommandTaskScenario
+
+
+class WorkspaceCodingFrozenCommandRecoveryScenario(BaseModel):
+    """Installed command task restarted between two real Profile attempts."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    frozen_command_scenario_id: str = Field(
+        pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$"
+    )
+    project_path: Literal["projects/frozen-python-command-success"]
+    message_marker: Literal["FROZEN_PYTHON_COMMAND_RECOVERY"]
+    command_profile_ids: tuple[CommandProfileId, ...]
+    bundled_runtime_directory: Literal["python-command-runtime"]
+    bundled_runtime_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_process_generations: Literal[2] = 2
+    expected_external_kill_count: Literal[1] = 1
+    expected_restart_count: Literal[1] = 1
+    restart_after_step_sequence: Literal[1] = 1
+    expected_verified_result_count_before_restart: Literal[1] = 1
+    expected_pending_attempt_count_before_restart: Literal[0] = 0
+    expected_verified_result_count_after_restart: Literal[2] = 2
+    expected_post_restart_advances: Literal[3] = 3
+    expected_isolation_mode: Literal["windows_appcontainer"] = "windows_appcontainer"
+    max_seed_advances: int = Field(default=24, ge=8, le=60)
+    terminal_observation_seconds: int = Field(default=5, ge=5, le=60)
+    production_fake_provider_unsupported: Literal[True] = True
+    no_automatic_replay: Literal[True] = True
+    reaches_final_delivery: Literal[True] = True
+
+    @model_validator(mode="after")
+    def exact_installed_recovery_matrix(self) -> Self:
+        if self.command_profile_ids != ("python.ruff.v1", "python.pytest.v1"):
+            raise ValueError(
+                "Frozen command recovery must run exact Ruff then pytest Profiles"
+            )
+        if self.restart_after_step_sequence >= len(self.command_profile_ids):
+            raise ValueError("Frozen command recovery must restart before a later step")
+        if self.expected_process_generations != self.expected_external_kill_count + 1:
+            raise ValueError("Frozen command recovery generations must follow external kills")
+        if self.expected_verified_result_count_after_restart != len(
+            self.command_profile_ids
+        ):
+            raise ValueError("Frozen command recovery must verify every command Profile")
+        return self
+
+
+class WorkspaceCodingGoldenFrozenCommandRecoverySuite(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[
+        "deskpilot.workspace-coding-frozen-command-recovery-suite.v1"
+    ]
+    suite_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    version: Literal[1] = 1
+    frozen_command_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scenario: WorkspaceCodingFrozenCommandRecoveryScenario

@@ -10,6 +10,7 @@ from yaml.tokens import AliasToken, AnchorToken
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.workspace_coding_evaluations import (
     WorkspaceCodingGoldenConcurrencySuite,
+    WorkspaceCodingGoldenFrozenCommandRecoverySuite,
     WorkspaceCodingGoldenFrozenCommandTaskSuite,
     WorkspaceCodingGoldenFrozenReleaseSoakSuite,
     WorkspaceCodingGoldenResilienceSuite,
@@ -63,6 +64,13 @@ class WorkspaceCodingGoldenFrozenCommandTaskSuiteBundle:
     suite: WorkspaceCodingGoldenFrozenCommandTaskSuite
     suite_digest: str
     frozen_release: WorkspaceCodingGoldenFrozenReleaseSoakSuiteBundle
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceCodingGoldenFrozenCommandRecoverySuiteBundle:
+    suite: WorkspaceCodingGoldenFrozenCommandRecoverySuite
+    suite_digest: str
+    frozen_command: WorkspaceCodingGoldenFrozenCommandTaskSuiteBundle
 
 
 def _read_strict_yaml(suite_path: Path) -> object:
@@ -363,4 +371,61 @@ class WorkspaceCodingGoldenFrozenCommandTaskSuiteLoader:
             suite=suite,
             suite_digest=sha256_digest(suite.model_dump(mode="json")),
             frozen_release=frozen_release,
+        )
+
+
+class WorkspaceCodingGoldenFrozenCommandRecoverySuiteLoader:
+    """Bind installed between-step recovery to the exact interruption cohort."""
+
+    def __init__(
+        self,
+        suite_path: Path | None = None,
+        *,
+        frozen_command_loader: WorkspaceCodingGoldenFrozenCommandTaskSuiteLoader
+        | None = None,
+    ) -> None:
+        self._suite_path = suite_path or (
+            Path(__file__).parents[1]
+            / "evaluations"
+            / "workspace_coding_frozen_command_recovery_v1.yaml"
+        )
+        self._frozen_command_loader = (
+            frozen_command_loader or WorkspaceCodingGoldenFrozenCommandTaskSuiteLoader()
+        )
+
+    def load(self) -> WorkspaceCodingGoldenFrozenCommandRecoverySuiteBundle:
+        frozen_command = self._frozen_command_loader.load()
+        try:
+            suite = WorkspaceCodingGoldenFrozenCommandRecoverySuite.model_validate(
+                _read_strict_yaml(self._suite_path)
+            )
+        except WorkspaceCodingEvaluationError:
+            raise
+        except ValidationError as error:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen command recovery suite failed strict validation"
+            ) from error
+        scenario = suite.scenario
+        bound = frozen_command.suite.scenario
+        if suite.frozen_command_suite_digest != frozen_command.suite_digest:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen command recovery crossed its command suite digest"
+            )
+        if (
+            scenario.frozen_command_scenario_id != bound.scenario_id
+            or scenario.command_profile_ids != bound.command_profile_ids
+            or scenario.bundled_runtime_directory != bound.bundled_runtime_directory
+            or scenario.bundled_runtime_digest != bound.bundled_runtime_digest
+            or scenario.expected_isolation_mode != bound.expected_isolation_mode
+            or scenario.production_fake_provider_unsupported
+            != bound.production_fake_provider_unsupported
+            or scenario.no_automatic_replay != bound.no_automatic_replay
+        ):
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen command recovery crossed its command safety boundary"
+            )
+        return WorkspaceCodingGoldenFrozenCommandRecoverySuiteBundle(
+            suite=suite,
+            suite_digest=sha256_digest(suite.model_dump(mode="json")),
+            frozen_command=frozen_command,
         )

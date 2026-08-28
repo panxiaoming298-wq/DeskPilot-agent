@@ -4,7 +4,7 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint 已完成；116A 固定命令链已闭合，116B 第十七检查点已把四层编码 suite 提升为独立冻结发布 cohort，穿过真实 PyInstaller sidecar、Tauri NSIS、静默安装、三代 supervisor、两次外部强杀和整棵进程树资源观测。** 安装态 health-only canary 恰好恢复两次，无 Failed/孤儿 PID，且不进入默认单元门禁；五层 suite digest 保留基础黄金任务、韧性、任务 sidecar、三仓库并发与发布产物的精确血缘。这不冒充冻结进程已重放编码任务；下一缺口是冻结 Python Command Profile toolchain 和预置 ready TaskLoop 的安装态恢复。阶段 115B 真实 Provider/Judge-human 证据与激活授权仍缺失，cloud-only 候选继续默认 disabled。详细进度见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint 已完成；116A 固定命令链已闭合，116B 第十九检查点已让同一持久 Ruff→pytest 计划穿过真实安装 sidecar、AppContainer 和步骤间外部重启后到达 Final/Delivery。** Planner/Draft/Binding 各一份，两个 Profile 各一个 Attempt/ResultRef，无已通过步骤重放或伪造 unknown。下一工程缺口是把三任务公平并发提升到安装态；115B 真实 Provider/Judge-human 证据与激活授权仍缺失，cloud-only 候选继续默认 disabled。详细进度见[项目进度](项目进度.md)。
 
 产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物。通用规划、持久执行/验证/修复循环、首版安全代码工具面和三任务桌面后台已经闭合；当前最大缺口是真实仓库长循环和真实模型生产闭环。后续路线保持 **Codex 优先、Marvis 后置**：先完成 116A/116B 的用户可感知纵切，再补齐 115B/116C 的真实模型质量门，最后进入桌面 Operator。
 
@@ -215,6 +215,8 @@ flowchart LR
 148. [阶段 116B：持久多 Agent 编码循环第十五检查点](doc/116B-持久多Agent编码循环第十五检查点.md)
 149. [阶段 116B：持久多 Agent 编码循环第十六检查点](doc/116B-持久多Agent编码循环第十六检查点.md)
 150. [阶段 116B：持久多 Agent 编码循环第十七检查点](doc/116B-持久多Agent编码循环第十七检查点.md)
+151. [阶段 116B：持久多 Agent 编码循环第十八检查点](doc/116B-持久多Agent编码循环第十八检查点.md)
+152. [阶段 116B：持久多 Agent 编码循环第十九检查点](doc/116B-持久多Agent编码循环第十九检查点.md)
 
 ## 目标 MVP 与当前边界
 
@@ -273,7 +275,7 @@ flowchart LR
 - 当前 TaskProcessor 的磁盘容量任务通过离线 Fake Provider 获得结构化分类和计划，不调用网络模型；显式 `file.move` 请求使用受信任应用计划模板，路径只来自本地用户表单并强制进入 R1 一次性审批，不从自然语言或模型输出提取。
 - 统一对话入口已接入研究、本地知识、固定 MCP、Workspace 读写/检查/固定测试及 HTML/Markdown/PDF Artifact；阶段 111 已为确定性 Route 未命中接入受服务器 Offer 约束的 Turn Planner，阶段 112 已建立不重放 Provider 的通用 TaskLoop。阶段 113 新增项目根限定的递归搜索/批读、Git `status/diff/log` 和六个服务器 Command Profile，Python pytest/Ruff/mypy 与 Node/pnpm test/type-check/build 只在断网临时快照中执行，模型不能提供 executable、argv、cwd 或环境变量。
 - 阶段 116A 第二个检查点已将服务器编译的 `WorkspaceCommandPlan` 持久绑定到 exact Task/ModelPlanner Draft/Step/Offer/TaskLoop node：计划、映射和步骤证明内容寻址，Activation 与每次 command claim 都重验路径、Catalog、Profile 和 node proof。非 `passed` 结果保存失败回执并停止后续步骤，已知失败允许一次有界 Repair，重启不重放已通过或 outcome-unknown 命令。这已闭合固定命令链，但尚不是完整 116B 多 Agent 真实仓库长循环。
-- 阶段 116B 第一至第十六检查点已闭合持久 Explorer/Reader/Change Proposal/写 TaskLoop、两次 exact approval、服务器预编译 Python/Node 固定命令链、受控 Git 交付、真实 API 跨进程恢复、失败 Repair/proof 漂移/unknown 不重放、生产 sidecar 续接，以及三仓库公平并发和失败隔离。第十七检查点建立 PyInstaller/Tauri NSIS health-only 发布 cohort；第十八检查点再把内容寻址 Python/pytest/Ruff/mypy 工具链带入安装包，由同一 SQLite 中预置到 ready 的 TaskLoop 经生产 Workbench 和真实 AppContainer 执行 Ruff，在第二步 pytest 运行时外部强杀 sidecar，重启后保留 verified ResultRef 并将未知结果收敛为不重放终态。该门禁没有新增状态机，也不声称真实模型质量或安装态完整 Delivery 已完成。
+- 阶段 116B 第一至第十六检查点已闭合持久 Explorer/Reader/Change Proposal/写 TaskLoop、两次 exact approval、服务器预编译 Python/Node 固定命令链、受控 Git 交付、真实 API 跨进程恢复、失败 Repair/proof 漂移/unknown 不重放、生产 sidecar 续接，以及三仓库公平并发和失败隔离。第十七至十九检查点依次建立冻结发布 health cohort、安装态真实 Python 工具链/outcome-unknown 不重放，以及 Ruff ResultRef 后、pytest claim 前重启仍能完整到达 Final/Delivery 的成功链。三个安装态场景都复用唯一 TaskLoop，没有新增状态机或模型权限；真实模型质量仍未宣称。
 - `web.search`/`web.page.read` 在显式开关与 SearchProvider 配置下可用，默认仍关闭；Task Workspace、ArtifactRevision/PatchReceipt、同源 HTML/Markdown/PDF Builder、PDF 全页 render evidence 和 HTML BrowserRenderRun 已实现。未验证研究结果仍只能停在 `awaiting_verification`。
 
 受保护 checkpoint 只恢复能与任务事件、Tool 账本、Policy、审批记录和 effect graph 当前节点同时对上的阶段；密文损坏或任一绑定错配都会 fail closed。
@@ -284,7 +286,7 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-28 校准）
 
-阶段 77～114 与 115A 已完成。116A 的固定命令链已闭合；116B 第十八检查点已将六层 digest 资产推进到真实安装态任务语义：冻结 sidecar 携带服务器固定 Python 工具链，预置到 `ready` 的同一 SQLite TaskLoop 经生产 Workbench/AppContainer 生成 Ruff ResultRef，第二步运行中外部强杀后按 5 秒租约收敛为 outcome unknown，重启不重复 Planner、已通过步骤或未知命令。下一步是让安装态 Ruff→pytest 在首个 ResultRef 后的受控重启中完整到达 Final/Delivery，再考虑安装态三任务并发。自由 Shell、依赖安装与自动 push 继续禁止；115B 真实 Provider/Judge-human 证据与激活授权仍缺失，cloud-only 候选继续 disabled。完整边界见[项目进度](项目进度.md)、[第十八检查点](doc/116B-持久多Agent编码循环第十八检查点.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+阶段 77～114 与 115A 已完成。116A 的固定命令链已闭合；116B 第十九检查点已将七层 digest 资产推进到安装态完整成功与步骤边界恢复：Ruff 在第一代真实 AppContainer 通过，pytest 仍未 claim 时外部强杀 sidecar，第二代保持 exact 证据后完成 pytest、Final 和 Delivery；Planner/Draft/Binding 各一份且两步各执行一次。下一步是安装态三任务公平并发与故障隔离。自由 Shell、依赖安装与自动 push 继续禁止；115B 真实 Provider/Judge-human 证据与激活授权仍缺失，cloud-only 候选继续 disabled。完整边界见[项目进度](项目进度.md)、[第十九检查点](doc/116B-持久多Agent编码循环第十九检查点.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
 
@@ -329,6 +331,8 @@ flowchart LR
 阶段 116B 第十七个代码 checkpoint：新增与第十六检查点 exact concurrency digest 绑定的 `workspace_coding_frozen_release_soak_v1.yaml`、独立 PowerShell wrapper 和手动 Windows workflow。当前源码真实构建 PyInstaller sidecar/Tauri NSIS 并静默安装；生产 fixed-sibling resolver/supervisor 运行三代，每代观察 30 秒，经两次外部进程树强杀恰好恢复两次。整树 working set 峰值约 386/367/367 MiB，句柄 931/925/925，进程数始终 5；最终无 Failed、所有观测 PID 消失、静默卸载成功。严格资产 5/5、Ruff、strict mypy 309 个生产源码、默认 Rust `4 passed + 1 ignored`、fmt/Clippy 与显式 release soak 1/1 通过。该 cohort 明确为 health-only，不声称安装态已执行或重放编码 TaskLoop。完整数据见[第十七检查点](doc/116B-持久多Agent编码循环第十七检查点.md)。
 
 阶段 116B 第十八个代码 checkpoint：新增与 frozen release exact digest 绑定的 `workspace_coding_frozen_command_task_v1.yaml`，并将内容寻址 Python/pytest/Ruff/mypy 工具链作为 Tauri 固定资源打入 NSIS。安装态生产 Workbench 从同一 SQLite 的 ready `WorkspaceCommandPlan` 运行真实断网 AppContainer Ruff，保存 passed ResultRef；第二步慢 pytest 运行时外部强杀完整 sidecar，第二代在 5 秒租约后收敛为 `CAPABILITY_OUTCOME_UNKNOWN_AFTER_LEASE`，10 秒稳定观察中不重放。最终候选安装器/desktop/sidecar SHA-256 为 `eb322fca…d6194` / `3b064d34…d4079` / `1ef05c21…a61cb`，工具链 digest 为 `486ae41d…dd4c`。默认后端 114 文件 / 863 项，统一全量 `851 passed + 12 skipped`；六层专项 30/30、严格资产 5/5、前端 165/165、Rust 默认 `4 passed + 2 ignored` 和显式安装态双测试 2/2 已通过。该 checkpoint 不宣称安装态完整 Delivery、真实模型质量、依赖安装、Shell 或 push。完整数据见[第十八检查点](doc/116B-持久多Agent编码循环第十八检查点.md)。
+
+阶段 116B 第十九个代码 checkpoint：新增与第十八检查点 exact digest 绑定的 `workspace_coding_frozen_command_recovery_v1.yaml`。第一代安装 sidecar 经公共单步 API 完成真实 AppContainer Ruff，在 pytest `ready/attempt=0` 边界外部强杀；第二代证明 Workbench/SQLite 证据未变后，恰好三次推进完成 pytest、Final 和 Delivery。Planner/Draft/Binding 各一份，Ruff/pytest 各一个 verified Attempt/ResultRef，额外 replay 不产生新证据。默认后端 115 文件 / 868 项，统一全量 `856 passed + 12 skipped`；七层契约 35/35、新资产 5/5、显式安装态三测试 3/3、wheel Prompt 33/33 与 Workspace YAML 7/7、前端 165/165、Ruff、strict mypy 310 和 Rust fmt/Clippy 已通过。本批不改生产状态机/API/权限面，下一步是安装态三任务公平并发。完整数据见[第十九检查点](doc/116B-持久多Agent编码循环第十九检查点.md)。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 

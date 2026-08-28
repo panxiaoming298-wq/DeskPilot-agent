@@ -106,7 +106,8 @@ try {
     try {
         $testNames = @(
             "sidecar::tests::frozen_installed_supervisor_survives_two_external_kills_within_resource_caps",
-            "sidecar::tests::frozen_installed_command_task_keeps_resultref_and_never_replays_unknown"
+            "sidecar::tests::frozen_installed_command_task_keeps_resultref_and_never_replays_unknown",
+            "sidecar::tests::frozen_installed_command_task_recovers_between_steps_and_delivers"
         )
         foreach ($testName in $testNames) {
             & cargo test --lib $testName -- --ignored --exact --nocapture

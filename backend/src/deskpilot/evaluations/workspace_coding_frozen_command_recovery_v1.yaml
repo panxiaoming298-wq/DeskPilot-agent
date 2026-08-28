@@ -1,0 +1,26 @@
+schema_version: deskpilot.workspace-coding-frozen-command-recovery-suite.v1
+suite_id: deskpilot.workspace-coding-installed-python-command-recovery
+version: 1
+frozen_command_suite_digest: ed993889e9cd1c025cd3b19c8eb1de82a992fed95aab03790ed2f172b780ae89
+scenario:
+  scenario_id: installed.python-command.between-step-recovery
+  frozen_command_scenario_id: installed.python-command.resultref-interruption
+  project_path: projects/frozen-python-command-success
+  message_marker: FROZEN_PYTHON_COMMAND_RECOVERY
+  command_profile_ids: [python.ruff.v1, python.pytest.v1]
+  bundled_runtime_directory: python-command-runtime
+  bundled_runtime_digest: 486ae41dac2a697a792a1ab2584fe66a768bb7ba3b9e695a16ae8ec6fb03dd4c
+  expected_process_generations: 2
+  expected_external_kill_count: 1
+  expected_restart_count: 1
+  restart_after_step_sequence: 1
+  expected_verified_result_count_before_restart: 1
+  expected_pending_attempt_count_before_restart: 0
+  expected_verified_result_count_after_restart: 2
+  expected_post_restart_advances: 3
+  expected_isolation_mode: windows_appcontainer
+  max_seed_advances: 24
+  terminal_observation_seconds: 5
+  production_fake_provider_unsupported: true
+  no_automatic_replay: true
+  reaches_final_delivery: true

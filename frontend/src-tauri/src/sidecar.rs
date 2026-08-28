@@ -373,14 +373,24 @@ mod tests {
         path: &str,
         body: Option<&Value>,
     ) -> Result<(u16, Value), String> {
+        request_json_with_timeout(port, method, path, body, Duration::from_secs(10))
+    }
+
+    fn request_json_with_timeout(
+        port: u16,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<(u16, Value), String> {
         let payload = body.map(Value::to_string).unwrap_or_default();
         let mut stream = TcpStream::connect(("127.0.0.1", port))
             .map_err(|error| format!("connect failed: {error}"))?;
         stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(timeout))
             .map_err(|error| format!("read timeout failed: {error}"))?;
         stream
-            .set_write_timeout(Some(Duration::from_secs(10)))
+            .set_write_timeout(Some(timeout))
             .map_err(|error| format!("write timeout failed: {error}"))?;
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TEST_TOKEN}\r\nOrigin: {TEST_ORIGIN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
@@ -422,6 +432,20 @@ mod tests {
     ) -> Value {
         let (status, value) =
             request_json(port, method, path, body).expect("call supervised sidecar API");
+        assert_eq!(status, expected_status, "unexpected API response: {value}");
+        value
+    }
+
+    fn expect_json_with_timeout(
+        port: u16,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        expected_status: u16,
+        timeout: Duration,
+    ) -> Value {
+        let (status, value) = request_json_with_timeout(port, method, path, body, timeout)
+            .expect("call long-running supervised sidecar API");
         assert_eq!(status, expected_status, "unexpected API response: {value}");
         value
     }
@@ -494,6 +518,27 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         serde_json::from_slice(&output.stdout).expect("parse frozen command task suite")
+    }
+
+    #[cfg(windows)]
+    fn load_frozen_command_recovery_scenario(python: &Path, backend_root: &Path) -> Value {
+        let script = concat!(
+            "from deskpilot.application.workspace_coding_evaluation import ",
+            "WorkspaceCodingGoldenFrozenCommandRecoverySuiteLoader; ",
+            "print(WorkspaceCodingGoldenFrozenCommandRecoverySuiteLoader().load()",
+            ".suite.model_dump_json())"
+        );
+        let output = Command::new(python)
+            .current_dir(backend_root)
+            .args(["-c", script])
+            .output()
+            .expect("load frozen command recovery suite");
+        assert!(
+            output.status.success(),
+            "frozen command recovery suite loading failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("parse frozen command recovery suite")
     }
 
     #[cfg(windows)]
@@ -626,6 +671,46 @@ mod tests {
             && nodes[1]["status"] == "failed"
             && nodes[1]["verified_result_present"] == false
             && nodes[1]["attempt_count"] == 1
+    }
+
+    #[cfg(windows)]
+    fn frozen_command_is_between_steps(workbench: &Value) -> bool {
+        let mut nodes = workbench["task_loop"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|node| !node["command_plan_id"].is_null())
+            .collect::<Vec<_>>();
+        nodes.sort_by_key(|node| node["command_step_sequence"].as_u64());
+        nodes.len() == 2
+            && workbench["task_loop"]["execution_status"] == "active"
+            && workbench["task_loop"]["verified_result_count"] == 1
+            && nodes[0]["status"] == "verified"
+            && nodes[0]["verified_result_present"] == true
+            && nodes[0]["attempt_count"] == 1
+            && nodes[1]["status"] == "ready"
+            && nodes[1]["verified_result_present"] == false
+            && nodes[1]["attempt_count"] == 0
+    }
+
+    #[cfg(windows)]
+    fn frozen_command_is_delivered(workbench: &Value) -> bool {
+        let command_nodes = workbench["task_loop"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|node| !node["command_plan_id"].is_null())
+            .collect::<Vec<_>>();
+        workbench["stage"] == "delivered"
+            && workbench["task"]["status"] == "succeeded"
+            && workbench["task_loop"]["execution_status"] == "succeeded"
+            && workbench["task_loop"]["verified_result_count"] == 2
+            && command_nodes.len() == 2
+            && command_nodes.iter().all(|node| {
+                node["status"] == "verified"
+                    && node["verified_result_present"] == true
+                    && node["attempt_count"] == 1
+            })
     }
 
     fn observe_stable_command_state(
@@ -1815,5 +1900,460 @@ mod tests {
         assert_eq!(read_string_list(&provider_calls).len(), 1);
         assert_eq!(read_string_list(&command_calls), Vec::<String>::new());
         fs::remove_dir_all(root).expect("remove frozen command task directory");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "explicit installed real-Profile recovery; run through scripts/run-frozen-release-soak.ps1"]
+    fn frozen_installed_command_task_recovers_between_steps_and_delivers() {
+        assert_eq!(
+            std::env::var("DESKPILOT_RUN_FROZEN_RELEASE_SOAK").as_deref(),
+            Ok("1"),
+            "the frozen command recovery requires its explicit opt-in wrapper"
+        );
+        let install_root = PathBuf::from(
+            std::env::var_os("DESKPILOT_FROZEN_RELEASE_INSTALL_ROOT")
+                .expect("installed frozen release root"),
+        )
+        .canonicalize()
+        .expect("canonicalize installed frozen release root");
+        let manifest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let backend_root = manifest_root
+            .join("..")
+            .join("..")
+            .join("backend")
+            .canonicalize()
+            .expect("resolve backend root");
+        let python = backend_root
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe");
+        assert!(python.is_file(), "backend virtual environment is required");
+        let suite = load_frozen_command_recovery_scenario(&python, &backend_root);
+        let scenario = &suite["scenario"];
+        assert_eq!(scenario["production_fake_provider_unsupported"], true);
+        assert_eq!(scenario["no_automatic_replay"], true);
+        assert_eq!(scenario["reaches_final_delivery"], true);
+
+        let desktop = install_root.join("deskpilot.exe");
+        let expected_sidecar = install_root.join("deskpilot-backend-sidecar.exe");
+        let expected_resource = install_root.join(
+            scenario["bundled_runtime_directory"]
+                .as_str()
+                .expect("bundled runtime directory"),
+        );
+        let resource_entries = fs::read_dir(&expected_resource)
+            .expect("read installed Python Command Profile resource")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("enumerate installed Python Command Profile resource");
+        assert_eq!(resource_entries.len(), 1);
+        assert_eq!(
+            resource_entries[0].file_name().to_string_lossy(),
+            scenario["bundled_runtime_digest"]
+                .as_str()
+                .expect("bundled runtime digest")
+        );
+        TcpListener::bind(("127.0.0.1", 8000))
+            .expect("the production frozen sidecar port 8000 must be free");
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "deskpilot-frozen-command-recovery-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let artifact_root = root.join("artifacts");
+        let workspace_root = root.join("workspaces");
+        let project = workspace_root.join(
+            scenario["project_path"]
+                .as_str()
+                .expect("frozen command recovery project path"),
+        );
+        let database_path = root.join("frozen-command-recovery.db");
+        let database_url = format!(
+            "sqlite+aiosqlite:///{}",
+            database_path.to_string_lossy().replace('\\', "/")
+        );
+        fs::create_dir_all(project.join("src")).expect("create recovery source root");
+        fs::create_dir_all(project.join("tests")).expect("create recovery test root");
+        fs::create_dir_all(&artifact_root).expect("create recovery artifact root");
+        fs::create_dir_all(&app_data).expect("create recovery app data");
+        fs::write(
+            project.join("src").join("sample.py"),
+            "def add(left: int, right: int) -> int:\n    return left + right\n",
+        )
+        .expect("write recovery source");
+        fs::write(
+            project.join("tests").join("test_sample.py"),
+            "from src.sample import add\n\n\ndef test_add() -> None:\n    assert add(1, 2) == 3\n",
+        )
+        .expect("write recovery test");
+
+        let profile_ids = scenario["command_profile_ids"]
+            .as_array()
+            .expect("frozen recovery command profiles")
+            .iter()
+            .map(|item| item.as_str().expect("frozen recovery profile").to_owned())
+            .collect::<Vec<_>>();
+        let seed_port = free_port();
+        let runtime_control = root.join("seed-workbench-runtime.txt");
+        fs::write(&runtime_control, "false").expect("disable seed Workbench runtime");
+        let provider_calls = root.join("provider-calls.json");
+        let command_calls = root.join("seed-command-calls.json");
+        let command_started = root.join("seed-command-started.txt");
+        let seed_spec = SidecarLaunchSpec {
+            executable: python.clone(),
+            working_directory: backend_root.clone(),
+            bundled_python_runtime_root: None,
+            arguments: vec![
+                OsString::from("-m"),
+                OsString::from("tests.fixtures.workspace_command_fault_server"),
+            ],
+            environment: test_environment(&[
+                ("DESKPILOT_DATABASE_URL", database_url.clone()),
+                (
+                    "DESKPILOT_ARTIFACT_WORKSPACE_ROOT",
+                    artifact_root.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_CONVERSATION_WORKSPACE_ROOT",
+                    workspace_root.to_string_lossy().into_owned(),
+                ),
+                ("DESKPILOT_SESSION_TOKEN", TEST_TOKEN.to_owned()),
+                ("DESKPILOT_CORS_ORIGINS", format!("[\"{TEST_ORIGIN}\"]")),
+                (
+                    "DESKPILOT_RUNNER_COMMIT_RECEIPT_DATABASE_PATH",
+                    root.join("receipts.db").to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_RUNNER_WORKER_RUNTIME_ROOT",
+                    root.join("worker-runtime").to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_RUNNER_APPCONTAINER_PROFILE_JOURNAL_PATH",
+                    root.join("appcontainer-profiles.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                (
+                    "DESKPILOT_MODEL_GATEWAY_POLICY",
+                    "{\"provider_pricing\":[{\"provider_id\":\"fake-local\"}]}".to_owned(),
+                ),
+                ("DESKPILOT_GOLDEN_API_PORT", seed_port.to_string()),
+                (
+                    "DESKPILOT_GOLDEN_COMMAND_PROJECT",
+                    scenario["project_path"]
+                        .as_str()
+                        .expect("seed recovery project")
+                        .to_owned(),
+                ),
+                ("DESKPILOT_GOLDEN_COMMAND_PROFILES", profile_ids.join(",")),
+                ("DESKPILOT_GOLDEN_COMMAND_FAULT_MODE", "pass".to_owned()),
+                ("DESKPILOT_GOLDEN_PROFILE_DRIFT", "none".to_owned()),
+                (
+                    "DESKPILOT_GOLDEN_COMMAND_CALLS_PATH",
+                    command_calls.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_GOLDEN_PROVIDER_CALLS_PATH",
+                    provider_calls.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_GOLDEN_COMMAND_STARTED_PATH",
+                    command_started.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_GOLDEN_WORKBENCH_RUNTIME_CONTROL_PATH",
+                    runtime_control.to_string_lossy().into_owned(),
+                ),
+                ("PYTHONUTF8", "1".to_owned()),
+            ]),
+            output_path: None,
+        };
+        let seed_supervisor = SidecarSupervisor::start(Some(seed_spec), Arc::new(|_| {}));
+        wait_healthy(seed_port);
+        let mut ready = expect_json(
+            seed_port,
+            "POST",
+            "/api/v1/conversation-turns",
+            Some(&json!({
+                "message": format!(
+                    "运行 {} 的固定 Ruff 与 pytest 检查 {}",
+                    scenario["project_path"].as_str().expect("message project path"),
+                    scenario["message_marker"].as_str().expect("message marker")
+                )
+            })),
+            201,
+        );
+        let task_id = ready["task"]["task_id"]
+            .as_str()
+            .expect("seeded frozen recovery task id")
+            .to_owned();
+        for _ in 0..scenario["max_seed_advances"]
+            .as_u64()
+            .expect("frozen recovery seed advances")
+        {
+            if first_command_is_ready(&ready) {
+                break;
+            }
+            ready = expect_json(
+                seed_port,
+                "POST",
+                &format!("/api/v1/tasks/{task_id}/workbench:advance"),
+                None,
+                200,
+            );
+        }
+        assert!(
+            first_command_is_ready(&ready),
+            "seeded frozen recovery task did not reach ready: {ready}"
+        );
+        assert_eq!(read_string_list(&provider_calls).len(), 1);
+        assert_eq!(read_string_list(&command_calls), Vec::<String>::new());
+        seed_supervisor.shutdown();
+        wait_until(Duration::from_secs(15), || {
+            request_json(seed_port, "GET", "/api/v1/health", None)
+                .is_err()
+                .then_some(())
+        });
+
+        let output_path = app_data.join("sidecar-supervisor.log");
+        let mut spec = SidecarLaunchSpec::resolve(&desktop, &app_data)
+            .expect("resolve installed frozen recovery sidecar");
+        assert_eq!(spec.executable, expected_sidecar);
+        assert_eq!(
+            spec.bundled_python_runtime_root.as_deref(),
+            Some(expected_resource.as_path())
+        );
+        spec.output_path = Some(output_path.clone());
+        spec.environment = test_environment(&[
+            ("DESKPILOT_DATABASE_URL", database_url),
+            (
+                "DESKPILOT_ARTIFACT_WORKSPACE_ROOT",
+                artifact_root.to_string_lossy().into_owned(),
+            ),
+            (
+                "DESKPILOT_CONVERSATION_WORKSPACE_ROOT",
+                workspace_root.to_string_lossy().into_owned(),
+            ),
+            ("DESKPILOT_SESSION_TOKEN", TEST_TOKEN.to_owned()),
+            ("DESKPILOT_CORS_ORIGINS", format!("[\"{TEST_ORIGIN}\"]")),
+            (
+                "DESKPILOT_RUNNER_COMMIT_RECEIPT_DATABASE_PATH",
+                root.join("receipts.db").to_string_lossy().into_owned(),
+            ),
+            (
+                "DESKPILOT_RUNNER_WORKER_RUNTIME_ROOT",
+                root.join("worker-runtime").to_string_lossy().into_owned(),
+            ),
+            (
+                "DESKPILOT_RUNNER_APPCONTAINER_PROFILE_JOURNAL_PATH",
+                root.join("appcontainer-profiles.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            (
+                "DESKPILOT_MODEL_GATEWAY_POLICY",
+                "{\"provider_pricing\":[{\"provider_id\":\"fake-local\"}]}".to_owned(),
+            ),
+            ("DESKPILOT_WORKBENCH_RUNTIME_ENABLED", "false".to_owned()),
+            ("DESKPILOT_WORKBENCH_RUNTIME_CONCURRENCY", "1".to_owned()),
+            ("PYTHONUTF8", "1".to_owned()),
+        ]);
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let observed_statuses = Arc::clone(&statuses);
+        let supervisor = SidecarSupervisor::start(
+            Some(spec),
+            Arc::new(move |status| {
+                observed_statuses
+                    .lock()
+                    .expect("frozen recovery statuses poisoned")
+                    .push(status);
+            }),
+        );
+        let first_pid = wait_until(Duration::from_secs(60), || {
+            latest_unseen_running_pid(&statuses, &[])
+        });
+        wait_frozen_healthy(&statuses, &output_path);
+
+        let before_restart = expect_json_with_timeout(
+            8000,
+            "POST",
+            &format!("/api/v1/tasks/{task_id}/workbench:advance"),
+            None,
+            200,
+            Duration::from_secs(180),
+        );
+        assert!(
+            frozen_command_is_between_steps(&before_restart),
+            "installed recovery did not stop at the exact between-step boundary: {before_restart}"
+        );
+        let boundary_state = durable_command_state(&before_restart);
+        let boundary_proof =
+            load_frozen_command_database_proof(&python, &backend_root, &database_path, &task_id);
+        assert_eq!(
+            boundary_proof["results"]
+                .as_array()
+                .expect("boundary results")
+                .len(),
+            scenario["expected_verified_result_count_before_restart"]
+                .as_u64()
+                .expect("boundary verified count") as usize
+        );
+        assert_eq!(
+            boundary_proof["attempts"]
+                .as_array()
+                .expect("boundary attempts")
+                .len(),
+            1
+        );
+        kill_process_tree(first_pid);
+
+        let second_pid = wait_until(Duration::from_secs(60), || {
+            latest_unseen_running_pid(&statuses, &[first_pid])
+        });
+        assert_ne!(first_pid, second_pid);
+        wait_frozen_healthy(&statuses, &output_path);
+        let recovered = expect_json(
+            8000,
+            "GET",
+            &format!("/api/v1/tasks/{task_id}/workbench"),
+            None,
+            200,
+        );
+        assert!(frozen_command_is_between_steps(&recovered));
+        assert_eq!(durable_command_state(&recovered), boundary_state);
+        let recovered_proof =
+            load_frozen_command_database_proof(&python, &backend_root, &database_path, &task_id);
+        assert_eq!(recovered_proof, boundary_proof);
+
+        let mut completed = recovered;
+        for _ in 0..scenario["expected_post_restart_advances"]
+            .as_u64()
+            .expect("post-restart advances")
+        {
+            completed = expect_json_with_timeout(
+                8000,
+                "POST",
+                &format!("/api/v1/tasks/{task_id}/workbench:advance"),
+                None,
+                200,
+                Duration::from_secs(180),
+            );
+        }
+        assert!(
+            frozen_command_is_delivered(&completed),
+            "installed recovery did not reach Final/Delivery: {completed}"
+        );
+        let completed_state = durable_command_state(&completed);
+        let replay = expect_json(
+            8000,
+            "POST",
+            &format!("/api/v1/tasks/{task_id}/workbench:advance"),
+            None,
+            200,
+        );
+        assert_eq!(durable_command_state(&replay), completed_state);
+        for _ in 0..scenario["terminal_observation_seconds"]
+            .as_u64()
+            .expect("terminal observation seconds")
+            * 4
+        {
+            let observed = expect_json(
+                8000,
+                "GET",
+                &format!("/api/v1/tasks/{task_id}/workbench"),
+                None,
+                200,
+            );
+            assert_eq!(durable_command_state(&observed), completed_state);
+            thread::sleep(Duration::from_millis(250));
+        }
+
+        supervisor.shutdown();
+        wait_until(Duration::from_secs(15), || {
+            request_json(8000, "GET", "/api/v1/health", None)
+                .is_err()
+                .then_some(())
+        });
+        let status_snapshot = statuses
+            .lock()
+            .expect("frozen recovery statuses poisoned")
+            .clone();
+        assert_eq!(
+            status_snapshot
+                .iter()
+                .filter(|status| matches!(status, SidecarStatus::Running { .. }))
+                .count(),
+            scenario["expected_process_generations"]
+                .as_u64()
+                .expect("expected process generations") as usize
+        );
+        assert_eq!(
+            status_snapshot
+                .iter()
+                .filter(|status| matches!(status, SidecarStatus::Backoff { .. }))
+                .count(),
+            scenario["expected_restart_count"]
+                .as_u64()
+                .expect("expected restart count") as usize
+        );
+        assert!(!status_snapshot
+            .iter()
+            .any(|status| matches!(status, SidecarStatus::Failed { .. })));
+        assert_eq!(status_snapshot.last(), Some(&SidecarStatus::Stopped));
+
+        let proof =
+            load_frozen_command_database_proof(&python, &backend_root, &database_path, &task_id);
+        let results = proof["results"]
+            .as_array()
+            .expect("frozen recovery results");
+        assert_eq!(
+            results.len(),
+            scenario["expected_verified_result_count_after_restart"]
+                .as_u64()
+                .expect("final verified result count") as usize
+        );
+        for profile_id in &profile_ids {
+            let result = results
+                .iter()
+                .find(|result| result["output"]["command_profile_id"] == *profile_id)
+                .expect("one exact installed command result");
+            let output = &result["output"];
+            assert_eq!(output["status"], "passed");
+            assert_eq!(
+                output["isolation_mode"],
+                scenario["expected_isolation_mode"]
+            );
+            assert_eq!(output["network_access"], false);
+            assert_eq!(output["temporary_snapshot"], true);
+            assert_eq!(output["snapshot_mutations_discarded"], true);
+            assert_eq!(
+                output["toolchain_digest"],
+                scenario["bundled_runtime_digest"]
+            );
+            assert_eq!(
+                result["result_ref"]["result_digest"],
+                output["result_digest"]
+            );
+        }
+        let attempts = proof["attempts"]
+            .as_array()
+            .expect("frozen recovery attempts");
+        assert_eq!(attempts.len(), profile_ids.len());
+        assert!(attempts.iter().all(|attempt| {
+            attempt["attempt"] == 1
+                && attempt["status"] == "verified"
+                && attempt["error_code"].is_null()
+        }));
+        assert_eq!(proof["counts"]["turn_planner_runs"], 1);
+        assert_eq!(proof["counts"]["model_planner_drafts"], 1);
+        assert_eq!(proof["counts"]["command_plan_bindings"], 1);
+        assert_eq!(read_string_list(&provider_calls).len(), 1);
+        assert_eq!(read_string_list(&command_calls), Vec::<String>::new());
+        fs::remove_dir_all(root).expect("remove frozen command recovery directory");
     }
 }
