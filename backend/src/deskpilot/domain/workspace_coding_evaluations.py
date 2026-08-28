@@ -228,3 +228,81 @@ class WorkspaceCodingGoldenSidecarSoakSuite(BaseModel):
     version: Literal[1] = 1
     resilience_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     scenario: WorkspaceCodingSidecarSoakScenario
+
+
+class WorkspaceCodingConcurrencyRepository(BaseModel):
+    """One bounded disposable repository in the concurrency canary."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repository_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    message_marker: str = Field(pattern=r"^repo-[a-z0-9][a-z0-9-]{2,39}$")
+    ecosystem: WorkspaceCodingGoldenEcosystem
+    project_path: str = Field(min_length=1, max_length=500)
+    source_file_count: int = Field(ge=24, le=64)
+    command_profile_ids: tuple[CommandProfileId, ...] = Field(min_length=2, max_length=3)
+    fail_first_profile_once: bool = False
+
+    _project_path_is_relative = field_validator("project_path")(_strict_relative_path)
+
+    @model_validator(mode="after")
+    def one_ecosystem_and_unique_profiles(self) -> Self:
+        if len(set(self.command_profile_ids)) != len(self.command_profile_ids):
+            raise ValueError("Concurrency repository command profiles must be unique")
+        profile_ecosystems = {
+            profile_id.split(".", maxsplit=1)[0] for profile_id in self.command_profile_ids
+        }
+        if profile_ecosystems != {self.ecosystem}:
+            raise ValueError("Concurrency repository profiles crossed ecosystems")
+        return self
+
+
+class WorkspaceCodingConcurrencyScenario(BaseModel):
+    """Bounded multi-repository scheduler canary; it grants no execution authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    repositories: tuple[WorkspaceCodingConcurrencyRepository, ...] = Field(
+        min_length=3,
+        max_length=3,
+    )
+    workbench_concurrency: Literal[2] = 2
+    expected_peak_command_concurrency: Literal[2] = 2
+    command_delay_ms: int = Field(ge=100, le=1_000)
+    poll_interval_ms: int = Field(ge=25, le=500)
+    completion_timeout_seconds: int = Field(ge=30, le=180)
+    fairness_first_wave: Literal["all_repositories_before_any_second_profile"] = (
+        "all_repositories_before_any_second_profile"
+    )
+    automatic_repair: Literal[True] = True
+    no_automatic_replay: Literal[True] = True
+    max_advances: int = Field(default=24, ge=8, le=60)
+
+    @model_validator(mode="after")
+    def exact_bounded_matrix(self) -> Self:
+        if {item.ecosystem for item in self.repositories} != {"python", "node"}:
+            raise ValueError("Concurrency scenario must cover Python and Node")
+        for field_name, values in (
+            ("repository IDs", tuple(item.repository_id for item in self.repositories)),
+            ("message markers", tuple(item.message_marker for item in self.repositories)),
+            ("project paths", tuple(item.project_path for item in self.repositories)),
+        ):
+            if len(set(values)) != len(values):
+                raise ValueError(f"Concurrency scenario {field_name} must be unique")
+        if sum(item.source_file_count for item in self.repositories) < 72:
+            raise ValueError("Concurrency scenario fixture is below its medium-repository floor")
+        failing = tuple(item for item in self.repositories if item.fail_first_profile_once)
+        if len(failing) != 1:
+            raise ValueError("Concurrency scenario requires exactly one recoverable failure")
+        return self
+
+
+class WorkspaceCodingGoldenConcurrencySuite(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-coding-concurrency-suite.v1"]
+    suite_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    version: Literal[1] = 1
+    sidecar_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scenario: WorkspaceCodingConcurrencyScenario

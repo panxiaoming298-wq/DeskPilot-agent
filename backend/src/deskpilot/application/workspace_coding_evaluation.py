@@ -9,6 +9,7 @@ from yaml.tokens import AliasToken, AnchorToken
 
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.workspace_coding_evaluations import (
+    WorkspaceCodingGoldenConcurrencySuite,
     WorkspaceCodingGoldenResilienceSuite,
     WorkspaceCodingGoldenSidecarSoakSuite,
     WorkspaceCodingGoldenSuite,
@@ -39,6 +40,13 @@ class WorkspaceCodingGoldenSidecarSoakSuiteBundle:
     suite: WorkspaceCodingGoldenSidecarSoakSuite
     suite_digest: str
     resilience: WorkspaceCodingGoldenResilienceSuiteBundle
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceCodingGoldenConcurrencySuiteBundle:
+    suite: WorkspaceCodingGoldenConcurrencySuite
+    suite_digest: str
+    sidecar: WorkspaceCodingGoldenSidecarSoakSuiteBundle
 
 
 def _read_strict_yaml(suite_path: Path) -> object:
@@ -189,4 +197,50 @@ class WorkspaceCodingGoldenSidecarSoakSuiteLoader:
             suite=suite,
             suite_digest=sha256_digest(suite.model_dump(mode="json")),
             resilience=resilience,
+        )
+
+
+class WorkspaceCodingGoldenConcurrencySuiteLoader:
+    """Bind one bounded scheduler canary to the exact sidecar soak contract."""
+
+    def __init__(
+        self,
+        suite_path: Path | None = None,
+        *,
+        sidecar_loader: WorkspaceCodingGoldenSidecarSoakSuiteLoader | None = None,
+    ) -> None:
+        self._suite_path = suite_path or (
+            Path(__file__).parents[1] / "evaluations" / "workspace_coding_concurrency_v1.yaml"
+        )
+        self._sidecar_loader = sidecar_loader or WorkspaceCodingGoldenSidecarSoakSuiteLoader()
+
+    def load(self) -> WorkspaceCodingGoldenConcurrencySuiteBundle:
+        sidecar = self._sidecar_loader.load()
+        try:
+            suite = WorkspaceCodingGoldenConcurrencySuite.model_validate(
+                _read_strict_yaml(self._suite_path)
+            )
+        except WorkspaceCodingEvaluationError:
+            raise
+        except ValidationError as error:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding concurrency suite failed strict validation"
+            ) from error
+        scenario = suite.scenario
+        bound = sidecar.suite.scenario
+        if suite.sidecar_suite_digest != sidecar.suite_digest:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding concurrency suite crossed its sidecar digest"
+            )
+        if (
+            scenario.no_automatic_replay != bound.no_automatic_replay
+            or scenario.max_advances != bound.max_advances
+        ):
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding concurrency scenario crossed its sidecar safety contract"
+            )
+        return WorkspaceCodingGoldenConcurrencySuiteBundle(
+            suite=suite,
+            suite_digest=sha256_digest(suite.model_dump(mode="json")),
+            sidecar=sidecar,
         )

@@ -1,0 +1,37 @@
+schema_version: deskpilot.workspace-coding-concurrency-suite.v1
+suite_id: deskpilot.workspace-coding-multi-repository-canary
+version: 1
+sidecar_suite_digest: 542e2ae9049fcc181bafbd760156b3489b9e666d7039762d0b29294b413122b2
+scenario:
+  scenario_id: mixed.command-plan.fair-concurrency
+  repositories:
+    - repository_id: python-api
+      message_marker: repo-python-api
+      ecosystem: python
+      project_path: projects/python-api
+      source_file_count: 24
+      command_profile_ids: [python.ruff.v1, python.mypy.v1]
+      fail_first_profile_once: true
+    - repository_id: python-worker
+      message_marker: repo-python-worker
+      ecosystem: python
+      project_path: projects/python-worker
+      source_file_count: 24
+      command_profile_ids: [python.pytest.v1, python.ruff.v1]
+      fail_first_profile_once: false
+    - repository_id: node-console
+      message_marker: repo-node-console
+      ecosystem: node
+      project_path: projects/node-console
+      source_file_count: 24
+      command_profile_ids: [node.pnpm_typecheck.v1, node.pnpm_build.v1]
+      fail_first_profile_once: false
+  workbench_concurrency: 2
+  expected_peak_command_concurrency: 2
+  command_delay_ms: 200
+  poll_interval_ms: 250
+  completion_timeout_seconds: 120
+  fairness_first_wave: all_repositories_before_any_second_profile
+  automatic_repair: true
+  no_automatic_replay: true
+  max_advances: 24
