@@ -102,3 +102,42 @@ async def test_workbench_runtime_recovers_expired_claim_and_fences_cancel(
         assert statuses == ("applied", "cancelled")
     finally:
         await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_workbench_runtime_claims_full_wave_when_task_loop_progress_is_equal(
+    tmp_path: Path,
+) -> None:
+    database = Database(
+        f"sqlite+aiosqlite:///{(tmp_path / 'workbench-runtime-fairness.db').as_posix()}"
+    )
+    await database.migrate()
+    store = WorkbenchRuntimeStore(database)
+    task_ids = tuple(f"tsk_{index:032x}" for index in range(1, 4))
+    try:
+        for task_id in task_ids:
+            await _create_task(database, task_id)
+            await store.enqueue(task_id, task_id.removeprefix("tsk_") * 2)
+
+        async with database.session() as session, session.begin():
+            records = tuple(
+                (
+                    await session.scalars(
+                        select(WorkbenchRuntimeItemRecord).order_by(
+                            WorkbenchRuntimeItemRecord.task_id
+                        )
+                    )
+                ).all()
+            )
+            for record, workbench_attempt_count in zip(
+                records,
+                (5, 2, 4),
+                strict=True,
+            ):
+                record.attempt_count = workbench_attempt_count
+
+        first_wave = await store.claim("runtime-a", ttl_seconds=30, limit=2)
+        assert len(first_wave) == 2
+        assert {claim.attempt_count for claim in first_wave} == {3, 6}
+    finally:
+        await database.dispose()

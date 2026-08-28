@@ -5,12 +5,15 @@ import os
 import re
 from collections.abc import Callable
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
 from uuid import uuid4
 
 PROFILE_JOURNAL_SCHEMA = "deskpilot.appcontainer-profile-journal.v1"
 PROFILE_NAME_PATTERN = re.compile(r"^DeskPilot\.Worker\.[0-9a-f]{32}$")
 MAX_JOURNALED_PROFILES = 1_024
+_JOURNAL_REGISTRY_LOCK = Lock()
+_JOURNAL_LOCKS: dict[Path, RLock] = {}
+_REAPED_JOURNAL_PATHS: set[Path] = set()
 
 
 class ProfileJournalError(RuntimeError):
@@ -22,7 +25,8 @@ class AppContainerProfileJournal:
 
     def __init__(self, path: Path) -> None:
         self.path = path.resolve(strict=False)
-        self._lock = RLock()
+        with _JOURNAL_REGISTRY_LOCK:
+            self._lock = _JOURNAL_LOCKS.setdefault(self.path, RLock())
 
     def register(self, profile_name: str) -> None:
         self._validate_name(profile_name)
@@ -43,23 +47,16 @@ class AppContainerProfileJournal:
     def reap(self, delete_profile: Callable[[str], None]) -> tuple[str, ...]:
         """Delete every previously journaled profile, retaining failed entries."""
         with self._lock:
-            profiles = self._load_unlocked()
-            failures: list[tuple[str, Exception]] = []
-            deleted: list[str] = []
-            for profile_name in profiles:
-                try:
-                    delete_profile(profile_name)
-                except Exception as error:
-                    failures.append((profile_name, error))
-                else:
-                    deleted.append(profile_name)
-            self._write_unlocked(tuple(name for name, _ in failures))
-            if failures:
-                first_name, first_error = failures[0]
-                raise ProfileJournalError(
-                    f"Could not reap AppContainer profile {first_name}"
-                ) from first_error
-            return tuple(deleted)
+            return self._reap_unlocked(delete_profile)
+
+    def reap_once(self, delete_profile: Callable[[str], None]) -> tuple[str, ...]:
+        """Reap replacement-process leftovers without deleting concurrent live profiles."""
+        with self._lock:
+            if self.path in _REAPED_JOURNAL_PATHS:
+                return ()
+            deleted = self._reap_unlocked(delete_profile)
+            _REAPED_JOURNAL_PATHS.add(self.path)
+            return deleted
 
     def snapshot(self) -> tuple[str, ...]:
         with self._lock:
@@ -96,6 +93,25 @@ class AppContainerProfileJournal:
                 "AppContainer profile journal must contain sorted unique entries"
             )
         return validated
+
+    def _reap_unlocked(self, delete_profile: Callable[[str], None]) -> tuple[str, ...]:
+        profiles = self._load_unlocked()
+        failures: list[tuple[str, Exception]] = []
+        deleted: list[str] = []
+        for profile_name in profiles:
+            try:
+                delete_profile(profile_name)
+            except Exception as error:
+                failures.append((profile_name, error))
+            else:
+                deleted.append(profile_name)
+        self._write_unlocked(tuple(name for name, _ in failures))
+        if failures:
+            first_name, first_error = failures[0]
+            raise ProfileJournalError(
+                f"Could not reap AppContainer profile {first_name}"
+            ) from first_error
+        return tuple(deleted)
 
     def _write_unlocked(self, profiles: tuple[str, ...]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

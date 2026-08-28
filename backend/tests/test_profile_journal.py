@@ -31,6 +31,22 @@ def test_profile_journal_registers_concurrently_and_reaps_exact_names(
     assert journal.snapshot() == ()
 
 
+def test_profile_journal_instances_share_lock_and_startup_reap_only_once(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "shared-profiles.json"
+    first = AppContainerProfileJournal(path)
+    second = AppContainerProfileJournal(path)
+    first.register(_profile(1))
+    deleted: list[str] = []
+
+    assert second.reap_once(deleted.append) == (_profile(1),)
+    first.register(_profile(2))
+    assert second.reap_once(deleted.append) == ()
+    assert first.snapshot() == (_profile(2),)
+    assert deleted == [_profile(1)]
+
+
 def test_profile_journal_retains_failed_deletions(tmp_path: Path) -> None:
     journal = AppContainerProfileJournal(tmp_path / "profiles.json")
     journal.register(_profile(1))

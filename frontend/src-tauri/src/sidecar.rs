@@ -307,7 +307,7 @@ mod tests {
     use super::{SidecarLaunchSpec, SidecarStatus, SidecarSupervisor, MAX_RESTARTS, SIDECAR_NAME};
     use serde_json::{json, Value};
     #[cfg(windows)]
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::{
         ffi::OsString,
         fs,
@@ -542,6 +542,27 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn load_frozen_concurrency_scenario(python: &Path, backend_root: &Path) -> Value {
+        let script = concat!(
+            "from deskpilot.application.workspace_coding_evaluation import ",
+            "WorkspaceCodingGoldenFrozenConcurrencySuiteLoader; ",
+            "print(WorkspaceCodingGoldenFrozenConcurrencySuiteLoader().load()",
+            ".suite.model_dump_json())"
+        );
+        let output = Command::new(python)
+            .current_dir(backend_root)
+            .args(["-c", script])
+            .output()
+            .expect("load frozen concurrency suite");
+        assert!(
+            output.status.success(),
+            "frozen concurrency suite loading failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("parse frozen concurrency suite")
+    }
+
+    #[cfg(windows)]
     fn load_frozen_command_database_proof(
         python: &Path,
         backend_root: &Path,
@@ -588,6 +609,64 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         serde_json::from_slice(&output.stdout).expect("parse frozen command database proof")
+    }
+
+    #[cfg(windows)]
+    fn load_frozen_concurrency_database_proof(
+        python: &Path,
+        backend_root: &Path,
+        database_path: &Path,
+        task_ids: &[String],
+    ) -> Value {
+        let script = concat!(
+            "import json,sqlite3,sys; ",
+            "db=sqlite3.connect(sys.argv[1]); ids=sys.argv[2:]; ",
+            "marks=','.join('?' for _ in ids); ",
+            "attempts=db.execute(f\"SELECT e.task_id,a.attempt,a.status,a.error_code,",
+            "a.claim_acquired_at,a.candidate_recorded_at,a.verified_at,r.output_manifest,",
+            "r.result_ref_manifest FROM task_loop_node_attempts a JOIN task_loop_executions e ",
+            "ON e.execution_id=a.execution_id LEFT JOIN task_loop_verified_results r ",
+            "ON r.attempt_id=a.attempt_id WHERE e.task_id IN ({marks}) ",
+            "ORDER BY a.claim_acquired_at,a.created_at,a.attempt_id\",ids).fetchall(); ",
+            "parsed=[{'task_id':row[0],'attempt':row[1],'status':row[2],",
+            "'error_code':row[3],'started_at':row[4],'candidate_at':row[5],",
+            "'verified_at':row[6],'output':json.loads(row[7]) if row[7] else None,",
+            "'result_ref':json.loads(row[8]) if row[8] else None} for row in attempts]; ",
+            "events=[]; ",
+            "[(events.extend(((row['started_at'],1),(row['candidate_at'] or ",
+            "row['verified_at'],-1)))) for row in parsed]; ",
+            "active=peak=0; ",
+            "exec(\"for _,delta in sorted(events, key=lambda item:(item[0], item[1])):\\n",
+            " active += delta\\n peak=max(peak,active)\"); ",
+            "counts={}; ",
+            "exec(\"for task_id in ids:\\n counts[task_id]={",
+            "'turn_planner_runs':db.execute('SELECT COUNT(*) FROM turn_planner_runs ",
+            "WHERE task_id=?',(task_id,)).fetchone()[0],",
+            "'model_planner_drafts':db.execute('SELECT COUNT(*) FROM model_planner_drafts ",
+            "WHERE task_id=?',(task_id,)).fetchone()[0],",
+            "'command_plan_bindings':db.execute('SELECT COUNT(*) FROM ",
+            "workspace_command_plan_bindings WHERE task_id=?',(task_id,)).fetchone()[0],",
+            "}\"); ",
+            "print(json.dumps({'attempts':parsed,'peak_command_concurrency':peak,",
+            "'counts':counts},separators=(',',':')))"
+        );
+        let mut arguments = vec![
+            OsString::from("-c"),
+            OsString::from(script),
+            database_path.as_os_str().to_owned(),
+        ];
+        arguments.extend(task_ids.iter().map(OsString::from));
+        let output = Command::new(python)
+            .current_dir(backend_root)
+            .args(arguments)
+            .output()
+            .expect("read frozen concurrency database proof");
+        assert!(
+            output.status.success(),
+            "frozen concurrency database proof failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("parse frozen concurrency database proof")
     }
 
     fn read_string_list(path: &Path) -> Vec<String> {
@@ -711,6 +790,76 @@ mod tests {
                     && node["verified_result_present"] == true
                     && node["attempt_count"] == 1
             })
+    }
+
+    #[cfg(windows)]
+    fn frozen_concurrency_task_is_terminal(workbench: &Value, failed: bool) -> bool {
+        let mut nodes = workbench["task_loop"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|node| !node["command_plan_id"].is_null())
+            .collect::<Vec<_>>();
+        nodes.sort_by_key(|node| node["command_step_sequence"].as_u64());
+        if nodes.len() != 2 {
+            return false;
+        }
+        if !failed {
+            return frozen_command_is_delivered(workbench);
+        }
+        workbench["task_loop"]["execution_status"] == "failed"
+            && nodes[0]["status"] == "verified"
+            && nodes[0]["attempt_count"] == 1
+            && nodes[0]["verified_result_present"] == true
+            && nodes[0]["verified_failure_result_count"] == 0
+            && nodes[1]["status"] == "failed"
+            && nodes[1]["attempt_count"] == 2
+            && nodes[1]["verified_result_present"] == false
+            && nodes[1]["verified_failure_result_count"] == 2
+    }
+
+    #[cfg(windows)]
+    fn materialize_frozen_concurrency_repository(
+        workspace_root: &Path,
+        repository: &Value,
+        pytest_delay_seconds: u64,
+    ) {
+        let project = workspace_root.join(
+            repository["project_path"]
+                .as_str()
+                .expect("frozen concurrency project path"),
+        );
+        let source = project.join("src");
+        let tests = project.join("tests");
+        fs::create_dir_all(&source).expect("create frozen concurrency source root");
+        fs::create_dir_all(&tests).expect("create frozen concurrency test root");
+        let source_file_count = repository["source_file_count"]
+            .as_u64()
+            .expect("frozen concurrency source count");
+        fs::write(
+            source.join("sample.py"),
+            "def add(left: int, right: int) -> int:\n    return left + right\n",
+        )
+        .expect("write frozen concurrency sample");
+        for index in 1..source_file_count {
+            fs::write(
+                source.join(format!("module_{index:02}.py")),
+                format!("VALUE_{index}: int = {index}\n"),
+            )
+            .expect("write frozen concurrency source file");
+        }
+        let expected = if repository["pytest_outcome"] == "failed" {
+            4
+        } else {
+            3
+        };
+        fs::write(
+            tests.join("test_sample.py"),
+            format!(
+                "import time\n\nfrom src.sample import add\n\n\ndef test_add() -> None:\n    time.sleep({pytest_delay_seconds})\n    assert add(1, 2) == {expected}\n"
+            ),
+        )
+        .expect("write frozen concurrency test");
     }
 
     fn observe_stable_command_state(
@@ -873,12 +1022,35 @@ mod tests {
         root_process_id: u32,
     ) -> Result<(ProcessResourceSample, HashSet<u32>), String> {
         let process_ids = process_tree_process_ids(root_process_id)?;
+        let mut sampled_process_ids = HashSet::new();
         let mut tree_working_set_bytes = 0usize;
         let mut tree_private_bytes = 0usize;
         let mut tree_handle_count = 0u32;
         for process_id in &process_ids {
-            let (working_set_bytes, private_bytes, handle_count) =
-                sample_one_process_resources(*process_id)?;
+            let mut retry = 0;
+            let resources = loop {
+                match sample_one_process_resources(*process_id) {
+                    Ok(resources) => break Some(resources),
+                    Err(error) => {
+                        if *process_id == root_process_id {
+                            return Err(error);
+                        }
+                        let current_process_ids = process_tree_process_ids(root_process_id)?;
+                        if !current_process_ids.contains(process_id) {
+                            break None;
+                        }
+                        if retry >= 20 {
+                            return Err(error);
+                        }
+                        retry += 1;
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            };
+            let Some((working_set_bytes, private_bytes, handle_count)) = resources else {
+                continue;
+            };
+            sampled_process_ids.insert(*process_id);
             tree_working_set_bytes = tree_working_set_bytes.saturating_add(working_set_bytes);
             tree_private_bytes = tree_private_bytes.saturating_add(private_bytes);
             tree_handle_count = tree_handle_count.saturating_add(handle_count);
@@ -888,9 +1060,9 @@ mod tests {
                 tree_working_set_bytes,
                 tree_private_bytes,
                 tree_handle_count,
-                process_tree_count: process_ids.len(),
+                process_tree_count: sampled_process_ids.len(),
             },
-            process_ids,
+            sampled_process_ids,
         ))
     }
 
@@ -2355,5 +2527,617 @@ mod tests {
         assert_eq!(read_string_list(&provider_calls).len(), 1);
         assert_eq!(read_string_list(&command_calls), Vec::<String>::new());
         fs::remove_dir_all(root).expect("remove frozen command recovery directory");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "explicit installed real-Profile concurrency; run through scripts/run-frozen-release-soak.ps1"]
+    fn frozen_installed_three_task_concurrency_is_fair_and_failure_isolated() {
+        assert_eq!(
+            std::env::var("DESKPILOT_RUN_FROZEN_RELEASE_SOAK").as_deref(),
+            Ok("1"),
+            "the frozen concurrency cohort requires its explicit opt-in wrapper"
+        );
+        let install_root = PathBuf::from(
+            std::env::var_os("DESKPILOT_FROZEN_RELEASE_INSTALL_ROOT")
+                .expect("installed frozen release root"),
+        )
+        .canonicalize()
+        .expect("canonicalize installed frozen release root");
+        let manifest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let backend_root = manifest_root
+            .join("..")
+            .join("..")
+            .join("backend")
+            .canonicalize()
+            .expect("resolve backend root");
+        let python = backend_root
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe");
+        assert!(python.is_file(), "backend virtual environment is required");
+        let suite = load_frozen_concurrency_scenario(&python, &backend_root);
+        let scenario = &suite["scenario"];
+        assert_eq!(scenario["production_fake_provider_unsupported"], true);
+        assert_eq!(scenario["automatic_workbench_after_restart"], true);
+        assert_eq!(scenario["no_automatic_replay"], true);
+
+        let desktop = install_root.join("deskpilot.exe");
+        let expected_sidecar = install_root.join("deskpilot-backend-sidecar.exe");
+        let expected_resource = install_root.join(
+            scenario["bundled_runtime_directory"]
+                .as_str()
+                .expect("bundled runtime directory"),
+        );
+        let resource_entries = fs::read_dir(&expected_resource)
+            .expect("read installed Python Command Profile resource")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("enumerate installed Python Command Profile resource");
+        assert_eq!(resource_entries.len(), 1);
+        assert_eq!(
+            resource_entries[0].file_name().to_string_lossy(),
+            scenario["bundled_runtime_digest"]
+                .as_str()
+                .expect("bundled runtime digest")
+        );
+        TcpListener::bind(("127.0.0.1", 8000))
+            .expect("the production frozen sidecar port 8000 must be free");
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "deskpilot-frozen-concurrency-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let artifact_root = root.join("artifacts");
+        let workspace_root = root.join("workspaces");
+        let database_path = root.join("frozen-concurrency.db");
+        let database_url = format!(
+            "sqlite+aiosqlite:///{}",
+            database_path.to_string_lossy().replace('\\', "/")
+        );
+        fs::create_dir_all(&artifact_root).expect("create concurrency artifact root");
+        fs::create_dir_all(&app_data).expect("create concurrency app data");
+        let repositories = scenario["repositories"]
+            .as_array()
+            .expect("frozen concurrency repositories");
+        let pytest_delay_seconds = scenario["pytest_delay_seconds"]
+            .as_u64()
+            .expect("frozen concurrency pytest delay");
+        for repository in repositories {
+            materialize_frozen_concurrency_repository(
+                &workspace_root,
+                repository,
+                pytest_delay_seconds,
+            );
+        }
+
+        let routes = repositories
+            .iter()
+            .map(|repository| {
+                json!({
+                    "repository_id": repository["repository_id"],
+                    "message_marker": repository["message_marker"],
+                    "project_path": repository["project_path"],
+                    "profile_ids": repository["command_profile_ids"],
+                })
+            })
+            .collect::<Vec<_>>();
+        let seed_port = free_port();
+        let runtime_control = root.join("seed-workbench-runtime.txt");
+        fs::write(&runtime_control, "false").expect("disable seed Workbench runtime");
+        let provider_calls = root.join("provider-calls.json");
+        let command_calls = root.join("seed-command-calls.json");
+        let command_started = root.join("seed-command-started.txt");
+        let seed_spec = SidecarLaunchSpec {
+            executable: python.clone(),
+            working_directory: backend_root.clone(),
+            bundled_python_runtime_root: None,
+            arguments: vec![
+                OsString::from("-m"),
+                OsString::from("tests.fixtures.workspace_command_fault_server"),
+            ],
+            environment: test_environment(&[
+                ("DESKPILOT_DATABASE_URL", database_url.clone()),
+                (
+                    "DESKPILOT_ARTIFACT_WORKSPACE_ROOT",
+                    artifact_root.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_CONVERSATION_WORKSPACE_ROOT",
+                    workspace_root.to_string_lossy().into_owned(),
+                ),
+                ("DESKPILOT_SESSION_TOKEN", TEST_TOKEN.to_owned()),
+                ("DESKPILOT_CORS_ORIGINS", format!("[\"{TEST_ORIGIN}\"]")),
+                (
+                    "DESKPILOT_RUNNER_COMMIT_RECEIPT_DATABASE_PATH",
+                    root.join("receipts.db").to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_RUNNER_WORKER_RUNTIME_ROOT",
+                    root.join("worker-runtime").to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_RUNNER_APPCONTAINER_PROFILE_JOURNAL_PATH",
+                    root.join("appcontainer-profiles.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                (
+                    "DESKPILOT_MODEL_GATEWAY_POLICY",
+                    "{\"provider_pricing\":[{\"provider_id\":\"fake-local\"}]}".to_owned(),
+                ),
+                ("DESKPILOT_GOLDEN_API_PORT", seed_port.to_string()),
+                (
+                    "DESKPILOT_GOLDEN_COMMAND_PROJECT",
+                    repositories[0]["project_path"]
+                        .as_str()
+                        .expect("seed concurrency project")
+                        .to_owned(),
+                ),
+                (
+                    "DESKPILOT_GOLDEN_COMMAND_PROFILES",
+                    "python.ruff.v1,python.pytest.v1".to_owned(),
+                ),
+                (
+                    "DESKPILOT_GOLDEN_COMMAND_ROUTES",
+                    Value::Array(routes).to_string(),
+                ),
+                ("DESKPILOT_GOLDEN_COMMAND_FAULT_MODE", "pass".to_owned()),
+                ("DESKPILOT_GOLDEN_PROFILE_DRIFT", "none".to_owned()),
+                (
+                    "DESKPILOT_GOLDEN_COMMAND_CALLS_PATH",
+                    command_calls.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_GOLDEN_PROVIDER_CALLS_PATH",
+                    provider_calls.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_GOLDEN_COMMAND_STARTED_PATH",
+                    command_started.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_GOLDEN_WORKBENCH_RUNTIME_CONTROL_PATH",
+                    runtime_control.to_string_lossy().into_owned(),
+                ),
+                ("PYTHONUTF8", "1".to_owned()),
+            ]),
+            output_path: None,
+        };
+        let seed_supervisor = SidecarSupervisor::start(Some(seed_spec), Arc::new(|_| {}));
+        wait_healthy(seed_port);
+        let mut task_by_repository = HashMap::new();
+        for repository in repositories {
+            let project_path = repository["project_path"]
+                .as_str()
+                .expect("seed repository project path");
+            let repository_id = repository["repository_id"]
+                .as_str()
+                .expect("seed repository ID");
+            let mut ready = expect_json(
+                seed_port,
+                "POST",
+                "/api/v1/conversation-turns",
+                Some(&json!({
+                    "message": format!(
+                        "运行 {project_path} 的固定 Ruff 与 pytest 检查 [{}]",
+                        repository["message_marker"]
+                            .as_str()
+                            .expect("seed repository marker")
+                    )
+                })),
+                201,
+            );
+            let task_id = ready["task"]["task_id"]
+                .as_str()
+                .expect("seeded frozen concurrency task ID")
+                .to_owned();
+            for _ in 0..scenario["max_seed_advances"]
+                .as_u64()
+                .expect("frozen concurrency seed advances")
+            {
+                if first_command_is_ready(&ready) {
+                    break;
+                }
+                ready = expect_json(
+                    seed_port,
+                    "POST",
+                    &format!("/api/v1/tasks/{task_id}/workbench:advance"),
+                    None,
+                    200,
+                );
+            }
+            assert!(
+                first_command_is_ready(&ready),
+                "seeded frozen concurrency task did not reach ready: {ready}"
+            );
+            task_by_repository.insert(repository_id.to_owned(), task_id);
+        }
+        assert_eq!(read_string_list(&provider_calls).len(), repositories.len());
+        assert_eq!(read_string_list(&command_calls), Vec::<String>::new());
+        seed_supervisor.shutdown();
+        wait_until(Duration::from_secs(15), || {
+            request_json(seed_port, "GET", "/api/v1/health", None)
+                .is_err()
+                .then_some(())
+        });
+
+        let task_ids = repositories
+            .iter()
+            .map(|repository| {
+                task_by_repository[repository["repository_id"]
+                    .as_str()
+                    .expect("proof repository ID")]
+                .clone()
+            })
+            .collect::<Vec<_>>();
+        let seed_proof = load_frozen_concurrency_database_proof(
+            &python,
+            &backend_root,
+            &database_path,
+            &task_ids,
+        );
+        assert_eq!(
+            seed_proof["attempts"]
+                .as_array()
+                .expect("seed concurrency attempts")
+                .len(),
+            0
+        );
+
+        let output_path = app_data.join("sidecar-supervisor.log");
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let installed_environment = |enabled: bool| {
+            test_environment(&[
+                ("DESKPILOT_DATABASE_URL", database_url.clone()),
+                (
+                    "DESKPILOT_ARTIFACT_WORKSPACE_ROOT",
+                    artifact_root.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_CONVERSATION_WORKSPACE_ROOT",
+                    workspace_root.to_string_lossy().into_owned(),
+                ),
+                ("DESKPILOT_SESSION_TOKEN", TEST_TOKEN.to_owned()),
+                ("DESKPILOT_CORS_ORIGINS", format!("[\"{TEST_ORIGIN}\"]")),
+                (
+                    "DESKPILOT_RUNNER_COMMIT_RECEIPT_DATABASE_PATH",
+                    root.join("receipts.db").to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_RUNNER_WORKER_RUNTIME_ROOT",
+                    root.join("worker-runtime").to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_RUNNER_APPCONTAINER_PROFILE_JOURNAL_PATH",
+                    root.join("appcontainer-profiles.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                (
+                    "DESKPILOT_MODEL_GATEWAY_POLICY",
+                    "{\"provider_pricing\":[{\"provider_id\":\"fake-local\"}]}".to_owned(),
+                ),
+                ("DESKPILOT_WORKBENCH_RUNTIME_ENABLED", enabled.to_string()),
+                (
+                    "DESKPILOT_WORKBENCH_RUNTIME_POLL_INTERVAL_SECONDS",
+                    "0.01".to_owned(),
+                ),
+                (
+                    "DESKPILOT_WORKBENCH_RUNTIME_CLAIM_TTL_SECONDS",
+                    "5".to_owned(),
+                ),
+                (
+                    "DESKPILOT_WORKBENCH_RUNTIME_CONCURRENCY",
+                    scenario["workbench_concurrency"]
+                        .as_u64()
+                        .expect("installed Workbench concurrency")
+                        .to_string(),
+                ),
+                ("PYTHONUTF8", "1".to_owned()),
+            ])
+        };
+
+        let mut first_spec = SidecarLaunchSpec::resolve(&desktop, &app_data)
+            .expect("resolve first installed concurrency sidecar");
+        assert_eq!(first_spec.executable, expected_sidecar);
+        assert_eq!(
+            first_spec.bundled_python_runtime_root.as_deref(),
+            Some(expected_resource.as_path())
+        );
+        first_spec.output_path = Some(output_path.clone());
+        first_spec.environment = installed_environment(false);
+        let first_statuses = Arc::clone(&statuses);
+        let first_supervisor = SidecarSupervisor::start(
+            Some(first_spec),
+            Arc::new(move |status| {
+                first_statuses
+                    .lock()
+                    .expect("frozen concurrency statuses poisoned")
+                    .push(status);
+            }),
+        );
+        wait_frozen_healthy(&statuses, &output_path);
+        for task_id in &task_ids {
+            let ready = expect_json(
+                8000,
+                "GET",
+                &format!("/api/v1/tasks/{task_id}/workbench"),
+                None,
+                200,
+            );
+            assert!(first_command_is_ready(&ready));
+        }
+        let first_generation_proof = load_frozen_concurrency_database_proof(
+            &python,
+            &backend_root,
+            &database_path,
+            &task_ids,
+        );
+        assert_eq!(first_generation_proof, seed_proof);
+        first_supervisor.shutdown();
+        wait_until(Duration::from_secs(15), || {
+            request_json(8000, "GET", "/api/v1/health", None)
+                .is_err()
+                .then_some(())
+        });
+
+        let mut second_spec = SidecarLaunchSpec::resolve(&desktop, &app_data)
+            .expect("resolve second installed concurrency sidecar");
+        second_spec.output_path = Some(output_path.clone());
+        second_spec.environment = installed_environment(true);
+        let second_statuses = Arc::clone(&statuses);
+        let second_supervisor = SidecarSupervisor::start(
+            Some(second_spec),
+            Arc::new(move |status| {
+                second_statuses
+                    .lock()
+                    .expect("frozen concurrency statuses poisoned")
+                    .push(status);
+            }),
+        );
+        wait_frozen_healthy(&statuses, &output_path);
+        let deadline = Instant::now()
+            + Duration::from_secs(
+                scenario["completion_timeout_seconds"]
+                    .as_u64()
+                    .expect("frozen concurrency completion timeout"),
+            );
+        let mut final_by_repository = HashMap::new();
+        while Instant::now() < deadline {
+            for repository in repositories {
+                let repository_id = repository["repository_id"]
+                    .as_str()
+                    .expect("terminal repository ID");
+                let task_id = &task_by_repository[repository_id];
+                let current = expect_json(
+                    8000,
+                    "GET",
+                    &format!("/api/v1/tasks/{task_id}/workbench"),
+                    None,
+                    200,
+                );
+                let failed = repository["pytest_outcome"] == "failed";
+                if frozen_concurrency_task_is_terminal(&current, failed) {
+                    final_by_repository.insert(repository_id.to_owned(), current);
+                }
+            }
+            if final_by_repository.len() == repositories.len() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(
+                scenario["poll_interval_ms"]
+                    .as_u64()
+                    .expect("frozen concurrency poll interval"),
+            ));
+        }
+        if final_by_repository.len() != repositories.len() {
+            let output = fs::read_to_string(&output_path).unwrap_or_default();
+            panic!(
+                "installed concurrency did not terminate every task: {final_by_repository:?}\n{}",
+                &output[output.len().saturating_sub(8_000)..]
+            );
+        }
+        let terminal_states = final_by_repository
+            .iter()
+            .map(|(repository_id, workbench)| {
+                (repository_id.clone(), durable_command_state(workbench))
+            })
+            .collect::<HashMap<_, _>>();
+        for _ in 0..scenario["terminal_observation_seconds"]
+            .as_u64()
+            .expect("frozen concurrency observation seconds")
+            * 4
+        {
+            for repository in repositories {
+                let repository_id = repository["repository_id"]
+                    .as_str()
+                    .expect("observed repository ID");
+                let task_id = &task_by_repository[repository_id];
+                let observed = expect_json(
+                    8000,
+                    "GET",
+                    &format!("/api/v1/tasks/{task_id}/workbench"),
+                    None,
+                    200,
+                );
+                assert_eq!(
+                    durable_command_state(&observed),
+                    terminal_states[repository_id]
+                );
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        second_supervisor.shutdown();
+        wait_until(Duration::from_secs(15), || {
+            request_json(8000, "GET", "/api/v1/health", None)
+                .is_err()
+                .then_some(())
+        });
+
+        let status_snapshot = statuses
+            .lock()
+            .expect("frozen concurrency statuses poisoned")
+            .clone();
+        assert_eq!(
+            status_snapshot
+                .iter()
+                .filter(|status| matches!(status, SidecarStatus::Running { .. }))
+                .count(),
+            scenario["expected_installed_process_generations"]
+                .as_u64()
+                .expect("installed concurrency generations") as usize
+        );
+        assert_eq!(
+            status_snapshot
+                .iter()
+                .filter(|status| matches!(status, SidecarStatus::Backoff { .. }))
+                .count(),
+            0
+        );
+        assert!(!status_snapshot
+            .iter()
+            .any(|status| matches!(status, SidecarStatus::Failed { .. })));
+        assert_eq!(
+            status_snapshot
+                .iter()
+                .filter(|status| matches!(status, SidecarStatus::Stopped))
+                .count(),
+            scenario["expected_graceful_handoff_count"]
+                .as_u64()
+                .expect("installed concurrency graceful handoff") as usize
+                + 1
+        );
+
+        let proof = load_frozen_concurrency_database_proof(
+            &python,
+            &backend_root,
+            &database_path,
+            &task_ids,
+        );
+        let attempts = proof["attempts"]
+            .as_array()
+            .expect("frozen concurrency attempts");
+        assert_eq!(
+            attempts.len(),
+            scenario["expected_total_attempt_count"]
+                .as_u64()
+                .expect("frozen concurrency expected attempts") as usize
+        );
+        assert_eq!(
+            proof["peak_command_concurrency"],
+            scenario["expected_peak_command_concurrency"]
+        );
+        let mut passed_results = 0usize;
+        let mut failed_results = 0usize;
+        for attempt in attempts {
+            let output = &attempt["output"];
+            let result_ref = &attempt["result_ref"];
+            assert!(!output.is_null());
+            assert!(!result_ref.is_null());
+            assert_eq!(result_ref["result_digest"], output["result_digest"]);
+            assert_eq!(output["isolation_mode"], "windows_appcontainer");
+            assert_eq!(output["network_access"], false);
+            assert_eq!(output["temporary_snapshot"], true);
+            assert_eq!(output["snapshot_mutations_discarded"], true);
+            assert_eq!(
+                output["toolchain_digest"],
+                scenario["bundled_runtime_digest"]
+            );
+            assert!(!attempt["started_at"].is_null());
+            assert!(!attempt["candidate_at"].is_null());
+            assert!(!attempt["verified_at"].is_null());
+            if output["status"] == "passed" {
+                passed_results += 1;
+                assert_eq!(attempt["status"], "verified");
+                assert!(attempt["error_code"].is_null());
+            } else {
+                failed_results += 1;
+                assert_eq!(output["status"], "failed");
+                assert_eq!(attempt["status"], "failed");
+                assert_eq!(attempt["error_code"], "WORKSPACE_COMMAND_STEP_FAILED");
+            }
+        }
+        assert_eq!(
+            passed_results,
+            scenario["expected_passed_result_count"]
+                .as_u64()
+                .expect("expected passed ResultRefs") as usize
+        );
+        assert_eq!(
+            failed_results,
+            scenario["expected_failed_result_count"]
+                .as_u64()
+                .expect("expected failed ResultRefs") as usize
+        );
+        assert_eq!(
+            attempts.len(),
+            scenario["expected_total_resultref_count"]
+                .as_u64()
+                .expect("expected total ResultRefs") as usize
+        );
+
+        let first_profile_last = repositories
+            .iter()
+            .map(|repository| {
+                let project_path = repository["project_path"]
+                    .as_str()
+                    .expect("fairness project path");
+                attempts
+                    .iter()
+                    .position(|attempt| {
+                        attempt["output"]["project_path"] == project_path
+                            && attempt["output"]["command_profile_id"] == "python.ruff.v1"
+                    })
+                    .expect("every repository received its first Profile")
+            })
+            .max()
+            .expect("frozen concurrency first wave");
+        let second_profile_first = attempts
+            .iter()
+            .position(|attempt| attempt["output"]["command_profile_id"] == "python.pytest.v1")
+            .expect("frozen concurrency second wave");
+        assert!(first_profile_last < second_profile_first);
+
+        for repository in repositories {
+            let repository_id = repository["repository_id"]
+                .as_str()
+                .expect("proof repository ID");
+            let project_path = repository["project_path"]
+                .as_str()
+                .expect("proof project path");
+            let task_id = &task_by_repository[repository_id];
+            let repository_attempts = attempts
+                .iter()
+                .filter(|attempt| attempt["output"]["project_path"] == project_path)
+                .collect::<Vec<_>>();
+            let ruff = repository_attempts
+                .iter()
+                .filter(|attempt| attempt["output"]["command_profile_id"] == "python.ruff.v1")
+                .count();
+            let pytest = repository_attempts
+                .iter()
+                .filter(|attempt| attempt["output"]["command_profile_id"] == "python.pytest.v1")
+                .count();
+            assert_eq!(ruff, 1);
+            assert_eq!(
+                pytest,
+                if repository["pytest_outcome"] == "failed" {
+                    2
+                } else {
+                    1
+                }
+            );
+            assert_eq!(proof["counts"][task_id]["turn_planner_runs"], 1);
+            assert_eq!(proof["counts"][task_id]["model_planner_drafts"], 1);
+            assert_eq!(proof["counts"][task_id]["command_plan_bindings"], 1);
+        }
+        assert_eq!(read_string_list(&provider_calls).len(), repositories.len());
+        assert_eq!(read_string_list(&command_calls), Vec::<String>::new());
+        fs::remove_dir_all(root).expect("remove frozen concurrency directory");
     }
 }

@@ -12,6 +12,7 @@ from deskpilot.domain.workspace_coding_evaluations import (
     WorkspaceCodingGoldenConcurrencySuite,
     WorkspaceCodingGoldenFrozenCommandRecoverySuite,
     WorkspaceCodingGoldenFrozenCommandTaskSuite,
+    WorkspaceCodingGoldenFrozenConcurrencySuite,
     WorkspaceCodingGoldenFrozenReleaseSoakSuite,
     WorkspaceCodingGoldenResilienceSuite,
     WorkspaceCodingGoldenSidecarSoakSuite,
@@ -71,6 +72,13 @@ class WorkspaceCodingGoldenFrozenCommandRecoverySuiteBundle:
     suite: WorkspaceCodingGoldenFrozenCommandRecoverySuite
     suite_digest: str
     frozen_command: WorkspaceCodingGoldenFrozenCommandTaskSuiteBundle
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceCodingGoldenFrozenConcurrencySuiteBundle:
+    suite: WorkspaceCodingGoldenFrozenConcurrencySuite
+    suite_digest: str
+    frozen_command_recovery: WorkspaceCodingGoldenFrozenCommandRecoverySuiteBundle
 
 
 def _read_strict_yaml(suite_path: Path) -> object:
@@ -428,4 +436,68 @@ class WorkspaceCodingGoldenFrozenCommandRecoverySuiteLoader:
             suite=suite,
             suite_digest=sha256_digest(suite.model_dump(mode="json")),
             frozen_command=frozen_command,
+        )
+
+
+class WorkspaceCodingGoldenFrozenConcurrencySuiteLoader:
+    """Bind installed fair concurrency to the exact between-step recovery cohort."""
+
+    def __init__(
+        self,
+        suite_path: Path | None = None,
+        *,
+        frozen_command_recovery_loader: WorkspaceCodingGoldenFrozenCommandRecoverySuiteLoader
+        | None = None,
+    ) -> None:
+        self._suite_path = suite_path or (
+            Path(__file__).parents[1]
+            / "evaluations"
+            / "workspace_coding_frozen_concurrency_v1.yaml"
+        )
+        self._frozen_command_recovery_loader = (
+            frozen_command_recovery_loader
+            or WorkspaceCodingGoldenFrozenCommandRecoverySuiteLoader()
+        )
+
+    def load(self) -> WorkspaceCodingGoldenFrozenConcurrencySuiteBundle:
+        recovery = self._frozen_command_recovery_loader.load()
+        try:
+            suite = WorkspaceCodingGoldenFrozenConcurrencySuite.model_validate(
+                _read_strict_yaml(self._suite_path)
+            )
+        except WorkspaceCodingEvaluationError:
+            raise
+        except ValidationError as error:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen concurrency suite failed strict validation"
+            ) from error
+        scenario = suite.scenario
+        bound = recovery.suite.scenario
+        if (
+            suite.frozen_command_recovery_suite_digest
+            != recovery.suite_digest
+        ):
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen concurrency crossed its recovery suite digest"
+            )
+        if (
+            scenario.frozen_command_recovery_scenario_id != bound.scenario_id
+            or any(
+                item.command_profile_ids != bound.command_profile_ids
+                for item in scenario.repositories
+            )
+            or scenario.bundled_runtime_directory != bound.bundled_runtime_directory
+            or scenario.bundled_runtime_digest != bound.bundled_runtime_digest
+            or scenario.production_fake_provider_unsupported
+            != bound.production_fake_provider_unsupported
+            or scenario.no_automatic_replay != bound.no_automatic_replay
+            or not bound.reaches_final_delivery
+        ):
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen concurrency crossed its recovery safety boundary"
+            )
+        return WorkspaceCodingGoldenFrozenConcurrencySuiteBundle(
+            suite=suite,
+            suite_digest=sha256_digest(suite.model_dump(mode="json")),
+            frozen_command_recovery=recovery,
         )

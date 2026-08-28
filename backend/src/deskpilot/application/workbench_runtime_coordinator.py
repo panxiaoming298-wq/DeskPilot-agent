@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.dml import Update
 
@@ -20,6 +20,8 @@ from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.database_clock import database_utc_now
 from deskpilot.infrastructure.models import (
     TaskExecutionRunRecord,
+    TaskLoopExecutionRecord,
+    TaskLoopNodeAttemptRecord,
     TaskRecord,
     WorkbenchRuntimeItemRecord,
 )
@@ -160,10 +162,29 @@ class WorkbenchRuntimeStore:
                         & (WorkbenchRuntimeItemRecord.claim_expires_at <= now)
                     ),
                 )
+                persistent_progress_count = (
+                    select(func.count(TaskLoopNodeAttemptRecord.attempt_id))
+                    .select_from(TaskLoopNodeAttemptRecord)
+                    .join(
+                        TaskLoopExecutionRecord,
+                        TaskLoopExecutionRecord.execution_id
+                        == TaskLoopNodeAttemptRecord.execution_id,
+                    )
+                    .where(
+                        TaskLoopExecutionRecord.task_id
+                        == WorkbenchRuntimeItemRecord.task_id
+                    )
+                    .correlate(WorkbenchRuntimeItemRecord)
+                    .scalar_subquery()
+                )
                 statement = (
-                    select(WorkbenchRuntimeItemRecord)
+                    select(
+                        WorkbenchRuntimeItemRecord,
+                        persistent_progress_count.label("persistent_progress_count"),
+                    )
                     .where(ready)
                     .order_by(
+                        persistent_progress_count,
                         WorkbenchRuntimeItemRecord.available_at,
                         WorkbenchRuntimeItemRecord.created_at,
                         WorkbenchRuntimeItemRecord.work_item_id,
@@ -175,8 +196,16 @@ class WorkbenchRuntimeStore:
                         skip_locked=True,
                         of=WorkbenchRuntimeItemRecord,
                     )
-                candidates = tuple((await session.scalars(statement)).all())
-                for candidate in candidates:
+                candidates = tuple((await session.execute(statement)).all())
+                if candidates:
+                    least_persistent_progress = int(candidates[0][1])
+                    candidates = tuple(
+                        candidate
+                        for candidate in candidates
+                        if int(candidate[1]) == least_persistent_progress
+                    )
+                for candidate_row in candidates:
+                    candidate = candidate_row[0]
                     revision = candidate.revision
                     previous_fence = candidate.claim_fencing_token
                     next_fence = previous_fence + 1

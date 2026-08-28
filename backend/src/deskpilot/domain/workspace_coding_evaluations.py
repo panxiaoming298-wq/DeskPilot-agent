@@ -468,3 +468,103 @@ class WorkspaceCodingGoldenFrozenCommandRecoverySuite(BaseModel):
     version: Literal[1] = 1
     frozen_command_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     scenario: WorkspaceCodingFrozenCommandRecoveryScenario
+
+
+class WorkspaceCodingFrozenConcurrencyRepository(BaseModel):
+    """One installed Python repository in the persistent concurrency cohort."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repository_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    message_marker: str = Field(pattern=r"^FROZEN_[A-Z0-9_]{4,56}$")
+    project_path: str = Field(min_length=1, max_length=500)
+    source_file_count: Literal[24] = 24
+    command_profile_ids: tuple[CommandProfileId, ...]
+    pytest_outcome: Literal["passed", "failed"]
+
+    _project_path_is_relative = field_validator("project_path")(_strict_relative_path)
+
+    @model_validator(mode="after")
+    def exact_python_command_chain(self) -> Self:
+        if self.command_profile_ids != ("python.ruff.v1", "python.pytest.v1"):
+            raise ValueError(
+                "Frozen concurrency repositories must run exact Ruff then pytest Profiles"
+            )
+        return self
+
+
+class WorkspaceCodingFrozenConcurrencyScenario(BaseModel):
+    """Installed three-task fairness and fault-isolation acceptance cohort."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    frozen_command_recovery_scenario_id: str = Field(
+        pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$"
+    )
+    repositories: tuple[WorkspaceCodingFrozenConcurrencyRepository, ...] = Field(
+        min_length=3,
+        max_length=3,
+    )
+    bundled_runtime_directory: Literal["python-command-runtime"]
+    bundled_runtime_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    workbench_concurrency: Literal[2] = 2
+    expected_peak_command_concurrency: Literal[2] = 2
+    expected_installed_process_generations: Literal[2] = 2
+    expected_graceful_handoff_count: Literal[1] = 1
+    expected_success_count: Literal[2] = 2
+    expected_failed_count: Literal[1] = 1
+    expected_total_attempt_count: Literal[7] = 7
+    expected_total_resultref_count: Literal[7] = 7
+    expected_passed_result_count: Literal[5] = 5
+    expected_failed_result_count: Literal[2] = 2
+    pytest_delay_seconds: int = Field(ge=2, le=10)
+    poll_interval_ms: int = Field(ge=100, le=1_000)
+    completion_timeout_seconds: int = Field(ge=180, le=900)
+    terminal_observation_seconds: int = Field(ge=5, le=60)
+    max_seed_advances: int = Field(ge=8, le=60)
+    fairness_first_wave: Literal[
+        "all_repositories_before_any_second_profile"
+    ] = "all_repositories_before_any_second_profile"
+    bounded_command_retry: Literal[True] = True
+    automatic_workbench_after_restart: Literal[True] = True
+    production_fake_provider_unsupported: Literal[True] = True
+    no_automatic_replay: Literal[True] = True
+
+    @model_validator(mode="after")
+    def exact_installed_concurrency_matrix(self) -> Self:
+        for field_name, values in (
+            ("repository IDs", tuple(item.repository_id for item in self.repositories)),
+            ("message markers", tuple(item.message_marker for item in self.repositories)),
+            ("project paths", tuple(item.project_path for item in self.repositories)),
+        ):
+            if len(set(values)) != len(values):
+                raise ValueError(f"Frozen concurrency {field_name} must be unique")
+        if sum(item.pytest_outcome == "failed" for item in self.repositories) != 1:
+            raise ValueError("Frozen concurrency requires exactly one failed repository")
+        expected_attempts = sum(
+            len(item.command_profile_ids)
+            + (1 if item.pytest_outcome == "failed" else 0)
+            for item in self.repositories
+        )
+        if self.expected_total_attempt_count != expected_attempts:
+            raise ValueError("Frozen concurrency attempt count crossed its bounded retry")
+        if self.expected_total_resultref_count != expected_attempts:
+            raise ValueError("Frozen concurrency requires one ResultRef per known attempt")
+        if self.expected_passed_result_count + self.expected_failed_result_count != (
+            expected_attempts
+        ):
+            raise ValueError("Frozen concurrency ResultRef outcomes are not exhaustive")
+        return self
+
+
+class WorkspaceCodingGoldenFrozenConcurrencySuite(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[
+        "deskpilot.workspace-coding-frozen-concurrency-suite.v1"
+    ]
+    suite_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    version: Literal[1] = 1
+    frozen_command_recovery_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scenario: WorkspaceCodingFrozenConcurrencyScenario

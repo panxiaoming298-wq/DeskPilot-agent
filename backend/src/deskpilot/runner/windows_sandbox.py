@@ -794,7 +794,9 @@ class WindowsRestrictedProcessLauncher(ProcessLauncher):
             if self._policy.require_network_isolation:
                 if self._profile_journal is not None:
                     try:
-                        self._profile_journal.reap(_delete_appcontainer_profile_name)
+                        self._profile_journal.reap_once(
+                            _delete_appcontainer_profile_name
+                        )
                     except ProfileJournalError as error:
                         raise ProcessIsolationUnavailableError(str(error)) from error
                 profile = _create_appcontainer_profile(self._profile_journal)

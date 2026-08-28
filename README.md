@@ -334,6 +334,8 @@ flowchart LR
 
 阶段 116B 第十九个代码 checkpoint：新增与第十八检查点 exact digest 绑定的 `workspace_coding_frozen_command_recovery_v1.yaml`。第一代安装 sidecar 经公共单步 API 完成真实 AppContainer Ruff，在 pytest `ready/attempt=0` 边界外部强杀；第二代证明 Workbench/SQLite 证据未变后，恰好三次推进完成 pytest、Final 和 Delivery。Planner/Draft/Binding 各一份，Ruff/pytest 各一个 verified Attempt/ResultRef，额外 replay 不产生新证据。默认后端 115 文件 / 868 项，统一全量 `856 passed + 12 skipped`；七层契约 35/35、新资产 5/5、显式安装态三测试 3/3、wheel Prompt 33/33 与 Workspace YAML 7/7、前端 165/165、Ruff、strict mypy 310 和 Rust fmt/Clippy 已通过。本批不改生产状态机/API/权限面，下一步是安装态三任务公平并发。完整数据见[第十九检查点](doc/116B-持久多Agent编码循环第十九检查点.md)。
 
+阶段 116B 第二十个代码 checkpoint：新增与第十九检查点 exact digest 绑定的 `workspace_coding_frozen_concurrency_v1.yaml`。三个安装态 Python 任务共享 SQLite/TaskLoop，第一代 sidecar 在 ready 边界关闭，第二代以生产 Workbench `concurrency=2` 自动运行真实 Ruff→pytest。验收暴露并修复 AppContainer journal 互删活跃 profile 和 Workbench 跨服务轮次公平性；公平依据最终改为既有 TaskLoop Node Attempt 持久进度，不再受规划/激活路线深度影响。最终首波峰值并发 2，三个 Ruff 均先于任何 pytest；两个任务 Delivery，一个任务保留两份已知失败 ResultRef 后终止，总计 7 Attempt/7 ResultRef、零 unknown/重放。默认后端 116 文件 / 876 项，`864 passed + 12 skipped`；八层契约 41/41、安装态四测试 4/4、wheel Prompt 33/33 与 Workspace YAML 8/8、前端 165/165、Rust `4 passed + 4 ignored` 及 fmt/Clippy、Ruff、strict mypy 308 均通过。完整边界见[第二十检查点](doc/116B-持久多Agent编码循环第二十检查点.md)。
+
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 
 阶段 93 已完成首个服务器裁决的父子 Agent Handoff：目录计划由 `workspace_coordinator@1.0.0` 提议预编译的 `workspace_reader@1.1.0` Child，服务端验证 Registry/隐私/深度/循环/Tool scope/预算后才激活；只有 verified Child Result 能唤醒同一 Parent Invocation。停止、重启、fence、证明篡改和 Workbench 任务树已接通。下一开发项是通用 Supervisor、并行只读 Child verified join 与分支级控制。详见 [`doc/93-服务器裁决Agent-Handoff与父子续接.md`](doc/93-服务器裁决Agent-Handoff与父子续接.md)。

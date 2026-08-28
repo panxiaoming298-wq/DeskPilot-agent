@@ -1,0 +1,48 @@
+schema_version: deskpilot.workspace-coding-frozen-concurrency-suite.v1
+suite_id: deskpilot.workspace-coding-installed-python-fair-concurrency
+version: 1
+frozen_command_recovery_suite_digest: d096cdcdf68e92d16f0a55a5ea6e4fef8fa7e838af0de980f2b6acddde2c9df1
+scenario:
+  scenario_id: installed.python-command.fair-concurrency-fault-isolation
+  frozen_command_recovery_scenario_id: installed.python-command.between-step-recovery
+  repositories:
+    - repository_id: healthy-api
+      message_marker: FROZEN_CONCURRENCY_HEALTHY_API
+      project_path: projects/frozen-concurrency-healthy-api
+      source_file_count: 24
+      command_profile_ids: [python.ruff.v1, python.pytest.v1]
+      pytest_outcome: passed
+    - repository_id: healthy-worker
+      message_marker: FROZEN_CONCURRENCY_HEALTHY_WORKER
+      project_path: projects/frozen-concurrency-healthy-worker
+      source_file_count: 24
+      command_profile_ids: [python.ruff.v1, python.pytest.v1]
+      pytest_outcome: passed
+    - repository_id: failed-check
+      message_marker: FROZEN_CONCURRENCY_FAILED_CHECK
+      project_path: projects/frozen-concurrency-failed-check
+      source_file_count: 24
+      command_profile_ids: [python.ruff.v1, python.pytest.v1]
+      pytest_outcome: failed
+  bundled_runtime_directory: python-command-runtime
+  bundled_runtime_digest: 486ae41dac2a697a792a1ab2584fe66a768bb7ba3b9e695a16ae8ec6fb03dd4c
+  workbench_concurrency: 2
+  expected_peak_command_concurrency: 2
+  expected_installed_process_generations: 2
+  expected_graceful_handoff_count: 1
+  expected_success_count: 2
+  expected_failed_count: 1
+  expected_total_attempt_count: 7
+  expected_total_resultref_count: 7
+  expected_passed_result_count: 5
+  expected_failed_result_count: 2
+  pytest_delay_seconds: 3
+  poll_interval_ms: 250
+  completion_timeout_seconds: 600
+  terminal_observation_seconds: 5
+  max_seed_advances: 24
+  fairness_first_wave: all_repositories_before_any_second_profile
+  bounded_command_retry: true
+  automatic_workbench_after_restart: true
+  production_fake_provider_unsupported: true
+  no_automatic_replay: true
