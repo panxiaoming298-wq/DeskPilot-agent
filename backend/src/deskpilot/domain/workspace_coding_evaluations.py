@@ -568,3 +568,95 @@ class WorkspaceCodingGoldenFrozenConcurrencySuite(BaseModel):
     version: Literal[1] = 1
     frozen_command_recovery_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     scenario: WorkspaceCodingFrozenConcurrencyScenario
+
+
+class WorkspaceCodingFrozenConcurrencyKillScenario(BaseModel):
+    """Installed concurrent kill with a claimed-only unknown fault domain."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    frozen_concurrency_scenario_id: str = Field(
+        pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$"
+    )
+    repositories: tuple[WorkspaceCodingFrozenConcurrencyRepository, ...] = Field(
+        min_length=3,
+        max_length=3,
+    )
+    bundled_runtime_directory: Literal["python-command-runtime"]
+    bundled_runtime_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    workbench_concurrency: Literal[2] = 2
+    expected_peak_command_concurrency: Literal[2] = 2
+    expected_installed_process_generations: Literal[2] = 2
+    expected_external_kill_count: Literal[1] = 1
+    expected_restart_count: Literal[1] = 1
+    expected_unknown_task_count: Literal[2] = 2
+    expected_success_count: Literal[1] = 1
+    expected_total_attempt_count: Literal[6] = 6
+    expected_verified_resultref_count: Literal[4] = 4
+    expected_unknown_attempt_count: Literal[2] = 2
+    claim_ttl_seconds: Literal[5] = 5
+    pytest_delay_seconds: int = Field(ge=5, le=30)
+    poll_interval_ms: int = Field(ge=100, le=1_000)
+    completion_timeout_seconds: int = Field(ge=120, le=900)
+    terminal_observation_seconds: int = Field(ge=5, le=60)
+    max_seed_advances: int = Field(ge=8, le=60)
+    fairness_first_wave: Literal[
+        "all_repositories_before_any_second_profile"
+    ] = "all_repositories_before_any_second_profile"
+    fault_domain: Literal["claimed_tasks_only"] = "claimed_tasks_only"
+    automatic_workbench_after_restart: Literal[True] = True
+    production_fake_provider_unsupported: Literal[True] = True
+    no_automatic_replay: Literal[True] = True
+
+    @model_validator(mode="after")
+    def exact_installed_concurrent_kill_matrix(self) -> Self:
+        for field_name, values in (
+            ("repository IDs", tuple(item.repository_id for item in self.repositories)),
+            ("message markers", tuple(item.message_marker for item in self.repositories)),
+            ("project paths", tuple(item.project_path for item in self.repositories)),
+        ):
+            if len(set(values)) != len(values):
+                raise ValueError(f"Frozen concurrent kill {field_name} must be unique")
+        if any(item.pytest_outcome != "passed" for item in self.repositories):
+            raise ValueError("Frozen concurrent kill repositories must all be healthy")
+        if self.expected_installed_process_generations != (
+            self.expected_external_kill_count + 1
+        ):
+            raise ValueError(
+                "Frozen concurrent kill generations must exactly follow external kills"
+            )
+        if self.expected_unknown_task_count != self.workbench_concurrency:
+            raise ValueError(
+                "Frozen concurrent kill must isolate unknown outcomes to claimed tasks"
+            )
+        if self.expected_unknown_task_count + self.expected_success_count != len(
+            self.repositories
+        ):
+            raise ValueError("Frozen concurrent kill terminal tasks are not exhaustive")
+        expected_attempts = sum(
+            len(item.command_profile_ids) for item in self.repositories
+        )
+        if self.expected_total_attempt_count != expected_attempts:
+            raise ValueError("Frozen concurrent kill attempt count crossed its fixed plans")
+        if (
+            self.expected_verified_resultref_count
+            + self.expected_unknown_attempt_count
+            != expected_attempts
+        ):
+            raise ValueError(
+                "Frozen concurrent kill attempt outcomes are not exhaustive"
+            )
+        return self
+
+
+class WorkspaceCodingGoldenFrozenConcurrencyKillSuite(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[
+        "deskpilot.workspace-coding-frozen-concurrency-kill-suite.v1"
+    ]
+    suite_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    version: Literal[1] = 1
+    frozen_concurrency_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scenario: WorkspaceCodingFrozenConcurrencyKillScenario

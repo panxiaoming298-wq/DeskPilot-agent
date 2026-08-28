@@ -12,6 +12,7 @@ from deskpilot.domain.workspace_coding_evaluations import (
     WorkspaceCodingGoldenConcurrencySuite,
     WorkspaceCodingGoldenFrozenCommandRecoverySuite,
     WorkspaceCodingGoldenFrozenCommandTaskSuite,
+    WorkspaceCodingGoldenFrozenConcurrencyKillSuite,
     WorkspaceCodingGoldenFrozenConcurrencySuite,
     WorkspaceCodingGoldenFrozenReleaseSoakSuite,
     WorkspaceCodingGoldenResilienceSuite,
@@ -79,6 +80,13 @@ class WorkspaceCodingGoldenFrozenConcurrencySuiteBundle:
     suite: WorkspaceCodingGoldenFrozenConcurrencySuite
     suite_digest: str
     frozen_command_recovery: WorkspaceCodingGoldenFrozenCommandRecoverySuiteBundle
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceCodingGoldenFrozenConcurrencyKillSuiteBundle:
+    suite: WorkspaceCodingGoldenFrozenConcurrencyKillSuite
+    suite_digest: str
+    frozen_concurrency: WorkspaceCodingGoldenFrozenConcurrencySuiteBundle
 
 
 def _read_strict_yaml(suite_path: Path) -> object:
@@ -500,4 +508,88 @@ class WorkspaceCodingGoldenFrozenConcurrencySuiteLoader:
             suite=suite,
             suite_digest=sha256_digest(suite.model_dump(mode="json")),
             frozen_command_recovery=recovery,
+        )
+
+
+class WorkspaceCodingGoldenFrozenConcurrencyKillSuiteLoader:
+    """Bind a claimed-only installed kill to the exact fair concurrency cohort."""
+
+    def __init__(
+        self,
+        suite_path: Path | None = None,
+        *,
+        frozen_concurrency_loader: WorkspaceCodingGoldenFrozenConcurrencySuiteLoader
+        | None = None,
+    ) -> None:
+        self._suite_path = suite_path or (
+            Path(__file__).parents[1]
+            / "evaluations"
+            / "workspace_coding_frozen_concurrency_kill_v1.yaml"
+        )
+        self._frozen_concurrency_loader = (
+            frozen_concurrency_loader
+            or WorkspaceCodingGoldenFrozenConcurrencySuiteLoader()
+        )
+
+    def load(self) -> WorkspaceCodingGoldenFrozenConcurrencyKillSuiteBundle:
+        concurrency = self._frozen_concurrency_loader.load()
+        try:
+            suite = WorkspaceCodingGoldenFrozenConcurrencyKillSuite.model_validate(
+                _read_strict_yaml(self._suite_path)
+            )
+        except WorkspaceCodingEvaluationError:
+            raise
+        except ValidationError as error:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen concurrency kill suite failed strict validation"
+            ) from error
+        scenario = suite.scenario
+        bound = concurrency.suite.scenario
+        if suite.frozen_concurrency_suite_digest != concurrency.suite_digest:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen concurrency kill crossed its concurrency digest"
+            )
+        repository_contract = tuple(
+            (
+                item.repository_id,
+                item.message_marker,
+                item.project_path,
+                item.source_file_count,
+                item.command_profile_ids,
+            )
+            for item in scenario.repositories
+        )
+        bound_repository_contract = tuple(
+            (
+                item.repository_id,
+                item.message_marker,
+                item.project_path,
+                item.source_file_count,
+                item.command_profile_ids,
+            )
+            for item in bound.repositories
+        )
+        if (
+            scenario.frozen_concurrency_scenario_id != bound.scenario_id
+            or repository_contract != bound_repository_contract
+            or scenario.bundled_runtime_directory != bound.bundled_runtime_directory
+            or scenario.bundled_runtime_digest != bound.bundled_runtime_digest
+            or scenario.workbench_concurrency != bound.workbench_concurrency
+            or scenario.expected_peak_command_concurrency
+            != bound.expected_peak_command_concurrency
+            or scenario.fairness_first_wave != bound.fairness_first_wave
+            or scenario.automatic_workbench_after_restart
+            != bound.automatic_workbench_after_restart
+            or scenario.production_fake_provider_unsupported
+            != bound.production_fake_provider_unsupported
+            or scenario.no_automatic_replay != bound.no_automatic_replay
+        ):
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen concurrency kill crossed "
+                "its concurrency safety boundary"
+            )
+        return WorkspaceCodingGoldenFrozenConcurrencyKillSuiteBundle(
+            suite=suite,
+            suite_digest=sha256_digest(suite.model_dump(mode="json")),
+            frozen_concurrency=concurrency,
         )

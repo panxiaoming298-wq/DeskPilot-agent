@@ -1,5 +1,6 @@
 param(
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$OnlyConcurrentKill
 )
 
 $ErrorActionPreference = "Stop"
@@ -108,8 +109,12 @@ try {
             "sidecar::tests::frozen_installed_supervisor_survives_two_external_kills_within_resource_caps",
             "sidecar::tests::frozen_installed_command_task_keeps_resultref_and_never_replays_unknown",
             "sidecar::tests::frozen_installed_command_task_recovers_between_steps_and_delivers",
-            "sidecar::tests::frozen_installed_three_task_concurrency_is_fair_and_failure_isolated"
+            "sidecar::tests::frozen_installed_three_task_concurrency_is_fair_and_failure_isolated",
+            "sidecar::tests::frozen_installed_concurrent_kill_isolated_to_claimed_tasks"
         )
+        if ($OnlyConcurrentKill) {
+            $testNames = @($testNames[-1])
+        }
         foreach ($testName in $testNames) {
             & cargo test --lib $testName -- --ignored --exact --nocapture
             if ($LASTEXITCODE -ne 0) {
