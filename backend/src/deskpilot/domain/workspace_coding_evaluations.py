@@ -306,3 +306,55 @@ class WorkspaceCodingGoldenConcurrencySuite(BaseModel):
     version: Literal[1] = 1
     sidecar_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     scenario: WorkspaceCodingConcurrencyScenario
+
+
+class WorkspaceCodingFrozenReleaseSoakScenario(BaseModel):
+    """Installed-artifact supervisor canary; it does not replay coding tasks."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    concurrency_scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    installer_name: Literal["DeskPilot_0.1.0_x64-setup.exe"]
+    desktop_executable_name: Literal["deskpilot.exe"]
+    sidecar_executable_name: Literal["deskpilot-backend-sidecar.exe"]
+    observation_seconds_per_generation: int = Field(ge=30, le=300)
+    poll_interval_ms: int = Field(ge=500, le=2_000)
+    expected_external_kill_count: Literal[2] = 2
+    expected_restart_count: Literal[2] = 2
+    expected_process_generations: Literal[3] = 3
+    supervisor_restart_budget: Literal[3] = 3
+    max_process_tree_working_set_mib: int = Field(ge=128, le=1_024)
+    max_process_tree_handle_count: int = Field(ge=256, le=4_096)
+    max_process_tree_count: int = Field(ge=1, le=8)
+    health_only_canary: Literal[True] = True
+    replays_command_tasks: Literal[False] = False
+    no_automatic_replay: Literal[True] = True
+
+    @model_validator(mode="after")
+    def exact_release_observation_matrix(self) -> Self:
+        if self.observation_seconds_per_generation * 1_000 % self.poll_interval_ms:
+            raise ValueError("Frozen release observation must contain complete polling intervals")
+        total_samples = (
+            self.observation_seconds_per_generation
+            * self.expected_process_generations
+            * 1_000
+            // self.poll_interval_ms
+        )
+        if total_samples < 60:
+            raise ValueError("Frozen release observation requires at least sixty samples")
+        if self.expected_restart_count > self.supervisor_restart_budget:
+            raise ValueError("Frozen release restart count exceeded the supervisor budget")
+        if self.expected_process_generations != self.expected_external_kill_count + 1:
+            raise ValueError("Frozen release generations must exactly follow external kills")
+        return self
+
+
+class WorkspaceCodingGoldenFrozenReleaseSoakSuite(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-coding-frozen-release-soak-suite.v1"]
+    suite_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    version: Literal[1] = 1
+    concurrency_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scenario: WorkspaceCodingFrozenReleaseSoakScenario

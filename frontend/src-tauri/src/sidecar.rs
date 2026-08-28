@@ -48,6 +48,8 @@ pub struct SidecarLaunchSpec {
     arguments: Vec<OsString>,
     #[cfg(test)]
     environment: Vec<(OsString, OsString)>,
+    #[cfg(test)]
+    output_path: Option<PathBuf>,
 }
 
 impl SidecarLaunchSpec {
@@ -65,6 +67,8 @@ impl SidecarLaunchSpec {
             arguments: Vec::new(),
             #[cfg(test)]
             environment: Vec::new(),
+            #[cfg(test)]
+            output_path: None,
         })
     }
 }
@@ -237,6 +241,13 @@ fn spawn_sidecar(spec: &SidecarLaunchSpec) -> std::io::Result<Child> {
 
     #[cfg(test)]
     {
+        if let Some(output_path) = &spec.output_path {
+            let output = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(output_path)?;
+            command.stdout(output.try_clone()?).stderr(output);
+        }
         command.args(&spec.arguments);
         for (key, value) in &spec.environment {
             command.env(key, value);
@@ -283,6 +294,8 @@ fn terminate_process_tree(child: &mut Child) {
 mod tests {
     use super::{SidecarLaunchSpec, SidecarStatus, SidecarSupervisor, MAX_RESTARTS, SIDECAR_NAME};
     use serde_json::{json, Value};
+    #[cfg(windows)]
+    use std::collections::HashSet;
     use std::{
         ffi::OsString,
         fs,
@@ -294,9 +307,34 @@ mod tests {
         thread,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
+    #[cfg(windows)]
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE},
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                TH32CS_SNAPPROCESS,
+            },
+            ProcessStatus::{
+                K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+            },
+            Threading::{
+                GetProcessHandleCount, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+            },
+        },
+    };
 
     const TEST_TOKEN: &str = "stage116b-sidecar-token-0000000000";
     const TEST_ORIGIN: &str = "http://stage116b-sidecar.local";
+
+    #[cfg(windows)]
+    #[derive(Clone, Copy, Debug)]
+    struct ProcessResourceSample {
+        tree_working_set_bytes: usize,
+        tree_private_bytes: usize,
+        tree_handle_count: u32,
+        process_tree_count: usize,
+    }
 
     fn wait_until<T>(timeout: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
         let deadline = Instant::now() + timeout;
@@ -404,6 +442,27 @@ mod tests {
         serde_json::from_slice(&output.stdout).expect("parse sidecar soak suite")
     }
 
+    #[cfg(windows)]
+    fn load_frozen_release_scenario(python: &Path, backend_root: &Path) -> Value {
+        let script = concat!(
+            "from deskpilot.application.workspace_coding_evaluation import ",
+            "WorkspaceCodingGoldenFrozenReleaseSoakSuiteLoader; ",
+            "print(WorkspaceCodingGoldenFrozenReleaseSoakSuiteLoader().load()",
+            ".suite.model_dump_json())"
+        );
+        let output = Command::new(python)
+            .current_dir(backend_root)
+            .args(["-c", script])
+            .output()
+            .expect("load frozen release soak suite");
+        assert!(
+            output.status.success(),
+            "frozen release suite loading failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("parse frozen release soak suite")
+    }
+
     fn read_string_list(path: &Path) -> Vec<String> {
         if !path.exists() {
             return Vec::new();
@@ -482,6 +541,225 @@ mod tests {
                 SidecarStatus::Running { process_id } if *process_id != except => Some(*process_id),
                 _ => None,
             })
+    }
+
+    #[cfg(windows)]
+    fn latest_unseen_running_pid(
+        statuses: &Arc<Mutex<Vec<SidecarStatus>>>,
+        seen: &[u32],
+    ) -> Option<u32> {
+        statuses
+            .lock()
+            .expect("sidecar statuses poisoned")
+            .iter()
+            .rev()
+            .find_map(|status| match status {
+                SidecarStatus::Running { process_id } if !seen.contains(process_id) => {
+                    Some(*process_id)
+                }
+                _ => None,
+            })
+    }
+
+    #[cfg(windows)]
+    fn process_snapshot() -> Result<Vec<(u32, u32)>, String> {
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(format!(
+                "process snapshot failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if unsafe { Process32FirstW(snapshot, &mut entry) } == 0 {
+            let error = unsafe { GetLastError() };
+            unsafe {
+                CloseHandle(snapshot);
+            }
+            return Err(format!(
+                "process enumeration failed to start: {}",
+                std::io::Error::from_raw_os_error(error as i32)
+            ));
+        }
+        let mut processes = Vec::new();
+        loop {
+            processes.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            if unsafe { Process32NextW(snapshot, &mut entry) } != 0 {
+                continue;
+            }
+            let error = unsafe { GetLastError() };
+            unsafe {
+                CloseHandle(snapshot);
+            }
+            if error != ERROR_NO_MORE_FILES {
+                return Err(format!(
+                    "process enumeration failed: {}",
+                    std::io::Error::from_raw_os_error(error as i32)
+                ));
+            }
+            return Ok(processes);
+        }
+    }
+
+    #[cfg(windows)]
+    fn process_tree_process_ids(root_process_id: u32) -> Result<HashSet<u32>, String> {
+        let processes = process_snapshot()?;
+        let mut tree = HashSet::from([root_process_id]);
+        loop {
+            let before = tree.len();
+            for (process_id, parent_process_id) in &processes {
+                if tree.contains(parent_process_id) {
+                    tree.insert(*process_id);
+                }
+            }
+            if tree.len() == before {
+                return Ok(tree);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn process_is_listed(process_id: u32) -> Result<bool, String> {
+        Ok(process_snapshot()?
+            .iter()
+            .any(|(candidate, _)| *candidate == process_id))
+    }
+
+    #[cfg(windows)]
+    fn sample_one_process_resources(process_id: u32) -> Result<(usize, usize, u32), String> {
+        let process =
+            unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, process_id) };
+        if process.is_null() {
+            return Err(format!(
+                "open process {process_id} failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut memory = PROCESS_MEMORY_COUNTERS_EX {
+            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            ..Default::default()
+        };
+        let memory_ok = unsafe {
+            K32GetProcessMemoryInfo(
+                process,
+                (&raw mut memory).cast::<PROCESS_MEMORY_COUNTERS>(),
+                memory.cb,
+            )
+        } != 0;
+        let mut handle_count = 0;
+        let handles_ok = unsafe { GetProcessHandleCount(process, &mut handle_count) } != 0;
+        unsafe {
+            CloseHandle(process);
+        }
+        if !memory_ok || !handles_ok {
+            return Err(format!(
+                "resource query for process {process_id} failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok((memory.WorkingSetSize, memory.PrivateUsage, handle_count))
+    }
+
+    #[cfg(windows)]
+    fn sample_process_tree_resources(
+        root_process_id: u32,
+    ) -> Result<(ProcessResourceSample, HashSet<u32>), String> {
+        let process_ids = process_tree_process_ids(root_process_id)?;
+        let mut tree_working_set_bytes = 0usize;
+        let mut tree_private_bytes = 0usize;
+        let mut tree_handle_count = 0u32;
+        for process_id in &process_ids {
+            let (working_set_bytes, private_bytes, handle_count) =
+                sample_one_process_resources(*process_id)?;
+            tree_working_set_bytes = tree_working_set_bytes.saturating_add(working_set_bytes);
+            tree_private_bytes = tree_private_bytes.saturating_add(private_bytes);
+            tree_handle_count = tree_handle_count.saturating_add(handle_count);
+        }
+        Ok((
+            ProcessResourceSample {
+                tree_working_set_bytes,
+                tree_private_bytes,
+                tree_handle_count,
+                process_tree_count: process_ids.len(),
+            },
+            process_ids,
+        ))
+    }
+
+    #[cfg(windows)]
+    fn observe_frozen_resource_window(
+        process_id: u32,
+        observation_seconds: u64,
+        poll_interval_ms: u64,
+        max_working_set_bytes: usize,
+        max_handle_count: u32,
+        max_tree_processes: usize,
+    ) -> (ProcessResourceSample, HashSet<u32>) {
+        let samples = observation_seconds * 1_000 / poll_interval_ms;
+        let started = Instant::now();
+        let mut maximum = ProcessResourceSample {
+            tree_working_set_bytes: 0,
+            tree_private_bytes: 0,
+            tree_handle_count: 0,
+            process_tree_count: 0,
+        };
+        let mut observed_process_ids = HashSet::new();
+        for _ in 0..samples {
+            let (status, health) = request_json(8000, "GET", "/api/v1/health", None)
+                .expect("installed frozen sidecar health probe");
+            assert_eq!(status, 200, "unexpected frozen health response: {health}");
+            let (sample, process_ids) = sample_process_tree_resources(process_id)
+                .expect("sample installed frozen sidecar resources");
+            observed_process_ids.extend(process_ids);
+            maximum.tree_working_set_bytes = maximum
+                .tree_working_set_bytes
+                .max(sample.tree_working_set_bytes);
+            maximum.tree_private_bytes = maximum.tree_private_bytes.max(sample.tree_private_bytes);
+            maximum.tree_handle_count = maximum.tree_handle_count.max(sample.tree_handle_count);
+            maximum.process_tree_count = maximum.process_tree_count.max(sample.process_tree_count);
+            assert!(
+                sample.tree_working_set_bytes <= max_working_set_bytes,
+                "frozen sidecar working set exceeded its release cap: {sample:?}"
+            );
+            assert!(
+                sample.tree_handle_count <= max_handle_count,
+                "frozen sidecar handle count exceeded its release cap: {sample:?}"
+            );
+            assert!(
+                sample.process_tree_count <= max_tree_processes,
+                "frozen sidecar process tree exceeded its release cap: {sample:?}"
+            );
+            thread::sleep(Duration::from_millis(poll_interval_ms));
+        }
+        assert!(started.elapsed() >= Duration::from_secs(observation_seconds));
+        (maximum, observed_process_ids)
+    }
+
+    #[cfg(windows)]
+    fn wait_frozen_healthy(statuses: &Arc<Mutex<Vec<SidecarStatus>>>, output_path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            if request_json(8000, "GET", "/api/v1/health", None)
+                .is_ok_and(|(status, _)| status == 200)
+            {
+                return;
+            }
+            let snapshot = statuses.lock().expect("sidecar statuses poisoned").clone();
+            if snapshot
+                .iter()
+                .any(|status| matches!(status, SidecarStatus::Failed { .. }))
+            {
+                let output = fs::read_to_string(output_path).unwrap_or_default();
+                panic!("installed frozen sidecar failed before health: {snapshot:?}\n{output}");
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let snapshot = statuses.lock().expect("sidecar statuses poisoned").clone();
+        let output = fs::read_to_string(output_path).unwrap_or_default();
+        panic!("installed frozen sidecar timed out before health: {snapshot:?}\n{output}");
     }
 
     fn kill_process_tree(process_id: u32) {
@@ -671,6 +949,7 @@ mod tests {
                 OsString::from("tests.fixtures.workspace_command_fault_server"),
             ],
             environment,
+            output_path: None,
         };
         let statuses = Arc::new(Mutex::new(Vec::new()));
         let observed_statuses = Arc::clone(&statuses);
@@ -789,5 +1068,216 @@ mod tests {
             .any(|status| matches!(status, SidecarStatus::Failed { .. })));
         assert_eq!(status_snapshot.last(), Some(&SidecarStatus::Stopped));
         fs::remove_dir_all(root).expect("remove sidecar soak directory");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "explicit frozen NSIS release soak; run through scripts/run-frozen-release-soak.ps1"]
+    fn frozen_installed_supervisor_survives_two_external_kills_within_resource_caps() {
+        assert_eq!(
+            std::env::var("DESKPILOT_RUN_FROZEN_RELEASE_SOAK").as_deref(),
+            Ok("1"),
+            "the frozen release soak requires its explicit opt-in wrapper"
+        );
+        let install_root = PathBuf::from(
+            std::env::var_os("DESKPILOT_FROZEN_RELEASE_INSTALL_ROOT")
+                .expect("installed frozen release root"),
+        )
+        .canonicalize()
+        .expect("canonicalize installed frozen release root");
+        let manifest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let backend_root = manifest_root
+            .join("..")
+            .join("..")
+            .join("backend")
+            .canonicalize()
+            .expect("resolve backend root");
+        let python = backend_root
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe");
+        assert!(python.is_file(), "backend virtual environment is required");
+        let suite = load_frozen_release_scenario(&python, &backend_root);
+        let scenario = &suite["scenario"];
+        let desktop = install_root.join(
+            scenario["desktop_executable_name"]
+                .as_str()
+                .expect("desktop executable name"),
+        );
+        let expected_sidecar = install_root.join(
+            scenario["sidecar_executable_name"]
+                .as_str()
+                .expect("sidecar executable name"),
+        );
+        assert!(desktop.is_file(), "installed desktop executable is missing");
+        assert!(
+            expected_sidecar.is_file(),
+            "installed frozen sidecar is missing"
+        );
+        TcpListener::bind(("127.0.0.1", 8000))
+            .expect("the production frozen sidecar port 8000 must be free");
+
+        let observation_seconds = scenario["observation_seconds_per_generation"]
+            .as_u64()
+            .expect("frozen observation seconds");
+        let poll_interval_ms = scenario["poll_interval_ms"]
+            .as_u64()
+            .expect("frozen observation interval");
+        let max_working_set_bytes = scenario["max_process_tree_working_set_mib"]
+            .as_u64()
+            .expect("frozen working set cap") as usize
+            * 1024
+            * 1024;
+        let max_handle_count = scenario["max_process_tree_handle_count"]
+            .as_u64()
+            .expect("frozen handle cap") as u32;
+        let max_tree_processes = scenario["max_process_tree_count"]
+            .as_u64()
+            .expect("frozen process-tree cap") as usize;
+        assert_eq!(
+            scenario["supervisor_restart_budget"].as_u64(),
+            Some(u64::from(MAX_RESTARTS))
+        );
+        assert_eq!(scenario["health_only_canary"], true);
+        assert_eq!(scenario["replays_command_tasks"], false);
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "deskpilot-frozen-release-soak-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let artifact_root = root.join("artifacts");
+        let workspace_root = root.join("workspaces");
+        fs::create_dir_all(&app_data).expect("create frozen release app data");
+        fs::create_dir_all(&artifact_root).expect("create frozen release artifact root");
+        fs::create_dir_all(&workspace_root).expect("create frozen release workspace root");
+        let output_path = app_data.join("sidecar-supervisor.log");
+        let mut spec = SidecarLaunchSpec::resolve(&desktop, &app_data)
+            .expect("resolve the exact installed sibling sidecar");
+        assert_eq!(spec.executable, expected_sidecar);
+        spec.output_path = Some(output_path.clone());
+        spec.environment = test_environment(&[
+            (
+                "DESKPILOT_DATABASE_URL",
+                format!(
+                    "sqlite+aiosqlite:///{}",
+                    root.join("frozen-release.db")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                ),
+            ),
+            (
+                "DESKPILOT_ARTIFACT_WORKSPACE_ROOT",
+                artifact_root.to_string_lossy().into_owned(),
+            ),
+            (
+                "DESKPILOT_CONVERSATION_WORKSPACE_ROOT",
+                workspace_root.to_string_lossy().into_owned(),
+            ),
+            ("DESKPILOT_SESSION_TOKEN", TEST_TOKEN.to_owned()),
+            ("DESKPILOT_CORS_ORIGINS", format!("[\"{TEST_ORIGIN}\"]")),
+            (
+                "DESKPILOT_RUNNER_COMMIT_RECEIPT_DATABASE_PATH",
+                root.join("receipts.db").to_string_lossy().into_owned(),
+            ),
+            (
+                "DESKPILOT_RUNNER_WORKER_RUNTIME_ROOT",
+                root.join("worker-runtime").to_string_lossy().into_owned(),
+            ),
+            (
+                "DESKPILOT_RUNNER_APPCONTAINER_PROFILE_JOURNAL_PATH",
+                root.join("appcontainer-profiles.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            (
+                "DESKPILOT_MODEL_GATEWAY_POLICY",
+                "{\"provider_pricing\":[{\"provider_id\":\"fake-local\"}]}".to_owned(),
+            ),
+            ("PYTHONUTF8", "1".to_owned()),
+        ]);
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let observed_statuses = Arc::clone(&statuses);
+        let supervisor = SidecarSupervisor::start(
+            Some(spec),
+            Arc::new(move |status| {
+                observed_statuses
+                    .lock()
+                    .expect("sidecar statuses poisoned")
+                    .push(status);
+            }),
+        );
+
+        let mut running_pids = Vec::new();
+        let mut maxima = Vec::new();
+        let mut observed_process_ids = HashSet::new();
+        for generation in 0..scenario["expected_process_generations"]
+            .as_u64()
+            .expect("frozen process generations")
+        {
+            let process_id = wait_until(Duration::from_secs(60), || {
+                latest_unseen_running_pid(&statuses, &running_pids)
+            });
+            running_pids.push(process_id);
+            wait_frozen_healthy(&statuses, &output_path);
+            let (maximum, generation_process_ids) = observe_frozen_resource_window(
+                process_id,
+                observation_seconds,
+                poll_interval_ms,
+                max_working_set_bytes,
+                max_handle_count,
+                max_tree_processes,
+            );
+            maxima.push(maximum);
+            observed_process_ids.extend(generation_process_ids);
+            if generation
+                < scenario["expected_external_kill_count"]
+                    .as_u64()
+                    .expect("external kill count")
+            {
+                kill_process_tree(process_id);
+            }
+        }
+
+        supervisor.shutdown();
+        wait_until(Duration::from_secs(15), || {
+            request_json(8000, "GET", "/api/v1/health", None)
+                .is_err()
+                .then_some(())
+        });
+        for process_id in &observed_process_ids {
+            wait_until(Duration::from_secs(15), || {
+                process_is_listed(*process_id)
+                    .ok()
+                    .filter(|listed| !listed)
+                    .map(|_| ())
+            });
+        }
+        let status_snapshot = statuses.lock().expect("sidecar statuses poisoned").clone();
+        assert_eq!(
+            running_pids.len(),
+            scenario["expected_process_generations"]
+                .as_u64()
+                .expect("expected process generations") as usize
+        );
+        assert_eq!(
+            status_snapshot
+                .iter()
+                .filter(|status| matches!(status, SidecarStatus::Backoff { .. }))
+                .count(),
+            scenario["expected_restart_count"]
+                .as_u64()
+                .expect("expected restart count") as usize
+        );
+        assert!(!status_snapshot
+            .iter()
+            .any(|status| matches!(status, SidecarStatus::Failed { .. })));
+        assert_eq!(status_snapshot.last(), Some(&SidecarStatus::Stopped));
+        println!("frozen release resource maxima: {maxima:?}");
+        fs::remove_dir_all(root).expect("remove frozen release soak directory");
     }
 }

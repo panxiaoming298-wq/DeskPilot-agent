@@ -1,0 +1,64 @@
+name: Phase 116B frozen release soak
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-116b-frozen-release-soak-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  installed-frozen-sidecar-soak:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          python-version: "3.12.13"
+          working-directory: backend
+          enable-cache: true
+      - uses: pnpm/setup@v2
+        with:
+          version: 11.19.0
+          runtime: node@24.19.0
+          cache: true
+          cache-dependency-path: frontend/pnpm-lock.yaml
+          package-json-file: frontend/package.json
+          install: false
+      - name: Install frozen dependencies
+        run: |
+          Set-Location backend
+          uv lock --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv sync --frozen --all-extras
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Set-Location ..\frontend
+          pnpm install --frozen-lockfile
+      - name: Validate frozen release contracts and Rust gate
+        run: |
+          Set-Location backend
+          uv run pytest tests/test_stage116b_workspace_coding_frozen_release_soak.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run ruff check src tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run mypy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Set-Location ..\frontend\src-tauri
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build, install, soak, and uninstall exact NSIS artifacts
+        run: .\frontend\scripts\run-frozen-release-soak.ps1
+      - name: Verify workspace whitespace
+        run: git diff --check

@@ -1,0 +1,22 @@
+schema_version: deskpilot.workspace-coding-frozen-release-soak-suite.v1
+suite_id: deskpilot.workspace-coding-frozen-release-soak-canary
+version: 1
+concurrency_suite_digest: 37a034a68948e180c6cc76192158a9f7be5649a57d2e7e0cd0f8591ab2f1804a
+scenario:
+  scenario_id: installed.sidecar.supervisor.resource-soak
+  concurrency_scenario_id: mixed.command-plan.fair-concurrency
+  installer_name: DeskPilot_0.1.0_x64-setup.exe
+  desktop_executable_name: deskpilot.exe
+  sidecar_executable_name: deskpilot-backend-sidecar.exe
+  observation_seconds_per_generation: 30
+  poll_interval_ms: 1000
+  expected_external_kill_count: 2
+  expected_restart_count: 2
+  expected_process_generations: 3
+  supervisor_restart_budget: 3
+  max_process_tree_working_set_mib: 512
+  max_process_tree_handle_count: 2048
+  max_process_tree_count: 6
+  health_only_canary: true
+  replays_command_tasks: false
+  no_automatic_replay: true

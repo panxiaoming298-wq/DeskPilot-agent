@@ -10,6 +10,7 @@ from yaml.tokens import AliasToken, AnchorToken
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.workspace_coding_evaluations import (
     WorkspaceCodingGoldenConcurrencySuite,
+    WorkspaceCodingGoldenFrozenReleaseSoakSuite,
     WorkspaceCodingGoldenResilienceSuite,
     WorkspaceCodingGoldenSidecarSoakSuite,
     WorkspaceCodingGoldenSuite,
@@ -47,6 +48,13 @@ class WorkspaceCodingGoldenConcurrencySuiteBundle:
     suite: WorkspaceCodingGoldenConcurrencySuite
     suite_digest: str
     sidecar: WorkspaceCodingGoldenSidecarSoakSuiteBundle
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceCodingGoldenFrozenReleaseSoakSuiteBundle:
+    suite: WorkspaceCodingGoldenFrozenReleaseSoakSuite
+    suite_digest: str
+    concurrency: WorkspaceCodingGoldenConcurrencySuiteBundle
 
 
 def _read_strict_yaml(suite_path: Path) -> object:
@@ -243,4 +251,55 @@ class WorkspaceCodingGoldenConcurrencySuiteLoader:
             suite=suite,
             suite_digest=sha256_digest(suite.model_dump(mode="json")),
             sidecar=sidecar,
+        )
+
+
+class WorkspaceCodingGoldenFrozenReleaseSoakSuiteLoader:
+    """Bind an opt-in installed-artifact canary to the exact concurrency suite."""
+
+    def __init__(
+        self,
+        suite_path: Path | None = None,
+        *,
+        concurrency_loader: WorkspaceCodingGoldenConcurrencySuiteLoader | None = None,
+    ) -> None:
+        self._suite_path = suite_path or (
+            Path(__file__).parents[1]
+            / "evaluations"
+            / "workspace_coding_frozen_release_soak_v1.yaml"
+        )
+        self._concurrency_loader = (
+            concurrency_loader or WorkspaceCodingGoldenConcurrencySuiteLoader()
+        )
+
+    def load(self) -> WorkspaceCodingGoldenFrozenReleaseSoakSuiteBundle:
+        concurrency = self._concurrency_loader.load()
+        try:
+            suite = WorkspaceCodingGoldenFrozenReleaseSoakSuite.model_validate(
+                _read_strict_yaml(self._suite_path)
+            )
+        except WorkspaceCodingEvaluationError:
+            raise
+        except ValidationError as error:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen release soak suite failed strict validation"
+            ) from error
+        scenario = suite.scenario
+        bound = concurrency.suite.scenario
+        if suite.concurrency_suite_digest != concurrency.suite_digest:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen release soak suite crossed its concurrency digest"
+            )
+        if (
+            scenario.concurrency_scenario_id != bound.scenario_id
+            or scenario.no_automatic_replay != bound.no_automatic_replay
+        ):
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen release soak scenario crossed "
+                "its concurrency safety contract"
+            )
+        return WorkspaceCodingGoldenFrozenReleaseSoakSuiteBundle(
+            suite=suite,
+            suite_digest=sha256_digest(suite.model_dump(mode="json")),
+            concurrency=concurrency,
         )
