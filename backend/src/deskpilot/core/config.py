@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     workbench_runtime_enabled: bool = True
     workbench_runtime_poll_interval_seconds: float = Field(default=0.05, gt=0, le=60)
     workbench_runtime_claim_ttl_seconds: float = Field(default=30, ge=1, le=3_600)
+    task_loop_capability_claim_ttl_seconds: int = Field(default=30, ge=5, le=600)
     workbench_runtime_concurrency: int = Field(default=4, ge=1, le=32)
     workbench_runtime_max_failures: int = Field(default=5, ge=1, le=100)
     workbench_runtime_retry_base_seconds: float = Field(default=0.1, ge=0, le=60)
@@ -120,6 +121,10 @@ class Settings(BaseSettings):
     runner_worker_runtime_root: str = Field(
         default="./data/worker-runtime",
         min_length=1,
+        max_length=32_767,
+    )
+    bundled_python_command_runtime_root: str | None = Field(
+        default=None,
         max_length=32_767,
     )
     node_test_runtime_root: str = Field(

@@ -425,6 +425,9 @@ def create_app(
             or WorkspaceCommandRuntime(
                 resolved_settings.runner_worker_runtime_root,
                 resolved_settings.runner_appcontainer_profile_journal_path,
+                bundled_python_runtime_root=(
+                    resolved_settings.bundled_python_command_runtime_root
+                ),
             )
         )
         agent_model_loop_runtime = AgentModelLoopRuntime(
@@ -570,6 +573,9 @@ def create_app(
             agents=task_loop_agent_runtime,
             artifacts=artifact_delivery_runtime,
             turn_planner=turn_planner_runtime,
+            capability_lease_seconds=(
+                resolved_settings.task_loop_capability_claim_ttl_seconds
+            ),
         )
         task_workbench_service = TaskWorkbenchService(
             database,

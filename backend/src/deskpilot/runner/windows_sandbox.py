@@ -4,6 +4,7 @@ import ctypes
 import msvcrt
 import os
 import shutil
+import stat
 import subprocess
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -679,10 +680,29 @@ def _read_handle(
         destination.append(b"")
 
 
-def _is_reparse_point(path: Path) -> bool:
-    return path.is_symlink() or bool(
-        getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400
+def _is_reparse_point(
+    path: Path,
+    info: os.stat_result | None = None,
+) -> bool:
+    info = info or os.stat(_io_path(path), follow_symlinks=False)
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & 0x400
     )
+
+
+def _io_path(path: Path) -> str:
+    value = str(path.absolute())
+    if value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return f"\\\\?\\UNC\\{value[2:]}"
+    return f"\\\\?\\{value}"
+
+
+def _mirror_walk_error(error: OSError) -> None:
+    raise ProcessIsolationUnavailableError(
+        "AppContainer mirror source is unreadable"
+    ) from error
 
 
 def _mirror_tree(source: Path, target: Path, *, hardlink: bool) -> None:
@@ -695,24 +715,44 @@ def _mirror_tree(source: Path, target: Path, *, hardlink: bool) -> None:
         raise ProcessIsolationUnavailableError(
             "AppContainer runtime mirror must stay on one volume"
         )
-    target.mkdir(parents=True, exist_ok=False)
+    os.makedirs(_io_path(target), exist_ok=False)
     try:
-        for item in sorted(resolved.rglob("*"), key=lambda path: path.as_posix()):
-            if _is_reparse_point(item):
-                raise ProcessIsolationUnavailableError(
-                    "AppContainer mirrors reject links and reparse points"
-                )
-            destination = target.joinpath(*item.relative_to(resolved).parts)
-            if item.is_dir():
-                destination.mkdir(exist_ok=False)
-            elif item.is_file():
-                destination.parent.mkdir(parents=True, exist_ok=True)
+        io_root = _io_path(resolved)
+        for current, directories, files in os.walk(
+            io_root,
+            topdown=True,
+            onerror=_mirror_walk_error,
+            followlinks=False,
+        ):
+            directories.sort()
+            files.sort()
+            relative_value = os.path.relpath(current, io_root)
+            relative_parts = () if relative_value == "." else Path(relative_value).parts
+            for name in directories:
+                item = resolved.joinpath(*relative_parts, name)
+                info = os.stat(_io_path(item), follow_symlinks=False)
+                if _is_reparse_point(item, info):
+                    raise ProcessIsolationUnavailableError(
+                        "AppContainer mirrors reject links and reparse points"
+                    )
+                destination = target.joinpath(*relative_parts, name)
+                os.makedirs(_io_path(destination), exist_ok=False)
+            for name in files:
+                item = resolved.joinpath(*relative_parts, name)
+                info = os.stat(_io_path(item), follow_symlinks=False)
+                if _is_reparse_point(item, info):
+                    raise ProcessIsolationUnavailableError(
+                        "AppContainer mirrors reject links and reparse points"
+                    )
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                destination = target.joinpath(*relative_parts, name)
                 if hardlink:
-                    os.link(item, destination)
+                    os.link(_io_path(item), _io_path(destination))
                 else:
-                    shutil.copyfile(item, destination)
+                    shutil.copyfile(_io_path(item), _io_path(destination))
     except Exception:
-        shutil.rmtree(target, ignore_errors=True)
+        shutil.rmtree(_io_path(target), ignore_errors=True)
         raise
 
 

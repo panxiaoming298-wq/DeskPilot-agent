@@ -4,10 +4,12 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 import stat
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -31,6 +33,7 @@ RUNTIME_ROOT_FILES = (
     "vcruntime140_1.dll",
 )
 REPARSE_POINT_ATTRIBUTE = 0x00000400
+RUNTIME_FILE_IO_WORKERS = min(16, max(4, os.cpu_count() or 4))
 
 
 class WorkerRuntimeError(ProcessIsolationUnavailableError):
@@ -86,6 +89,22 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1_048_576), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _files_match(
+    entries: tuple[tuple[Path, int, str], ...],
+) -> tuple[bool, ...]:
+    """Verify independent runtime files concurrently without weakening hashes."""
+
+    def matches(entry: tuple[Path, int, str]) -> bool:
+        target, size, sha256 = entry
+        try:
+            return _file_stat(target).st_size == size and _hash_file(target) == sha256
+        except OSError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=RUNTIME_FILE_IO_WORKERS) as executor:
+        return tuple(executor.map(matches, entries))
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -262,12 +281,51 @@ def _identity_digest(identity: dict[str, object]) -> str:
 
 def _load_manifest(bundle_root: Path) -> dict[str, object]:
     try:
-        raw = json.loads((bundle_root / "manifest.json").read_text(encoding="utf-8"))
+        with open(_io_path(bundle_root / "manifest.json"), encoding="utf-8") as stream:
+            raw = json.load(stream)
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise WorkerRuntimeIntegrityError("Worker runtime manifest is unreadable") from error
     if not isinstance(raw, dict):
         raise WorkerRuntimeIntegrityError("Worker runtime manifest has an invalid shape")
     return raw
+
+
+def _runtime_tree_files(bundle_root: Path) -> set[PurePosixPath]:
+    """Enumerate one runtime tree without the Windows legacy MAX_PATH limit."""
+
+    actual: set[PurePosixPath] = set()
+    io_root = _io_path(bundle_root)
+
+    def reject_walk_error(error: OSError) -> None:
+        raise WorkerRuntimeIntegrityError(
+            "Worker runtime file set is unreadable"
+        ) from error
+
+    for current, directories, files in os.walk(
+        io_root,
+        topdown=True,
+        onerror=reject_walk_error,
+        followlinks=False,
+    ):
+        relative_current_value = os.path.relpath(current, io_root)
+        relative_current = (
+            PurePosixPath()
+            if relative_current_value == "."
+            else PurePosixPath(relative_current_value.replace("\\", "/"))
+        )
+        for name in (*directories, *files):
+            relative = relative_current / name
+            target = bundle_root.joinpath(*relative.parts)
+            if _is_reparse_point(target):
+                raise WorkerRuntimeIntegrityError(
+                    "Worker runtime contains a reparse point"
+                )
+        for name in files:
+            relative = relative_current / name
+            target = bundle_root.joinpath(*relative.parts)
+            if _is_file(target) and relative != PurePosixPath("manifest.json"):
+                actual.add(relative)
+    return actual
 
 
 def _verify_bundle(
@@ -291,30 +349,30 @@ def _verify_bundle(
     ):
         raise WorkerRuntimeIntegrityError("Worker runtime manifest does not match its sources")
     expected_paths = {PurePosixPath(str(item["path"])) for item in expected_files}
-    actual_paths: set[PurePosixPath] = set()
-    for path in bundle_root.rglob("*"):
-        relative = PurePosixPath(path.relative_to(bundle_root).as_posix())
-        if _is_reparse_point(path):
-            raise WorkerRuntimeIntegrityError("Worker runtime contains a reparse point")
-        if _is_file(path) and relative != PurePosixPath("manifest.json"):
-            actual_paths.add(relative)
+    actual_paths = _runtime_tree_files(bundle_root)
     if actual_paths != expected_paths:
         raise WorkerRuntimeIntegrityError("Worker runtime file set does not match its manifest")
-    for source in sources:
-        target = bundle_root.joinpath(*source.destination.parts)
-        try:
-            size = _file_stat(target).st_size
-        except OSError as error:
-            raise WorkerRuntimeIntegrityError("Worker runtime file is unavailable") from error
-        if size != source.size or _hash_file(target) != source.sha256:
+    entries = tuple(
+        (
+            bundle_root.joinpath(*source.destination.parts),
+            source.size,
+            source.sha256,
+        )
+        for source in sources
+    )
+    for source, matches in zip(sources, _files_match(entries), strict=True):
+        if not matches:
             raise WorkerRuntimeIntegrityError(
                 f"Worker runtime file failed verification: {source.destination}"
             )
     return str(manifest["capability_sid"])
 
 
-def load_worker_runtime(bundle_root: Path) -> WorkerRuntimeBundle:
-    """Verify a published bundle without trusting its manifest paths or digest."""
+def _load_worker_runtime(
+    bundle_root: Path,
+    *,
+    require_digest_directory: bool,
+) -> WorkerRuntimeBundle:
     resolved = bundle_root.resolve(strict=True)
     manifest = _load_manifest(resolved)
     files = manifest.get("files")
@@ -328,7 +386,7 @@ def load_worker_runtime(bundle_root: Path) -> WorkerRuntimeBundle:
         or not isinstance(digest, str)
         or len(digest) != 64
         or not isinstance(capability_sid, str)
-        or resolved.name != digest
+        or (require_digest_directory and resolved.name != digest)
         or _identity_digest(_manifest_identity(manifest)) != digest
     ):
         raise WorkerRuntimeIntegrityError("Published worker runtime manifest is invalid")
@@ -354,18 +412,15 @@ def load_worker_runtime(bundle_root: Path) -> WorkerRuntimeBundle:
             raise WorkerRuntimeIntegrityError("Published worker runtime hash is invalid")
         expected[relative] = (size, sha256)
 
-    actual: set[PurePosixPath] = set()
-    for path in resolved.rglob("*"):
-        relative = PurePosixPath(path.relative_to(resolved).as_posix())
-        if _is_reparse_point(path):
-            raise WorkerRuntimeIntegrityError("Published worker runtime has a reparse point")
-        if _is_file(path) and relative != PurePosixPath("manifest.json"):
-            actual.add(relative)
+    actual = _runtime_tree_files(resolved)
     if actual != set(expected):
         raise WorkerRuntimeIntegrityError("Published worker runtime file set is invalid")
-    for relative, (size, sha256) in expected.items():
-        target = resolved.joinpath(*relative.parts)
-        if _file_stat(target).st_size != size or _hash_file(target) != sha256:
+    entries = tuple(
+        (resolved.joinpath(*relative.parts), size, sha256)
+        for relative, (size, sha256) in expected.items()
+    )
+    for relative, matches in zip(expected, _files_match(entries), strict=True):
+        if not matches:
             raise WorkerRuntimeIntegrityError(
                 f"Published worker runtime file failed verification: {relative}"
             )
@@ -377,6 +432,128 @@ def load_worker_runtime(bundle_root: Path) -> WorkerRuntimeBundle:
         capability_name=WORKER_RUNTIME_CAPABILITY,
         capability_sid=capability_sid,
     )
+
+
+def load_worker_runtime(bundle_root: Path) -> WorkerRuntimeBundle:
+    """Verify a published bundle without trusting its manifest paths or digest."""
+
+    return _load_worker_runtime(bundle_root, require_digest_directory=True)
+
+
+def load_bundled_worker_runtime(resource_root: Path) -> WorkerRuntimeBundle:
+    """Load exactly one content-addressed bundle from an installed resource root."""
+
+    try:
+        resolved = resource_root.resolve(strict=True)
+        children = tuple(resolved.iterdir())
+    except OSError as error:
+        raise WorkerRuntimeIntegrityError(
+            "Bundled worker runtime resource is unreadable"
+        ) from error
+    if _is_reparse_point(resolved) or not resolved.is_dir():
+        raise WorkerRuntimeIntegrityError(
+            "Bundled worker runtime resource must be one regular directory"
+        )
+    if (
+        len(children) != 1
+        or not children[0].is_dir()
+        or _is_reparse_point(children[0])
+        or re.fullmatch(r"[0-9a-f]{64}", children[0].name) is None
+    ):
+        raise WorkerRuntimeIntegrityError(
+            "Bundled worker runtime resource must contain exactly one digest directory"
+        )
+    return load_worker_runtime(children[0])
+
+
+def _copy_worker_runtime_tree(source: WorkerRuntimeBundle, destination: Path) -> None:
+    if destination.exists():
+        raise WorkerRuntimeError("Worker runtime copy destination already exists")
+    manifest = _load_manifest(source.root)
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        raise WorkerRuntimeIntegrityError("Worker runtime manifest file set is invalid")
+    copy_entries: list[tuple[Path, Path]] = []
+    for item in files:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise WorkerRuntimeIntegrityError("Worker runtime manifest entry is invalid")
+        relative = PurePosixPath(item["path"])
+        source_file = source.root.joinpath(*relative.parts)
+        destination_file = destination.joinpath(*relative.parts)
+        copy_entries.append((source_file, destination_file))
+    os.makedirs(_io_path(destination), exist_ok=False)
+    parents = sorted(
+        {destination_file.parent for _, destination_file in copy_entries},
+        key=lambda path: (len(path.parts), str(path)),
+    )
+    for parent in parents:
+        os.makedirs(_io_path(parent), exist_ok=True)
+
+    def copy_file(entry: tuple[Path, Path]) -> None:
+        source_file, destination_file = entry
+        shutil.copyfile(_io_path(source_file), _io_path(destination_file))
+
+    with ThreadPoolExecutor(max_workers=RUNTIME_FILE_IO_WORKERS) as executor:
+        tuple(executor.map(copy_file, copy_entries))
+    shutil.copyfile(
+        _io_path(source.root / "manifest.json"),
+        _io_path(destination / "manifest.json"),
+    )
+
+
+def copy_worker_runtime_bundle(
+    source: WorkerRuntimeBundle,
+    destination: Path,
+) -> WorkerRuntimeBundle:
+    """Copy one verified bundle with extended-length Windows file operations."""
+
+    if destination.name != source.digest:
+        raise WorkerRuntimeError("Worker runtime copy destination lost its digest name")
+    _copy_worker_runtime_tree(source, destination)
+    return load_worker_runtime(destination)
+
+
+def publish_bundled_worker_runtime(
+    source: WorkerRuntimeBundle,
+    runtime_root: Path,
+) -> WorkerRuntimeBundle:
+    """Copy one verified installed bundle into a protected mutable runtime root."""
+
+    if os.name != "nt":
+        raise WorkerRuntimeError("AppContainer worker runtime requires Windows")
+    from deskpilot.runner.windows_acl import protect_worker_runtime
+
+    root = runtime_root.resolve(strict=False)
+    bundle_root = root / source.digest
+    with _RuntimeBuildLock(root / ".build.lock"):
+        if bundle_root.exists():
+            loaded = load_worker_runtime(bundle_root)
+        else:
+            staging = root / f".staging-{uuid4().hex}"
+            try:
+                _copy_worker_runtime_tree(source, staging)
+                projected_sid = protect_worker_runtime(
+                    staging,
+                    WORKER_RUNTIME_CAPABILITY,
+                )
+                if projected_sid != source.capability_sid:
+                    raise WorkerRuntimeIntegrityError(
+                        "Bundled worker capability SID changed during publication"
+                    )
+                os.replace(staging, bundle_root)
+                loaded = load_worker_runtime(bundle_root)
+            except Exception:
+                _remove_staging(staging, root)
+                raise
+        projected_sid = protect_worker_runtime(
+            loaded.root,
+            WORKER_RUNTIME_CAPABILITY,
+        )
+        if projected_sid != loaded.capability_sid:
+            raise WorkerRuntimeIntegrityError(
+                "Published worker capability SID changed during verification"
+            )
+        return loaded
 
 
 class _RuntimeBuildLock:

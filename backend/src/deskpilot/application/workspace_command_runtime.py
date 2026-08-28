@@ -10,7 +10,7 @@ import subprocess
 import sysconfig
 import time
 from pathlib import Path
-from threading import Event, Timer
+from threading import Event, Lock, Timer
 from uuid import uuid4
 
 from deskpilot.application.workspace_python_test_runtime import PYTEST_RUNTIME_DISTRIBUTIONS
@@ -32,7 +32,13 @@ from deskpilot.runner.process_isolation import (
     ProcessLauncher,
     create_process_launcher,
 )
-from deskpilot.runner.worker_runtime import WorkerRuntimeError, prepare_worker_runtime
+from deskpilot.runner.worker_runtime import (
+    WorkerRuntimeBundle,
+    WorkerRuntimeError,
+    load_bundled_worker_runtime,
+    prepare_worker_runtime,
+    publish_bundled_worker_runtime,
+)
 
 COMMAND_RUNTIME_DISTRIBUTIONS = tuple(
     dict.fromkeys(
@@ -115,6 +121,7 @@ class WorkspaceCommandRuntime:
         node_executable: str | None = None,
         pnpm_executable: str | None = None,
         pnpm_store_path: str | None = None,
+        bundled_python_runtime_root: str | None = None,
     ) -> None:
         self._runtime_root = Path(runtime_root)
         self._snapshot_root = self._runtime_root / ".command-snapshots"
@@ -128,13 +135,35 @@ class WorkspaceCommandRuntime:
             self._pnpm_executable,
             pnpm_store_path,
         )
+        self._bundled_python_runtime: WorkerRuntimeBundle | None = (
+            load_bundled_worker_runtime(Path(bundled_python_runtime_root))
+            if bundled_python_runtime_root is not None
+            else None
+        )
+        self._bundled_python_publish_lock = Lock()
+        self._published_bundled_python_runtime: WorkerRuntimeBundle | None = None
+        if (
+            self._bundled_python_runtime is not None
+            and not (self._bundled_python_runtime.root / "ruff.exe").is_file()
+        ):
+            raise WorkerRuntimeError(
+                "Bundled Python Command Profile resource is missing Ruff"
+            )
 
     @property
     def enabled_profile_ids(self) -> frozenset[CommandProfileId]:
         if os.name != "nt":
             return frozenset()
         result: set[CommandProfileId] = set()
-        if self._ruff_executable() is not None:
+        if self._bundled_python_runtime is not None:
+            result.update(
+                {
+                    "python.pytest.v1",
+                    "python.ruff.v1",
+                    "python.mypy.v1",
+                }
+            )
+        elif self._ruff_executable() is not None:
             required = ("pytest", "mypy", "ruff")
             try:
                 for name in required:
@@ -267,16 +296,33 @@ class WorkspaceCommandRuntime:
         snapshot_root: Path,
         cancellation: Event | None,
     ) -> WorkspaceCommandRead:
-        ruff_executable = self._ruff_executable()
-        if ruff_executable is None:
-            raise WorkspaceCommandUnavailableError("Ruff executable is unavailable")
         try:
-            bundle = prepare_worker_runtime(
-                self._runtime_root / "python-command-runtime",
-                distributions=COMMAND_RUNTIME_DISTRIBUTIONS,
-                include_deskpilot=False,
-                additional_executables=(ruff_executable,),
-            )
+            if self._bundled_python_runtime is not None:
+                with self._bundled_python_publish_lock:
+                    if self._published_bundled_python_runtime is None:
+                        self._published_bundled_python_runtime = (
+                            publish_bundled_worker_runtime(
+                                self._bundled_python_runtime,
+                                self._runtime_root / "python-command-runtime",
+                            )
+                        )
+                    bundle = self._published_bundled_python_runtime
+                ruff_executable = bundle.root / "ruff.exe"
+                if not ruff_executable.is_file():
+                    raise WorkspaceCommandUnavailableError(
+                        "Bundled Ruff executable is unavailable"
+                    )
+            else:
+                local_ruff_executable = self._ruff_executable()
+                if local_ruff_executable is None:
+                    raise WorkspaceCommandUnavailableError("Ruff executable is unavailable")
+                ruff_executable = local_ruff_executable
+                bundle = prepare_worker_runtime(
+                    self._runtime_root / "python-command-runtime",
+                    distributions=COMMAND_RUNTIME_DISTRIBUTIONS,
+                    include_deskpilot=False,
+                    additional_executables=(ruff_executable,),
+                )
             policy = IsolationPolicy(
                 require_windows_sandbox=True,
                 require_network_isolation=True,

@@ -1,5 +1,13 @@
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from 'node:fs'
 import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -36,6 +44,8 @@ const target = join(binariesDir, `deskpilot-backend-sidecar-${host}${extension}`
 const buildRoot = join(tauriRoot, 'target', 'sidecar-build')
 const distRoot = join(buildRoot, 'dist')
 const built = join(distRoot, `deskpilot-backend-sidecar${extension}`)
+const commandRuntimeCacheRoot = join(buildRoot, 'python-command-runtime-cache')
+const commandRuntimePackageRoot = join(tauriRoot, 'rt')
 const inputs = [
   sourceRoot,
   join(backendRoot, 'pyproject.toml'),
@@ -45,6 +55,40 @@ const inputs = [
 const newestInput = Math.max(...inputs.map(latestMtime))
 
 mkdirSync(binariesDir, { recursive: true })
+mkdirSync(commandRuntimeCacheRoot, { recursive: true })
+const commandRuntimeOutput = execFileSync(python, [
+  '-m',
+  'deskpilot.runner.python_command_runtime_resource',
+  commandRuntimeCacheRoot,
+], {
+  cwd: backendRoot,
+  encoding: 'utf8',
+  env: {
+    ...process.env,
+    PYTHONNOUSERSITE: '1',
+  },
+})
+const commandRuntime = JSON.parse(commandRuntimeOutput.trim())
+const commandRuntimeBundle = resolve(commandRuntime.bundle_root)
+if (
+  !/^[0-9a-f]{64}$/.test(commandRuntime.digest)
+  || commandRuntimeBundle !== join(commandRuntimeCacheRoot, commandRuntime.digest)
+  || !existsSync(join(commandRuntimeBundle, 'manifest.json'))
+) {
+  throw new Error('The Python Command Profile resource escaped its content-addressed build root')
+}
+if (dirname(commandRuntimePackageRoot) !== tauriRoot || commandRuntimePackageRoot !== join(tauriRoot, 'rt')) {
+  throw new Error('Refusing to replace the fixed Python Command Profile package mirror')
+}
+rmSync(commandRuntimePackageRoot, { recursive: true, force: true })
+mkdirSync(commandRuntimePackageRoot, { recursive: false })
+cpSync(
+  commandRuntimeBundle,
+  join(commandRuntimePackageRoot, commandRuntime.digest),
+  { recursive: true, errorOnExist: true },
+)
+process.stdout.write(`Packaged Python Command Profile resource: ${commandRuntime.digest}\n`)
+
 if (existsSync(target) && statSync(target).mtimeMs >= newestInput) {
   process.stdout.write(`DeskPilot sidecar is current: ${target}\n`)
   process.exit(0)

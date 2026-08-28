@@ -10,8 +10,11 @@ from deskpilot.application.runner_client import RunnerClient
 from deskpilot.runner.process_isolation import IsolationPolicy, create_process_launcher
 from deskpilot.runner.worker_runtime import (
     WorkerRuntimeIntegrityError,
+    copy_worker_runtime_bundle,
+    load_bundled_worker_runtime,
     load_worker_runtime,
     prepare_worker_runtime,
+    publish_bundled_worker_runtime,
 )
 from deskpilot.tools import create_builtin_registry
 from deskpilot.tools.computer import DISK_USAGE_CONTRACT
@@ -163,6 +166,73 @@ def test_published_bundle_tampering_fails_closed(
     finally:
         target.write_bytes(original)
     load_worker_runtime(bundle_root)
+
+
+def test_installed_bundle_is_strictly_loaded_and_republished_with_appcontainer_acl(
+    appcontainer_bundle: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    bundle_root, journal = appcontainer_bundle
+    resource_root = tmp_path / f"installed-resource-{'x' * 55}"
+    resource_root.mkdir()
+    copy_worker_runtime_bundle(
+        load_worker_runtime(bundle_root),
+        resource_root / bundle_root.name,
+    )
+
+    source = load_bundled_worker_runtime(resource_root)
+    published = publish_bundled_worker_runtime(
+        source,
+        tmp_path / f"runtime-{'x' * 55}",
+    )
+    deep_runtime_file = (
+        published.root
+        / "Lib"
+        / "site-packages"
+        / "deskpilot"
+        / "infrastructure"
+        / "migrations"
+        / "versions"
+        / "0015_database_claims_and_dag_scheduler.py"
+    )
+    assert len(str(deep_runtime_file)) > 260
+    launcher = create_process_launcher(
+        IsolationPolicy(
+            require_windows_sandbox=True,
+            require_network_isolation=True,
+            worker_runtime_bundle=str(published.root),
+            appcontainer_profile_journal_path=str(journal),
+        )
+    )
+    result = launcher.run(
+        command=(str(published.executable), "-I", "-c", "print('bundled-ready')"),
+        input_frame=b"",
+        cancellation=Event(),
+    )
+
+    assert source.digest == published.digest
+    assert result.return_code == 0
+    assert result.stdout.strip() == b"bundled-ready"
+
+
+def test_installed_bundle_rejects_extra_or_tampered_resources(
+    appcontainer_bundle: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    bundle_root, _ = appcontainer_bundle
+    resource_root = tmp_path / "installed-resource"
+    copied = resource_root / bundle_root.name
+    resource_root.mkdir()
+    copy_worker_runtime_bundle(load_worker_runtime(bundle_root), copied)
+    (resource_root / "unexpected.txt").write_text("not authorized", encoding="utf-8")
+    with pytest.raises(WorkerRuntimeIntegrityError, match="exactly one digest"):
+        load_bundled_worker_runtime(resource_root)
+
+    (resource_root / "unexpected.txt").unlink()
+    target = copied / "python.exe"
+    target.write_bytes(target.read_bytes() + b"tampered")
+    with pytest.raises(WorkerRuntimeIntegrityError, match="failed verification"):
+        load_bundled_worker_runtime(resource_root)
 
 
 @pytest.mark.asyncio

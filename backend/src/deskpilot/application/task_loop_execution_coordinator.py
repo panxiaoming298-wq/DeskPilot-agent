@@ -144,7 +144,10 @@ class TaskLoopExecutionCoordinator:
         artifacts: ArtifactDeliveryRuntime | None = None,
         turn_planner: TurnPlannerRuntime | None = None,
         reducer: TaskLoopReducer | None = None,
+        capability_lease_seconds: int = 600,
     ) -> None:
+        if not 5 <= capability_lease_seconds <= 600:
+            raise ValueError("Capability lease must be between 5 and 600 seconds")
         self._database = database
         self._activation = activation
         self._capabilities = capabilities
@@ -152,6 +155,7 @@ class TaskLoopExecutionCoordinator:
         self._artifacts = artifacts
         self._turn_planner = turn_planner
         self._reducer = reducer or TaskLoopReducer()
+        self._capability_lease_seconds = capability_lease_seconds
 
     async def cancel_for_amendment(
         self,
@@ -285,15 +289,10 @@ class TaskLoopExecutionCoordinator:
             raise TaskLoopExecutionCoordinatorUnavailableError(
                 "Capability Task Loop runtime is unavailable"
             )
-        # Capability execution may include a cold, isolated runtime build before
-        # the bounded command itself starts.  Use the same maximum claim window
-        # as other synchronous Workbench effects so a valid long-running result
-        # can be fenced into persistence instead of becoming outcome-unknown at
-        # the legacy 60-second default boundary.
         outcome = await self._capabilities.run_once(
             task_id,
             owner_id,
-            lease_seconds=600,
+            lease_seconds=self._capability_lease_seconds,
         )
         if outcome is None or outcome.node_id != command.node_id:
             raise TaskLoopExecutionCoordinatorProofRejectedError(

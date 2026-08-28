@@ -1,0 +1,24 @@
+schema_version: deskpilot.workspace-coding-frozen-command-task-suite.v1
+suite_id: deskpilot.workspace-coding-installed-python-command-interruption
+version: 1
+frozen_release_suite_digest: a6c68304b42e51df539ddd1ae1775f10fe4d6b4f0674ced084bdbb24a48b794b
+scenario:
+  scenario_id: installed.python-command.resultref-interruption
+  frozen_release_scenario_id: installed.sidecar.supervisor.resource-soak
+  project_path: projects/frozen-python-command
+  message_marker: FROZEN_PYTHON_COMMAND_TASK
+  command_profile_ids: [python.ruff.v1, python.pytest.v1]
+  bundled_runtime_directory: python-command-runtime
+  bundled_runtime_digest: 486ae41dac2a697a792a1ab2584fe66a768bb7ba3b9e695a16ae8ec6fb03dd4c
+  expected_process_generations: 2
+  expected_external_kill_count: 1
+  expected_restart_count: 1
+  interrupted_step_sequence: 2
+  expected_verified_result_count_before_kill: 1
+  expected_unknown_error_code: CAPABILITY_OUTCOME_UNKNOWN_AFTER_LEASE
+  expected_isolation_mode: windows_appcontainer
+  claim_ttl_seconds: 5
+  max_advances: 24
+  terminal_observation_seconds: 10
+  production_fake_provider_unsupported: true
+  no_automatic_replay: true

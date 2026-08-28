@@ -44,6 +44,7 @@ impl SidecarStatus {
 pub struct SidecarLaunchSpec {
     executable: PathBuf,
     working_directory: PathBuf,
+    bundled_python_runtime_root: Option<PathBuf>,
     #[cfg(test)]
     arguments: Vec<OsString>,
     #[cfg(test)]
@@ -60,9 +61,14 @@ impl SidecarLaunchSpec {
             SIDECAR_NAME.to_owned()
         };
         let executable = current_executable.parent()?.join(executable_name);
+        let bundled_python_runtime_root =
+            current_executable.parent()?.join("python-command-runtime");
         executable.is_file().then(|| Self {
             executable,
             working_directory: app_data.to_path_buf(),
+            bundled_python_runtime_root: bundled_python_runtime_root
+                .is_dir()
+                .then_some(bundled_python_runtime_root),
             #[cfg(test)]
             arguments: Vec::new(),
             #[cfg(test)]
@@ -238,6 +244,12 @@ fn spawn_sidecar(spec: &SidecarLaunchSpec) -> std::io::Result<Child> {
         .env("DESKPILOT_EVENT_TRANSPORT", "local")
         .env("DESKPILOT_MODEL_ADMISSION_ALLOW", "false")
         .env("DESKPILOT_RESEARCH_RUNTIME_ENABLED", "false");
+    if let Some(resource_root) = &spec.bundled_python_runtime_root {
+        command.env(
+            "DESKPILOT_BUNDLED_PYTHON_COMMAND_RUNTIME_ROOT",
+            resource_root,
+        );
+    }
 
     #[cfg(test)]
     {
@@ -463,6 +475,76 @@ mod tests {
         serde_json::from_slice(&output.stdout).expect("parse frozen release soak suite")
     }
 
+    #[cfg(windows)]
+    fn load_frozen_command_task_scenario(python: &Path, backend_root: &Path) -> Value {
+        let script = concat!(
+            "from deskpilot.application.workspace_coding_evaluation import ",
+            "WorkspaceCodingGoldenFrozenCommandTaskSuiteLoader; ",
+            "print(WorkspaceCodingGoldenFrozenCommandTaskSuiteLoader().load()",
+            ".suite.model_dump_json())"
+        );
+        let output = Command::new(python)
+            .current_dir(backend_root)
+            .args(["-c", script])
+            .output()
+            .expect("load frozen command task suite");
+        assert!(
+            output.status.success(),
+            "frozen command task suite loading failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("parse frozen command task suite")
+    }
+
+    #[cfg(windows)]
+    fn load_frozen_command_database_proof(
+        python: &Path,
+        backend_root: &Path,
+        database_path: &Path,
+        task_id: &str,
+    ) -> Value {
+        let script = concat!(
+            "import json,sqlite3,sys; ",
+            "db=sqlite3.connect(sys.argv[1]); ",
+            "results=db.execute(\"SELECT r.output_manifest,r.result_ref_manifest ",
+            "FROM task_loop_verified_results r JOIN task_loop_executions e ",
+            "ON e.execution_id=r.execution_id WHERE e.task_id=? ORDER BY r.created_at\",",
+            "(sys.argv[2],)).fetchall(); ",
+            "attempts=db.execute(\"SELECT a.attempt,a.status,a.error_code ",
+            "FROM task_loop_node_attempts a JOIN task_loop_executions e ",
+            "ON e.execution_id=a.execution_id WHERE e.task_id=? ",
+            "ORDER BY a.created_at\",(sys.argv[2],)).fetchall(); ",
+            "counts={'turn_planner_runs':db.execute(\"SELECT COUNT(*) ",
+            "FROM turn_planner_runs WHERE task_id=?\",(sys.argv[2],)).fetchone()[0],",
+            "'model_planner_drafts':db.execute(\"SELECT COUNT(*) ",
+            "FROM model_planner_drafts WHERE task_id=?\",(sys.argv[2],)).fetchone()[0],",
+            "'command_plan_bindings':db.execute(\"SELECT COUNT(*) ",
+            "FROM workspace_command_plan_bindings WHERE task_id=?\",",
+            "(sys.argv[2],)).fetchone()[0]}; ",
+            "print(json.dumps({'results':[{'output':json.loads(row[0]),",
+            "'result_ref':json.loads(row[1])} for row in results],",
+            "'attempts':[{'attempt':row[0],'status':row[1],",
+            "'error_code':row[2]} for row in attempts],",
+            "'counts':counts},separators=(',',':')))"
+        );
+        let output = Command::new(python)
+            .current_dir(backend_root)
+            .args([
+                OsString::from("-c"),
+                OsString::from(script),
+                database_path.as_os_str().to_owned(),
+                OsString::from(task_id),
+            ])
+            .output()
+            .expect("read frozen command database proof");
+        assert!(
+            output.status.success(),
+            "frozen command database proof failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("parse frozen command database proof")
+    }
+
     fn read_string_list(path: &Path) -> Vec<String> {
         if !path.exists() {
             return Vec::new();
@@ -506,6 +588,44 @@ mod tests {
             "execution_status": workbench["task_loop"]["execution_status"],
             "nodes": nodes,
         })
+    }
+
+    #[cfg(windows)]
+    fn frozen_command_is_running_after_one_verified_result(workbench: &Value) -> bool {
+        let mut nodes = workbench["task_loop"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|node| !node["command_plan_id"].is_null())
+            .collect::<Vec<_>>();
+        nodes.sort_by_key(|node| node["command_step_sequence"].as_u64());
+        nodes.len() == 2
+            && nodes[0]["status"] == "verified"
+            && nodes[0]["verified_result_present"] == true
+            && nodes[0]["attempt_count"] == 1
+            && nodes[1]["status"] == "running"
+            && nodes[1]["attempt_count"] == 1
+            && workbench["task_loop"]["verified_result_count"] == 1
+    }
+
+    #[cfg(windows)]
+    fn frozen_command_is_terminal_unknown(workbench: &Value) -> bool {
+        let mut nodes = workbench["task_loop"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|node| !node["command_plan_id"].is_null())
+            .collect::<Vec<_>>();
+        nodes.sort_by_key(|node| node["command_step_sequence"].as_u64());
+        nodes.len() == 2
+            && workbench["task_loop"]["execution_status"] == "failed"
+            && workbench["task_loop"]["verified_result_count"] == 1
+            && nodes[0]["status"] == "verified"
+            && nodes[0]["verified_result_present"] == true
+            && nodes[0]["attempt_count"] == 1
+            && nodes[1]["status"] == "failed"
+            && nodes[1]["verified_result_present"] == false
+            && nodes[1]["attempt_count"] == 1
     }
 
     fn observe_stable_command_state(
@@ -944,6 +1064,7 @@ mod tests {
         let spec = SidecarLaunchSpec {
             executable: python,
             working_directory: backend_root,
+            bundled_python_runtime_root: None,
             arguments: vec![
                 OsString::from("-m"),
                 OsString::from("tests.fixtures.workspace_command_fault_server"),
@@ -1279,5 +1400,420 @@ mod tests {
         assert_eq!(status_snapshot.last(), Some(&SidecarStatus::Stopped));
         println!("frozen release resource maxima: {maxima:?}");
         fs::remove_dir_all(root).expect("remove frozen release soak directory");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "explicit installed real-Profile interruption; run through scripts/run-frozen-release-soak.ps1"]
+    fn frozen_installed_command_task_keeps_resultref_and_never_replays_unknown() {
+        assert_eq!(
+            std::env::var("DESKPILOT_RUN_FROZEN_RELEASE_SOAK").as_deref(),
+            Ok("1"),
+            "the frozen command task requires its explicit opt-in wrapper"
+        );
+        let install_root = PathBuf::from(
+            std::env::var_os("DESKPILOT_FROZEN_RELEASE_INSTALL_ROOT")
+                .expect("installed frozen release root"),
+        )
+        .canonicalize()
+        .expect("canonicalize installed frozen release root");
+        let manifest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let backend_root = manifest_root
+            .join("..")
+            .join("..")
+            .join("backend")
+            .canonicalize()
+            .expect("resolve backend root");
+        let python = backend_root
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe");
+        assert!(python.is_file(), "backend virtual environment is required");
+        let suite = load_frozen_command_task_scenario(&python, &backend_root);
+        let scenario = &suite["scenario"];
+        assert_eq!(scenario["production_fake_provider_unsupported"], true);
+        assert_eq!(scenario["no_automatic_replay"], true);
+        let desktop = install_root.join("deskpilot.exe");
+        let expected_sidecar = install_root.join("deskpilot-backend-sidecar.exe");
+        let expected_resource = install_root.join(
+            scenario["bundled_runtime_directory"]
+                .as_str()
+                .expect("bundled runtime directory"),
+        );
+        let resource_entries = fs::read_dir(&expected_resource)
+            .expect("read installed Python Command Profile resource")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("enumerate installed Python Command Profile resource");
+        assert_eq!(resource_entries.len(), 1);
+        assert_eq!(
+            resource_entries[0].file_name().to_string_lossy(),
+            scenario["bundled_runtime_digest"]
+                .as_str()
+                .expect("bundled runtime digest")
+        );
+        TcpListener::bind(("127.0.0.1", 8000))
+            .expect("the production frozen sidecar port 8000 must be free");
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "deskpilot-frozen-command-task-{}-{unique}",
+            std::process::id()
+        ));
+        let app_data = root.join("app-data");
+        let artifact_root = root.join("artifacts");
+        let workspace_root = root.join("workspaces");
+        let project = workspace_root.join(
+            scenario["project_path"]
+                .as_str()
+                .expect("frozen command project path"),
+        );
+        let database_path = root.join("frozen-command.db");
+        let database_url = format!(
+            "sqlite+aiosqlite:///{}",
+            database_path.to_string_lossy().replace('\\', "/")
+        );
+        fs::create_dir_all(project.join("src")).expect("create frozen command source root");
+        fs::create_dir_all(project.join("tests")).expect("create frozen command test root");
+        fs::create_dir_all(&artifact_root).expect("create frozen command artifact root");
+        fs::create_dir_all(&app_data).expect("create frozen command app data");
+        fs::write(
+            project.join("src").join("sample.py"),
+            "def add(left: int, right: int) -> int:\n    return left + right\n",
+        )
+        .expect("write frozen command source");
+        fs::write(
+            project.join("tests").join("test_slow.py"),
+            "import time\n\n\ndef test_slow_profile() -> None:\n    time.sleep(60)\n",
+        )
+        .expect("write frozen command slow test");
+
+        let profile_ids = scenario["command_profile_ids"]
+            .as_array()
+            .expect("frozen command profiles")
+            .iter()
+            .map(|item| item.as_str().expect("frozen command profile").to_owned())
+            .collect::<Vec<_>>();
+        let seed_port = free_port();
+        let runtime_control = root.join("seed-workbench-runtime.txt");
+        fs::write(&runtime_control, "false").expect("disable seed Workbench runtime");
+        let provider_calls = root.join("provider-calls.json");
+        let command_calls = root.join("seed-command-calls.json");
+        let command_started = root.join("seed-command-started.txt");
+        let seed_spec = SidecarLaunchSpec {
+            executable: python.clone(),
+            working_directory: backend_root.clone(),
+            bundled_python_runtime_root: None,
+            arguments: vec![
+                OsString::from("-m"),
+                OsString::from("tests.fixtures.workspace_command_fault_server"),
+            ],
+            environment: test_environment(&[
+                ("DESKPILOT_DATABASE_URL", database_url.clone()),
+                (
+                    "DESKPILOT_ARTIFACT_WORKSPACE_ROOT",
+                    artifact_root.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_CONVERSATION_WORKSPACE_ROOT",
+                    workspace_root.to_string_lossy().into_owned(),
+                ),
+                ("DESKPILOT_SESSION_TOKEN", TEST_TOKEN.to_owned()),
+                ("DESKPILOT_CORS_ORIGINS", format!("[\"{TEST_ORIGIN}\"]")),
+                (
+                    "DESKPILOT_RUNNER_COMMIT_RECEIPT_DATABASE_PATH",
+                    root.join("receipts.db").to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_RUNNER_WORKER_RUNTIME_ROOT",
+                    root.join("worker-runtime").to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_RUNNER_APPCONTAINER_PROFILE_JOURNAL_PATH",
+                    root.join("appcontainer-profiles.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                (
+                    "DESKPILOT_MODEL_GATEWAY_POLICY",
+                    "{\"provider_pricing\":[{\"provider_id\":\"fake-local\"}]}".to_owned(),
+                ),
+                ("DESKPILOT_GOLDEN_API_PORT", seed_port.to_string()),
+                (
+                    "DESKPILOT_GOLDEN_COMMAND_PROJECT",
+                    scenario["project_path"]
+                        .as_str()
+                        .expect("seed command project")
+                        .to_owned(),
+                ),
+                ("DESKPILOT_GOLDEN_COMMAND_PROFILES", profile_ids.join(",")),
+                ("DESKPILOT_GOLDEN_COMMAND_FAULT_MODE", "pass".to_owned()),
+                ("DESKPILOT_GOLDEN_PROFILE_DRIFT", "none".to_owned()),
+                (
+                    "DESKPILOT_GOLDEN_COMMAND_CALLS_PATH",
+                    command_calls.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_GOLDEN_PROVIDER_CALLS_PATH",
+                    provider_calls.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_GOLDEN_COMMAND_STARTED_PATH",
+                    command_started.to_string_lossy().into_owned(),
+                ),
+                (
+                    "DESKPILOT_GOLDEN_WORKBENCH_RUNTIME_CONTROL_PATH",
+                    runtime_control.to_string_lossy().into_owned(),
+                ),
+                ("PYTHONUTF8", "1".to_owned()),
+            ]),
+            output_path: None,
+        };
+        let seed_supervisor = SidecarSupervisor::start(Some(seed_spec), Arc::new(|_| {}));
+        wait_healthy(seed_port);
+        let mut ready = expect_json(
+            seed_port,
+            "POST",
+            "/api/v1/conversation-turns",
+            Some(&json!({
+                "message": format!(
+                    "运行 {} 的固定 Ruff 与 pytest 检查 {}",
+                    scenario["project_path"].as_str().expect("message project path"),
+                    scenario["message_marker"].as_str().expect("message marker")
+                )
+            })),
+            201,
+        );
+        let task_id = ready["task"]["task_id"]
+            .as_str()
+            .expect("seeded frozen command task id")
+            .to_owned();
+        for _ in 0..scenario["max_advances"]
+            .as_u64()
+            .expect("frozen command max advances")
+        {
+            if first_command_is_ready(&ready) {
+                break;
+            }
+            ready = expect_json(
+                seed_port,
+                "POST",
+                &format!("/api/v1/tasks/{task_id}/workbench:advance"),
+                None,
+                200,
+            );
+        }
+        assert!(
+            first_command_is_ready(&ready),
+            "seeded frozen command task did not reach ready: {ready}"
+        );
+        assert_eq!(read_string_list(&provider_calls).len(), 1);
+        assert_eq!(read_string_list(&command_calls), Vec::<String>::new());
+        seed_supervisor.shutdown();
+        wait_until(Duration::from_secs(15), || {
+            request_json(seed_port, "GET", "/api/v1/health", None)
+                .is_err()
+                .then_some(())
+        });
+
+        let output_path = app_data.join("sidecar-supervisor.log");
+        let mut spec = SidecarLaunchSpec::resolve(&desktop, &app_data)
+            .expect("resolve installed frozen command sidecar");
+        assert_eq!(spec.executable, expected_sidecar);
+        assert_eq!(
+            spec.bundled_python_runtime_root.as_deref(),
+            Some(expected_resource.as_path())
+        );
+        spec.output_path = Some(output_path.clone());
+        spec.environment = test_environment(&[
+            ("DESKPILOT_DATABASE_URL", database_url),
+            (
+                "DESKPILOT_ARTIFACT_WORKSPACE_ROOT",
+                artifact_root.to_string_lossy().into_owned(),
+            ),
+            (
+                "DESKPILOT_CONVERSATION_WORKSPACE_ROOT",
+                workspace_root.to_string_lossy().into_owned(),
+            ),
+            ("DESKPILOT_SESSION_TOKEN", TEST_TOKEN.to_owned()),
+            ("DESKPILOT_CORS_ORIGINS", format!("[\"{TEST_ORIGIN}\"]")),
+            (
+                "DESKPILOT_RUNNER_COMMIT_RECEIPT_DATABASE_PATH",
+                root.join("receipts.db").to_string_lossy().into_owned(),
+            ),
+            (
+                "DESKPILOT_RUNNER_WORKER_RUNTIME_ROOT",
+                root.join("worker-runtime").to_string_lossy().into_owned(),
+            ),
+            (
+                "DESKPILOT_RUNNER_APPCONTAINER_PROFILE_JOURNAL_PATH",
+                root.join("appcontainer-profiles.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            (
+                "DESKPILOT_MODEL_GATEWAY_POLICY",
+                "{\"provider_pricing\":[{\"provider_id\":\"fake-local\"}]}".to_owned(),
+            ),
+            ("DESKPILOT_WORKBENCH_RUNTIME_ENABLED", "true".to_owned()),
+            (
+                "DESKPILOT_WORKBENCH_RUNTIME_POLL_INTERVAL_SECONDS",
+                "0.01".to_owned(),
+            ),
+            (
+                "DESKPILOT_WORKBENCH_RUNTIME_CLAIM_TTL_SECONDS",
+                scenario["claim_ttl_seconds"]
+                    .as_u64()
+                    .expect("frozen command claim TTL")
+                    .to_string(),
+            ),
+            (
+                "DESKPILOT_TASK_LOOP_CAPABILITY_CLAIM_TTL_SECONDS",
+                scenario["claim_ttl_seconds"]
+                    .as_u64()
+                    .expect("frozen command capability claim TTL")
+                    .to_string(),
+            ),
+            ("DESKPILOT_WORKBENCH_RUNTIME_CONCURRENCY", "1".to_owned()),
+            ("PYTHONUTF8", "1".to_owned()),
+        ]);
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let observed_statuses = Arc::clone(&statuses);
+        let supervisor = SidecarSupervisor::start(
+            Some(spec),
+            Arc::new(move |status| {
+                observed_statuses
+                    .lock()
+                    .expect("frozen command statuses poisoned")
+                    .push(status);
+            }),
+        );
+        let first_pid = wait_until(Duration::from_secs(60), || {
+            latest_unseen_running_pid(&statuses, &[])
+        });
+        wait_frozen_healthy(&statuses, &output_path);
+        let before_kill = wait_until(Duration::from_secs(180), || {
+            request_json(
+                8000,
+                "GET",
+                &format!("/api/v1/tasks/{task_id}/workbench"),
+                None,
+            )
+            .ok()
+            .filter(|(status, workbench)| {
+                *status == 200 && frozen_command_is_running_after_one_verified_result(workbench)
+            })
+            .map(|(_, workbench)| workbench)
+        });
+        let verified_before_kill = durable_command_state(&before_kill);
+        kill_process_tree(first_pid);
+
+        let second_pid = wait_until(Duration::from_secs(60), || {
+            latest_unseen_running_pid(&statuses, &[first_pid])
+        });
+        assert_ne!(first_pid, second_pid);
+        wait_frozen_healthy(&statuses, &output_path);
+        let terminal = wait_until(Duration::from_secs(60), || {
+            request_json(
+                8000,
+                "GET",
+                &format!("/api/v1/tasks/{task_id}/workbench"),
+                None,
+            )
+            .ok()
+            .filter(|(status, workbench)| {
+                *status == 200 && frozen_command_is_terminal_unknown(workbench)
+            })
+            .map(|(_, workbench)| workbench)
+        });
+        let terminal_state = durable_command_state(&terminal);
+        assert_eq!(terminal_state["nodes"][0], verified_before_kill["nodes"][0]);
+        let observation_seconds = scenario["terminal_observation_seconds"]
+            .as_u64()
+            .expect("terminal observation seconds");
+        for _ in 0..observation_seconds * 4 {
+            let observed = expect_json(
+                8000,
+                "GET",
+                &format!("/api/v1/tasks/{task_id}/workbench"),
+                None,
+                200,
+            );
+            assert_eq!(durable_command_state(&observed), terminal_state);
+            thread::sleep(Duration::from_millis(250));
+        }
+
+        supervisor.shutdown();
+        wait_until(Duration::from_secs(15), || {
+            request_json(8000, "GET", "/api/v1/health", None)
+                .is_err()
+                .then_some(())
+        });
+        let status_snapshot = statuses
+            .lock()
+            .expect("frozen command statuses poisoned")
+            .clone();
+        assert_eq!(
+            status_snapshot
+                .iter()
+                .filter(|status| matches!(status, SidecarStatus::Running { .. }))
+                .count(),
+            scenario["expected_process_generations"]
+                .as_u64()
+                .expect("frozen command process generations") as usize
+        );
+        assert_eq!(
+            status_snapshot
+                .iter()
+                .filter(|status| matches!(status, SidecarStatus::Backoff { .. }))
+                .count(),
+            scenario["expected_restart_count"]
+                .as_u64()
+                .expect("frozen command restart count") as usize
+        );
+        assert!(!status_snapshot
+            .iter()
+            .any(|status| matches!(status, SidecarStatus::Failed { .. })));
+        assert_eq!(status_snapshot.last(), Some(&SidecarStatus::Stopped));
+
+        let proof =
+            load_frozen_command_database_proof(&python, &backend_root, &database_path, &task_id);
+        let results = proof["results"].as_array().expect("frozen command results");
+        assert_eq!(results.len(), 1);
+        let output = &results[0]["output"];
+        assert_eq!(output["command_profile_id"], profile_ids[0]);
+        assert_eq!(output["status"], "passed");
+        assert_eq!(
+            output["isolation_mode"],
+            scenario["expected_isolation_mode"]
+        );
+        assert_eq!(output["network_access"], false);
+        assert_eq!(output["temporary_snapshot"], true);
+        assert_eq!(output["snapshot_mutations_discarded"], true);
+        assert_eq!(
+            output["toolchain_digest"],
+            scenario["bundled_runtime_digest"]
+        );
+        assert_eq!(
+            results[0]["result_ref"]["result_digest"],
+            output["result_digest"]
+        );
+        let attempts = proof["attempts"]
+            .as_array()
+            .expect("frozen command attempts");
+        assert_eq!(attempts.len(), 2);
+        assert!(attempts.iter().any(|attempt| {
+            attempt["attempt"] == 1
+                && attempt["status"] == "outcome_unknown"
+                && attempt["error_code"] == scenario["expected_unknown_error_code"]
+        }));
+        assert_eq!(proof["counts"]["turn_planner_runs"], 1);
+        assert_eq!(proof["counts"]["model_planner_drafts"], 1);
+        assert_eq!(proof["counts"]["command_plan_bindings"], 1);
+        assert_eq!(read_string_list(&provider_calls).len(), 1);
+        assert_eq!(read_string_list(&command_calls), Vec::<String>::new());
+        fs::remove_dir_all(root).expect("remove frozen command task directory");
     }
 }

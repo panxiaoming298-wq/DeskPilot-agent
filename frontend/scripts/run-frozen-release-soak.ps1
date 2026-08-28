@@ -38,7 +38,7 @@ if ($installer.Length -le 0) {
 
 $systemTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $soakRoot = [IO.Path]::GetFullPath(
-    (Join-Path $systemTemp ("deskpilot-frozen-release-" + [Guid]::NewGuid().ToString("N")))
+    (Join-Path $systemTemp ("dpf-" + [Guid]::NewGuid().ToString("N").Substring(0, 8)))
 )
 if (-not $soakRoot.StartsWith($systemTemp, [StringComparison]::OrdinalIgnoreCase)) {
     throw "The frozen release soak root escaped the system temporary directory."
@@ -64,6 +64,7 @@ try {
     $desktopPath = Join-Path $installRoot "deskpilot.exe"
     $sidecarPath = Join-Path $installRoot "deskpilot-backend-sidecar.exe"
     $uninstallerPath = Join-Path $installRoot "uninstall.exe"
+    $commandRuntimeRoot = Join-Path $installRoot "python-command-runtime"
     foreach ($requiredPath in @($desktopPath, $sidecarPath, $uninstallerPath)) {
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
             throw "The installed NSIS layout is incomplete: $requiredPath"
@@ -72,6 +73,20 @@ try {
             throw "The installed NSIS artifact is empty: $requiredPath"
         }
     }
+    if (-not (Test-Path -LiteralPath $commandRuntimeRoot -PathType Container)) {
+        throw "The installed Python Command Profile resource is missing."
+    }
+    $commandRuntimeEntries = @(
+        Get-ChildItem -LiteralPath $commandRuntimeRoot -Force
+    )
+    if (
+        $commandRuntimeEntries.Count -ne 1 -or
+        -not $commandRuntimeEntries[0].PSIsContainer -or
+        $commandRuntimeEntries[0].Name -notmatch "^[0-9a-f]{64}$"
+    ) {
+        throw "The installed Python Command Profile resource is not one exact digest directory."
+    }
+    $commandRuntimeDigest = $commandRuntimeEntries[0].Name
 
     $installerHash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     $desktopHash = (Get-FileHash -LiteralPath $desktopPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -81,6 +96,7 @@ try {
         installer_sha256 = $installerHash
         desktop_sha256 = $desktopHash
         sidecar_sha256 = $sidecarHash
+        python_command_runtime_digest = $commandRuntimeDigest
         install_root = $installRoot
     } | ConvertTo-Json
 
@@ -88,11 +104,15 @@ try {
     $env:DESKPILOT_FROZEN_RELEASE_INSTALL_ROOT = $installRoot
     Push-Location $tauriRoot
     try {
-        & cargo test --lib `
-            "sidecar::tests::frozen_installed_supervisor_survives_two_external_kills_within_resource_caps" `
-            -- --ignored --exact --nocapture
-        if ($LASTEXITCODE -ne 0) {
-            throw "The installed frozen release soak failed with exit code $LASTEXITCODE."
+        $testNames = @(
+            "sidecar::tests::frozen_installed_supervisor_survives_two_external_kills_within_resource_caps",
+            "sidecar::tests::frozen_installed_command_task_keeps_resultref_and_never_replays_unknown"
+        )
+        foreach ($testName in $testNames) {
+            & cargo test --lib $testName -- --ignored --exact --nocapture
+            if ($LASTEXITCODE -ne 0) {
+                throw "The installed frozen release test $testName failed with exit code $LASTEXITCODE."
+            }
         }
     }
     finally {

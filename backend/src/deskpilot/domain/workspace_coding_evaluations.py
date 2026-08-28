@@ -358,3 +358,55 @@ class WorkspaceCodingGoldenFrozenReleaseSoakSuite(BaseModel):
     version: Literal[1] = 1
     concurrency_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     scenario: WorkspaceCodingFrozenReleaseSoakScenario
+
+
+class WorkspaceCodingFrozenCommandTaskScenario(BaseModel):
+    """Installed real-Profile task interrupted after one verified ResultRef."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    frozen_release_scenario_id: str = Field(
+        pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$"
+    )
+    project_path: Literal["projects/frozen-python-command"]
+    message_marker: Literal["FROZEN_PYTHON_COMMAND_TASK"]
+    command_profile_ids: tuple[CommandProfileId, ...]
+    bundled_runtime_directory: Literal["python-command-runtime"]
+    bundled_runtime_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_process_generations: Literal[2] = 2
+    expected_external_kill_count: Literal[1] = 1
+    expected_restart_count: Literal[1] = 1
+    interrupted_step_sequence: Literal[2] = 2
+    expected_verified_result_count_before_kill: Literal[1] = 1
+    expected_unknown_error_code: Literal["CAPABILITY_OUTCOME_UNKNOWN_AFTER_LEASE"] = (
+        "CAPABILITY_OUTCOME_UNKNOWN_AFTER_LEASE"
+    )
+    expected_isolation_mode: Literal["windows_appcontainer"] = "windows_appcontainer"
+    claim_ttl_seconds: Literal[5] = 5
+    max_advances: int = Field(default=24, ge=8, le=60)
+    terminal_observation_seconds: int = Field(default=10, ge=5, le=60)
+    production_fake_provider_unsupported: Literal[True] = True
+    no_automatic_replay: Literal[True] = True
+
+    @model_validator(mode="after")
+    def exact_installed_command_matrix(self) -> Self:
+        if self.command_profile_ids != ("python.ruff.v1", "python.pytest.v1"):
+            raise ValueError(
+                "Frozen command task must run exact Ruff then pytest Profiles"
+            )
+        if self.interrupted_step_sequence != len(self.command_profile_ids):
+            raise ValueError("Frozen command interruption must target the final step")
+        if self.expected_process_generations != self.expected_external_kill_count + 1:
+            raise ValueError("Frozen command generations must exactly follow external kills")
+        return self
+
+
+class WorkspaceCodingGoldenFrozenCommandTaskSuite(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deskpilot.workspace-coding-frozen-command-task-suite.v1"]
+    suite_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,79}$")
+    version: Literal[1] = 1
+    frozen_release_suite_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scenario: WorkspaceCodingFrozenCommandTaskScenario

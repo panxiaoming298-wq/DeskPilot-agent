@@ -9,11 +9,12 @@ strict, persistent ``TaskLoopVerifiedResultRecord``.
 
 from __future__ import annotations
 
+import asyncio
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
@@ -102,6 +103,7 @@ _ACTIVE_RUN_STATUSES = frozenset(
 )
 _TERMINAL_ATTEMPT_STATUSES = frozenset({"verified", "failed", "outcome_unknown", "cancelled"})
 _ERROR_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,99}$")
+_T = TypeVar("_T")
 
 
 class CapabilityExecutionRuntimeError(RuntimeError):
@@ -239,9 +241,13 @@ class CapabilityExecutionRuntime:
                         is CapabilityApprovalRequirement.EXACT_CONFIRMATION_DIGEST
                     ):
                         if work.approval is None:
-                            raw_preview = await self._engine.prepare_approval(
-                                work.context,
-                                work.bound_input,
+                            raw_preview = await self._execute_with_claim_heartbeat(
+                                work,
+                                lease_seconds,
+                                self._engine.prepare_approval(
+                                    work.context,
+                                    work.bound_input,
+                                ),
                             )
                             approval_model = work.registration.approval_model
                             if approval_model is None:
@@ -259,15 +265,23 @@ class CapabilityExecutionRuntime:
                                     "Approval preview Schema is not registered for persistence"
                                 )
                             return await self._persist_approval(work, preview)
-                        candidate = await self._engine.execute_approved_candidate(
-                            work.context,
-                            work.bound_input,
-                            work.approval.preview_manifest,
+                        candidate = await self._execute_with_claim_heartbeat(
+                            work,
+                            lease_seconds,
+                            self._engine.execute_approved_candidate(
+                                work.context,
+                                work.bound_input,
+                                work.approval.preview_manifest,
+                            ),
                         )
                     else:
-                        candidate = await self._engine.execute_candidate(
-                            work.context,
-                            work.bound_input,
+                        candidate = await self._execute_with_claim_heartbeat(
+                            work,
+                            lease_seconds,
+                            self._engine.execute_candidate(
+                                work.context,
+                                work.bound_input,
+                            ),
                         )
                 except Exception as error:
                     return await self._settle_execution_error(work, error)
@@ -326,6 +340,102 @@ class CapabilityExecutionRuntime:
                 plan,
                 now=now,
             )
+
+    async def _execute_with_claim_heartbeat(
+        self,
+        work: _CapabilityWork,
+        lease_seconds: int,
+        operation: Awaitable[_T],
+    ) -> _T:
+        stop = asyncio.Event()
+        heartbeat = asyncio.create_task(
+            self._renew_running_claim_loop(
+                work,
+                lease_seconds=lease_seconds,
+                stop=stop,
+            )
+        )
+        try:
+            result = await operation
+        except BaseException:
+            stop.set()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            raise
+        stop.set()
+        heartbeat_result = (await asyncio.gather(heartbeat, return_exceptions=True))[0]
+        if isinstance(heartbeat_result, BaseException):
+            raise CapabilityExecutionRuntimeStaleFenceError(
+                "Capability claim heartbeat lost its exact persistence fence"
+            ) from heartbeat_result
+        return result
+
+    async def _renew_running_claim_loop(
+        self,
+        work: _CapabilityWork,
+        *,
+        lease_seconds: int,
+        stop: asyncio.Event,
+    ) -> None:
+        interval = max(0.1, lease_seconds / 3)
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                await self._renew_running_claim(work, lease_seconds=lease_seconds)
+
+    async def _renew_running_claim(
+        self,
+        work: _CapabilityWork,
+        *,
+        lease_seconds: int,
+    ) -> None:
+        now = self._now()
+        expires_at = now + timedelta(seconds=lease_seconds)
+        async with self._database.session() as session, session.begin():
+            attempt_record = await session.scalar(
+                select(TaskLoopNodeAttemptRecord)
+                .where(TaskLoopNodeAttemptRecord.attempt_id == work.attempt_id)
+                .with_for_update()
+            )
+            node = await session.scalar(
+                select(TaskExecutionNodeRecord)
+                .where(TaskExecutionNodeRecord.node_id == work.plan_node.node_id)
+                .with_for_update()
+            )
+            if attempt_record is None or node is None:
+                raise CapabilityExecutionRuntimeStaleFenceError(
+                    "Capability claim heartbeat scope disappeared"
+                )
+            attempt = self._attempt_from_record(attempt_record)
+            current_expires_at = self._optional_aware(attempt.claim_expires_at)
+            if (
+                attempt.status != "running"
+                or attempt.claim_owner_id != work.persistence_owner_id
+                or attempt.claim_fencing_token != work.persistence_fencing_token
+                or current_expires_at is None
+                or current_expires_at <= now
+                or node.status != ExecutionNodeStatus.RUNNING.value
+                or node.claim_owner_id != work.persistence_owner_id
+                or node.claim_fencing_token != work.persistence_fencing_token
+                or node.claim_expires_at is None
+                or self._aware(node.claim_expires_at) <= now
+            ):
+                raise CapabilityExecutionRuntimeStaleFenceError(
+                    "Capability claim heartbeat was fenced or expired"
+                )
+            updated = self._replace_attempt(
+                attempt,
+                revision=attempt.revision + 1,
+                claim_expires_at=expires_at,
+                updated_at=now,
+            )
+            self._apply_attempt(attempt_record, updated)
+            node.claim_heartbeat_at = now
+            node.claim_expires_at = expires_at
+            node.revision += 1
+            node.updated_at = now
+            await session.flush()
 
     async def _claim_work(
         self,

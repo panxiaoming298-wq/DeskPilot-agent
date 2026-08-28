@@ -10,6 +10,7 @@ from yaml.tokens import AliasToken, AnchorToken
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.workspace_coding_evaluations import (
     WorkspaceCodingGoldenConcurrencySuite,
+    WorkspaceCodingGoldenFrozenCommandTaskSuite,
     WorkspaceCodingGoldenFrozenReleaseSoakSuite,
     WorkspaceCodingGoldenResilienceSuite,
     WorkspaceCodingGoldenSidecarSoakSuite,
@@ -55,6 +56,13 @@ class WorkspaceCodingGoldenFrozenReleaseSoakSuiteBundle:
     suite: WorkspaceCodingGoldenFrozenReleaseSoakSuite
     suite_digest: str
     concurrency: WorkspaceCodingGoldenConcurrencySuiteBundle
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceCodingGoldenFrozenCommandTaskSuiteBundle:
+    suite: WorkspaceCodingGoldenFrozenCommandTaskSuite
+    suite_digest: str
+    frozen_release: WorkspaceCodingGoldenFrozenReleaseSoakSuiteBundle
 
 
 def _read_strict_yaml(suite_path: Path) -> object:
@@ -302,4 +310,57 @@ class WorkspaceCodingGoldenFrozenReleaseSoakSuiteLoader:
             suite=suite,
             suite_digest=sha256_digest(suite.model_dump(mode="json")),
             concurrency=concurrency,
+        )
+
+
+class WorkspaceCodingGoldenFrozenCommandTaskSuiteLoader:
+    """Bind one installed real-Profile interruption to the exact release cohort."""
+
+    def __init__(
+        self,
+        suite_path: Path | None = None,
+        *,
+        frozen_release_loader: WorkspaceCodingGoldenFrozenReleaseSoakSuiteLoader
+        | None = None,
+    ) -> None:
+        self._suite_path = suite_path or (
+            Path(__file__).parents[1]
+            / "evaluations"
+            / "workspace_coding_frozen_command_task_v1.yaml"
+        )
+        self._frozen_release_loader = (
+            frozen_release_loader or WorkspaceCodingGoldenFrozenReleaseSoakSuiteLoader()
+        )
+
+    def load(self) -> WorkspaceCodingGoldenFrozenCommandTaskSuiteBundle:
+        frozen_release = self._frozen_release_loader.load()
+        try:
+            suite = WorkspaceCodingGoldenFrozenCommandTaskSuite.model_validate(
+                _read_strict_yaml(self._suite_path)
+            )
+        except WorkspaceCodingEvaluationError:
+            raise
+        except ValidationError as error:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen command task suite failed strict validation"
+            ) from error
+        scenario = suite.scenario
+        bound = frozen_release.suite.scenario
+        if suite.frozen_release_suite_digest != frozen_release.suite_digest:
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen command task suite crossed its release digest"
+            )
+        if (
+            scenario.frozen_release_scenario_id != bound.scenario_id
+            or scenario.no_automatic_replay != bound.no_automatic_replay
+            or not bound.health_only_canary
+            or bound.replays_command_tasks
+        ):
+            raise WorkspaceCodingEvaluationError(
+                "Workspace Coding frozen command task crossed its release safety boundary"
+            )
+        return WorkspaceCodingGoldenFrozenCommandTaskSuiteBundle(
+            suite=suite,
+            suite_digest=sha256_digest(suite.model_dump(mode="json")),
+            frozen_release=frozen_release,
         )

@@ -1416,6 +1416,59 @@ async def test_completed_mcp_call_with_stale_fence_recovers_outcome_unknown(
         await fixture.database.dispose()
 
 
+@pytest.mark.asyncio
+async def test_running_capability_renews_short_lease_until_candidate_returns(
+    tmp_path: Path,
+) -> None:
+    holder: dict[str, _BlockingMcpEngine] = {}
+
+    def wrap(delegate: CapabilityExecutionEngine) -> CapabilityExecutionEnginePort:
+        engine = _BlockingMcpEngine(delegate)
+        holder["engine"] = engine
+        return engine
+
+    fixture = await _runtime_fixture(
+        tmp_path,
+        suffix="d",
+        wrap_engine=wrap,
+        clock=utc_now,
+    )
+    engine = holder["engine"]
+    try:
+        first = await fixture.runtime.run_once(
+            fixture.task_id,
+            "capability-worker",
+            lease_seconds=5,
+        )
+        assert first is not None and first.status == "verified"
+
+        pending = asyncio.create_task(
+            fixture.runtime.run_once(
+                fixture.task_id,
+                "heartbeat-worker",
+                lease_seconds=5,
+            )
+        )
+        await engine.mcp_candidate_completed.wait()
+        initial = (await _attempts(fixture.database))[-1]
+        assert initial.status == "running"
+        assert initial.claim_expires_at is not None
+
+        await asyncio.sleep(5.5)
+        renewed = (await _attempts(fixture.database))[-1]
+        assert renewed.status == "running"
+        assert renewed.revision > initial.revision
+        assert renewed.claim_expires_at is not None
+        assert renewed.claim_expires_at > initial.claim_expires_at
+
+        engine.release_mcp_candidate.set()
+        outcome = await pending
+        assert outcome is not None and outcome.status == "verified"
+        assert len(fixture.mcp.calls) == 1
+    finally:
+        await fixture.database.dispose()
+
+
 @pytest.mark.parametrize("scope", ["task", "run"])
 @pytest.mark.asyncio
 async def test_cross_scope_verified_result_ref_is_rejected(
