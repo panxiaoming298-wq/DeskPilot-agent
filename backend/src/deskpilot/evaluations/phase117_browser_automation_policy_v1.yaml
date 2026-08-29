@@ -1,0 +1,117 @@
+schema_version: deskpilot.browser-automation-policy.v1
+policy_id: phase117-edge-browser-local
+version: 1
+approval_validity_seconds: 300
+profile:
+  browser_product: microsoft_edge
+  profile_name: DeskPilot
+  profile_mode: application_managed_dedicated
+  visible_window_required: true
+  manual_login_only: true
+  automated_login: false
+  existing_personal_profile_reuse: false
+  default_allowed_origins: []
+  acceptance_loopback_only: true
+  semantic_dom_targeting_only: true
+  arbitrary_coordinate_input: false
+sensitive_data:
+  cookie_values_readable: false
+  passwords_readable: false
+  one_time_codes_readable: false
+  two_factor_secrets_readable: false
+  captcha_bypass_allowed: false
+  permission_dialogs_require_user: true
+  authentication_challenges_require_user: true
+  screenshot_sensitive_region_redaction_required: true
+  dom_and_ui_text_trust: untrusted_external_input
+  dom_or_ui_text_can_grant_authority: false
+actions:
+  - action: navigate
+    capability: browser.navigate
+    risk_level: R1
+    requires_origin_allowlist: true
+    requires_fresh_approval: false
+    approval_binds_origin: false
+    approval_binds_target_digest: false
+    approval_binds_content_digest: false
+    automatic_retries: 0
+    postcondition_verification: location_and_document_identity
+  - action: dom_read
+    capability: browser.dom_read
+    risk_level: R0
+    requires_origin_allowlist: true
+    requires_fresh_approval: false
+    approval_binds_origin: false
+    approval_binds_target_digest: false
+    approval_binds_content_digest: false
+    automatic_retries: 0
+    postcondition_verification: dom_snapshot_digest
+  - action: screenshot
+    capability: browser.screenshot
+    risk_level: R0
+    requires_origin_allowlist: true
+    requires_fresh_approval: false
+    approval_binds_origin: false
+    approval_binds_target_digest: false
+    approval_binds_content_digest: false
+    automatic_retries: 0
+    postcondition_verification: image_digest_and_window_identity
+  - action: form_prefill
+    capability: browser.form_prefill
+    risk_level: R1
+    requires_origin_allowlist: true
+    requires_fresh_approval: false
+    approval_binds_origin: false
+    approval_binds_target_digest: false
+    approval_binds_content_digest: false
+    automatic_retries: 0
+    postcondition_verification: dom_value_readback
+  - action: submit
+    capability: browser.submit
+    risk_level: R2
+    requires_origin_allowlist: true
+    requires_fresh_approval: true
+    approval_binds_origin: true
+    approval_binds_target_digest: true
+    approval_binds_content_digest: true
+    automatic_retries: 0
+    postcondition_verification: resulting_document_or_receipt
+  - action: upload
+    capability: browser.upload
+    risk_level: R2
+    requires_origin_allowlist: true
+    requires_fresh_approval: true
+    approval_binds_origin: true
+    approval_binds_target_digest: true
+    approval_binds_content_digest: true
+    automatic_retries: 0
+    postcondition_verification: selected_file_and_dom_state
+  - action: download
+    capability: browser.download
+    risk_level: R2
+    requires_origin_allowlist: true
+    requires_fresh_approval: true
+    approval_binds_origin: true
+    approval_binds_target_digest: true
+    approval_binds_content_digest: true
+    automatic_retries: 0
+    postcondition_verification: destination_file_digest
+  - action: publish
+    capability: browser.publish
+    risk_level: R2
+    requires_origin_allowlist: true
+    requires_fresh_approval: true
+    approval_binds_origin: true
+    approval_binds_target_digest: true
+    approval_binds_content_digest: true
+    automatic_retries: 0
+    postcondition_verification: published_state_and_origin
+offline_execution_boundary:
+  browser_profile_created: false
+  browser_launched: false
+  desktop_application_control: false
+  network_access: false
+  action_executed: false
+  model_called: false
+  production_admission: false
+  cloud_activation: false
