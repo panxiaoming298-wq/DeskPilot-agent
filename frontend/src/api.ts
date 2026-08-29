@@ -10,6 +10,9 @@ import type {
   ProviderConfig,
   ProviderConfigAuditPage,
   ProviderHealthSnapshot,
+  ProviderProbePreparationCommand,
+  ProviderProbePreparationManifest,
+  ProviderProbePreparationResult,
   ModelGatewayRoutingSnapshot,
   ProviderMutationResult,
   Reconciliation,
@@ -547,6 +550,26 @@ export function getProviderAudit(providerId?: string): Promise<ProviderConfigAud
 
 export function getProviderRouting(): Promise<ModelGatewayRoutingSnapshot> {
   return request<ModelGatewayRoutingSnapshot>('/api/v1/model-providers/routing')
+}
+
+export function getProviderProbePreparation(): Promise<ProviderProbePreparationManifest> {
+  return request<ProviderProbePreparationManifest>(
+    '/api/v1/model-providers/probe-preparation',
+    { cache: 'no-store' },
+  )
+}
+
+export function prepareProviderProbe(
+  command: ProviderProbePreparationCommand,
+): Promise<ProviderProbePreparationResult> {
+  return request<ProviderProbePreparationResult>(
+    '/api/v1/model-providers/probe-preparation:preflight',
+    {
+      method: 'POST',
+      cache: 'no-store',
+      body: JSON.stringify(command),
+    },
+  )
 }
 
 async function mutateProvider(

@@ -103,6 +103,9 @@ from deskpilot.application.provider_health_service import ProviderHealthService
 from deskpilot.application.provider_management_service import (
     ProviderManagementService,
 )
+from deskpilot.application.provider_probe_preparation_service import (
+    ProviderProbePreparationService,
+)
 from deskpilot.application.provider_runtime_codec import ProviderRuntimeConfigCodec
 from deskpilot.application.provider_runtime_store import RuntimeConfigProtector
 from deskpilot.application.research_runtime import ResearchRuntime
@@ -242,6 +245,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         database = Database(resolved_settings.database_url)
+        provider_probe_preparation_service = ProviderProbePreparationService()
         resolved_runtime_config_protector = runtime_config_protector or WindowsDpapiProtector()
         resolved_credential_resolver = credential_resolver
         resolved_managed_credential_store = managed_credential_store
@@ -761,6 +765,9 @@ def create_app(
         app.state.policy_engine = resolved_policy_engine
         app.state.provider_catalog = provider_catalog
         app.state.provider_management = provider_management
+        app.state.provider_probe_preparation_service = (
+            provider_probe_preparation_service
+        )
         app.state.managed_credential_service = managed_credential_service
         app.state.runner_client = resolved_runner_supervisor
         app.state.runner_supervisor = resolved_runner_supervisor

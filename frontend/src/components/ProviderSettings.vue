@@ -9,6 +9,7 @@ import type {
   ProviderConfigAuditEvent,
 } from '../types'
 import ProviderEditorModal from './ProviderEditorModal.vue'
+import ProviderProbePreparation from './ProviderProbePreparation.vue'
 
 const {
   catalog,
@@ -208,6 +209,8 @@ function formatCost(micros: number | null): string {
       <article><span>健康缓存</span><strong>{{ healthyCount }}</strong><small>状态正常</small></article>
       <article><span>韧性状态</span><strong>{{ openCircuitCount }} / {{ totalRetryCount }}</strong><small>非闭合熔断 / 累计重试</small></article>
     </div>
+
+    <ProviderProbePreparation />
 
     <div class="settings-layout">
       <section class="provider-list-panel" aria-labelledby="provider-list-title">

@@ -567,6 +567,140 @@ export interface ManagedCredentialStatus {
   deleted: boolean
 }
 
+export type ProviderProbeFamily = 'openai' | 'deepseek' | 'bailian'
+export type ProviderProbeCurrency = 'USD' | 'CNY'
+export type ProviderProbeCostControlMode =
+  | 'openai_project_hard_limit'
+  | 'openai_application_envelope'
+  | 'deepseek_prepaid_balance'
+  | 'bailian_billing_alert'
+
+export interface ProviderProbePreparationProfile {
+  provider_family: ProviderProbeFamily
+  provider_id: string
+  display_name: string
+  exact_model: string
+  suggested_base_url: string | null
+  base_url_editable: boolean
+  credential_identifier: string
+  currency: ProviderProbeCurrency
+  maximum_total_microunits: number
+  maximum_per_request_microunits: number
+  maximum_requests: number
+  planned_budget_envelope_microunits: number
+  allowed_cost_control_modes: ProviderProbeCostControlMode[]
+  prepaid_balance_check_required: boolean
+  billing_alert_required: boolean
+  billing_delay_acknowledgement_required: boolean
+  free_quota_stop_recommended: boolean
+}
+
+export interface ProviderProbePreparationManifest {
+  schema_version: 'deskpilot.provider-probe-preparation-manifest.v1'
+  policy_id: string
+  policy_digest: string
+  data_class: 'public_synthetic'
+  planned_requests_per_provider: 4
+  planned_aggregate_requests: 12
+  profiles: ProviderProbePreparationProfile[]
+  network_access: false
+  credentials_resolved: false
+  real_model_capture: false
+  production_admission: false
+  cloud_activation: false
+  full_116c_b: false
+}
+
+export interface ProviderProbePreparationCommand {
+  provider_family: ProviderProbeFamily
+  provider_id: string
+  exact_model: string
+  base_url: string
+  credential_identifier: string
+  cost_control_mode: ProviderProbeCostControlMode
+  exact_model_confirmed: boolean
+  credential_presence_confirmed: boolean
+  base_url_key_pair_confirmed: boolean
+  provider_hard_limit_enforcing: boolean
+  dedicated_probe_credential_confirmed: boolean
+  application_budget_envelope_confirmed: boolean
+  prepaid_balance_available_confirmed: boolean
+  billing_alert_confirmed: boolean
+  billing_delay_acknowledged: boolean
+  free_quota_stop_enabled: boolean
+  pricing_source_confirmed: true
+}
+
+export interface ProviderProbeOperatorBinding {
+  schema_version: 'deskpilot.provider-probe-operator-binding.v2'
+  policy_digest: string
+  provider_family: ProviderProbeFamily
+  provider_id: string
+  exact_model: string
+  base_url: string
+  credential_ref: CredentialReference
+  currency: ProviderProbeCurrency
+  maximum_total_microunits: number
+  maximum_per_request_microunits: number
+  maximum_requests: number
+  automatic_retries: 0
+  exact_model_confirmed: boolean
+  credential_presence_confirmed: boolean
+  base_url_key_pair_confirmed: boolean
+  cost_control_mode: ProviderProbeCostControlMode
+  provider_hard_limit_enforcing: boolean
+  dedicated_probe_credential_confirmed: boolean
+  application_budget_envelope_confirmed: boolean
+  prepaid_balance_available_confirmed: boolean
+  prepaid_balance_checked_at: string | null
+  billing_alert_confirmed: boolean
+  billing_delay_acknowledged: boolean
+  free_quota_stop_enabled: boolean
+  pricing_source_checked_at: string
+  confirmed_by: string
+  confirmed_at: string
+  valid_until: string
+  binding_digest: string
+}
+
+export interface ProviderProbeReadinessReport {
+  schema_version: 'deskpilot.provider-probe-readiness.v2'
+  policy_digest: string
+  binding_digest: string
+  provider_family: ProviderProbeFamily
+  provider_id: string
+  model: string
+  public_config_digest: string
+  credential_reference_digest: string
+  planned_request_count: 4
+  maximum_requests: number
+  currency: ProviderProbeCurrency
+  maximum_total_microunits: number
+  maximum_per_request_microunits: number
+  planned_budget_envelope_microunits: number
+  cost_control_mode: ProviderProbeCostControlMode
+  provider_hard_limit_enforcing: boolean
+  dedicated_probe_credential_confirmed: boolean
+  application_budget_envelope_confirmed: boolean
+  ready: boolean
+  violations: string[]
+  checked_at: string
+  network_access: false
+  credentials_resolved: false
+  real_model_capture: false
+  production_admission: false
+  cloud_activation: false
+}
+
+export interface ProviderProbePreparationResult {
+  schema_version: 'deskpilot.provider-probe-preparation-result.v1'
+  binding: ProviderProbeOperatorBinding
+  readiness: ProviderProbeReadinessReport
+  readiness_report_digest: string
+  live_permit_created: false
+  network_access: false
+}
+
 export interface ProviderMutationResult {
   action: 'created' | 'updated' | 'enabled' | 'disabled' | 'default_changed' | 'deleted'
   provider_id: string

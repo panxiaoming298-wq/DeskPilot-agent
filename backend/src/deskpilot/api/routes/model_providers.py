@@ -11,6 +11,7 @@ from deskpilot.api.dependencies import (
     get_model_gateway,
     get_provider_catalog,
     get_provider_management,
+    get_provider_probe_preparation_service,
 )
 from deskpilot.api.problem_details import ProblemException
 from deskpilot.application.credential_resolver import (
@@ -38,6 +39,9 @@ from deskpilot.application.provider_management_store import (
     ProviderManagementConflictError,
     ProviderManagementNotFoundError,
 )
+from deskpilot.application.provider_probe_preparation_service import (
+    ProviderProbePreparationService,
+)
 from deskpilot.application.provider_runtime_store import (
     ProviderRuntimeConfigProtectionError,
     ProviderRuntimeConfigProtectionUnavailableError,
@@ -60,6 +64,11 @@ from deskpilot.domain.provider_management import (
     ProviderCatalogSnapshot,
     ProviderHealthSnapshot,
 )
+from deskpilot.domain.provider_probe_preparation import (
+    ProviderProbePreparationCommand,
+    ProviderProbePreparationManifest,
+    ProviderProbePreparationResult,
+)
 
 router = APIRouter(prefix="/model-providers", tags=["model-providers"])
 
@@ -75,6 +84,10 @@ ModelGatewayDependency = Annotated[ModelGateway, Depends(get_model_gateway)]
 ManagedCredentialDependency = Annotated[
     ManagedCredentialService,
     Depends(get_managed_credential_service),
+]
+ProviderProbePreparationDependency = Annotated[
+    ProviderProbePreparationService,
+    Depends(get_provider_probe_preparation_service),
 ]
 IfMatchHeader = Annotated[str | None, Header(alias="If-Match")]
 IdempotencyHeader = Annotated[str | None, Header(alias="Idempotency-Key")]
@@ -126,6 +139,31 @@ async def get_model_provider_routing(
 ) -> ModelGatewayRoutingSnapshot:
     response.headers["Cache-Control"] = "no-store"
     return gateway.routing_snapshot()
+
+
+@router.get(
+    "/probe-preparation",
+    response_model=ProviderProbePreparationManifest,
+)
+async def get_provider_probe_preparation(
+    response: Response,
+    service: ProviderProbePreparationDependency,
+) -> ProviderProbePreparationManifest:
+    response.headers["Cache-Control"] = "no-store"
+    return service.manifest()
+
+
+@router.post(
+    "/probe-preparation:preflight",
+    response_model=ProviderProbePreparationResult,
+)
+async def prepare_provider_probe_binding(
+    command: ProviderProbePreparationCommand,
+    response: Response,
+    service: ProviderProbePreparationDependency,
+) -> ProviderProbePreparationResult:
+    response.headers["Cache-Control"] = "no-store"
+    return service.prepare(command)
 
 
 @router.get(

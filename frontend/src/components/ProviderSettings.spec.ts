@@ -99,6 +99,7 @@ describe('ProviderSettings', () => {
       global: {
         stubs: {
           ProviderEditorModal: true,
+          ProviderProbePreparation: true,
         },
       },
     })

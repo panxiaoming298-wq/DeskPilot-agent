@@ -25,6 +25,9 @@ from deskpilot.application.provider_catalog import ProviderCatalogService
 from deskpilot.application.provider_management_service import (
     ProviderManagementService,
 )
+from deskpilot.application.provider_probe_preparation_service import (
+    ProviderProbePreparationService,
+)
 from deskpilot.application.research_runtime import ResearchRuntime
 from deskpilot.application.task_service import TaskService
 from deskpilot.application.task_workbench_service import TaskWorkbenchService
@@ -144,3 +147,12 @@ def get_managed_credential_service(request: Request) -> ManagedCredentialService
             detail="当前运行环境不能安全管理 Provider API Key。",
         )
     return cast(ManagedCredentialService, service)
+
+
+def get_provider_probe_preparation_service(
+    request: Request,
+) -> ProviderProbePreparationService:
+    return cast(
+        ProviderProbePreparationService,
+        request.app.state.provider_probe_preparation_service,
+    )

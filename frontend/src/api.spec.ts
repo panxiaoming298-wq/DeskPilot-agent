@@ -659,3 +659,62 @@ describe('managed Provider credential API', () => {
     expect(JSON.stringify({ read, stored, deleted })).not.toContain(secret)
   })
 })
+
+describe('Provider probe preparation API', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  it('使用 no-store 读取冻结策略并且只提交公开准备材料', async () => {
+    const manifest = { schema_version: 'deskpilot.provider-probe-preparation-manifest.v1' }
+    const result = { schema_version: 'deskpilot.provider-probe-preparation-result.v1' }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(session))
+      .mockResolvedValueOnce(jsonResponse(manifest))
+      .mockResolvedValueOnce(jsonResponse(result))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { getProviderProbePreparation, prepareProviderProbe } = await import('./api')
+    const command = {
+      provider_family: 'deepseek' as const,
+      provider_id: 'deepseek-responses',
+      exact_model: 'deepseek-v4-flash',
+      base_url: 'https://api.deepseek.com',
+      credential_identifier: 'DEEPSEEK',
+      cost_control_mode: 'deepseek_prepaid_balance' as const,
+      exact_model_confirmed: true,
+      credential_presence_confirmed: true,
+      base_url_key_pair_confirmed: true,
+      provider_hard_limit_enforcing: false,
+      dedicated_probe_credential_confirmed: true,
+      application_budget_envelope_confirmed: true,
+      prepaid_balance_available_confirmed: true,
+      billing_alert_confirmed: false,
+      billing_delay_acknowledged: false,
+      free_quota_stop_enabled: false,
+      pricing_source_confirmed: true as const,
+    }
+
+    await getProviderProbePreparation()
+    await prepareProviderProbe(command)
+
+    const readInit = expectAuthenticatedRequest(
+      fetchMock,
+      1,
+      '/api/v1/model-providers/probe-preparation',
+    )
+    expect(readInit.cache).toBe('no-store')
+
+    const preflightInit = expectAuthenticatedRequest(
+      fetchMock,
+      2,
+      '/api/v1/model-providers/probe-preparation:preflight',
+      'POST',
+    )
+    expect(preflightInit.cache).toBe('no-store')
+    expect(preflightInit.body).toBe(JSON.stringify(command))
+    expect(preflightInit.body).not.toContain('api_key')
+    expect(preflightInit.body).not.toContain('secret')
+  })
+})
