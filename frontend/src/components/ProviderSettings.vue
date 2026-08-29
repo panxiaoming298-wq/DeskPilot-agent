@@ -184,7 +184,6 @@ function formatCost(micros: number | null): string {
   <section class="provider-settings" aria-labelledby="provider-settings-title">
     <div class="settings-hero">
       <div>
-        <span class="eyebrow">PROVIDER CONTROL PLANE</span>
         <h2 id="provider-settings-title">模型连接与运行状态</h2>
         <p>统一管理本地与云端模型连接，并观察角色路由、费用/重试预算、延迟 EWMA 和 Provider 熔断状态。</p>
       </div>
@@ -214,7 +213,6 @@ function formatCost(micros: number | null): string {
       <section class="provider-list-panel" aria-labelledby="provider-list-title">
         <div class="panel-heading">
           <div>
-            <span class="eyebrow">ACTIVE CATALOG</span>
             <h2 id="provider-list-title">Provider 目录</h2>
           </div>
           <div class="catalog-version">
@@ -303,7 +301,7 @@ function formatCost(micros: number | null): string {
       <aside class="provider-side-column">
         <section class="routing-panel" aria-labelledby="routing-title">
           <div class="panel-heading compact-heading">
-            <div><span class="eyebrow">ROUTING & RESILIENCE</span><h2 id="routing-title">角色调度策略</h2></div>
+            <div><h2 id="routing-title">角色调度策略</h2></div>
             <button class="icon-button" type="button" aria-label="刷新调度状态" :disabled="routingLoading" @click="refreshRouting">↻</button>
           </div>
           <div v-if="routingLoading && !routing" class="routing-empty">正在读取调度状态…</div>
@@ -327,16 +325,15 @@ function formatCost(micros: number | null): string {
         </section>
 
         <section class="credential-guide">
-          <span class="eyebrow">SECRET BOUNDARY</span>
-          <h2>先保存密钥，再引用</h2>
-          <p>页面不会接收、显示或保存 API Key。推荐先通过本地 CLI 将密钥写入当前用户的 Windows 凭据管理器。</p>
-          <pre><code>.\.venv\Scripts\python.exe -m deskpilot.credential_cli store CLOUD_CHAT</code></pre>
-          <small>在 backend 目录执行；表单中的凭据标识符填写 <code>CLOUD_CHAT</code>。</small>
+          <span class="eyebrow">本机安全存储</span>
+          <h2>在页面输入 API Key</h2>
+          <p>密钥只会发往本机后端并写入当前 Windows 用户的凭据管理器。目录、数据库、审计和后续 API 响应只保留引用名称。</p>
+          <small>编辑 Provider 时密钥输入框始终为空；留空会保留已保存值，不会尝试回读或显示。</small>
         </section>
 
         <section class="audit-panel" aria-labelledby="audit-title">
           <div class="panel-heading compact-heading">
-            <div><span class="eyebrow">AUDIT TRAIL</span><h2 id="audit-title">配置时间线</h2></div>
+            <div><h2 id="audit-title">配置时间线</h2></div>
             <button class="icon-button" type="button" aria-label="刷新审计记录" :disabled="auditLoading" @click="refreshAudit">↻</button>
           </div>
           <div v-if="auditLoading && !auditEvents.length" class="audit-empty">正在读取审计记录…</div>

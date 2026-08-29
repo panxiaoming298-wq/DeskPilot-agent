@@ -5,6 +5,7 @@ import type {
   ApprovalResolutionResponse,
   ApiProblem,
   LocalSession,
+  ManagedCredentialStatus,
   ProviderCatalogSnapshot,
   ProviderConfig,
   ProviderConfigAuditPage,
@@ -633,6 +634,42 @@ export function deleteProvider(
 export function checkProviderHealth(providerId: string): Promise<ProviderHealthSnapshot> {
   return request<ProviderHealthSnapshot>(
     `/api/v1/model-providers/${encodeURIComponent(providerId)}/health`,
+  )
+}
+
+export function getManagedCredentialStatus(
+  identifier: string,
+): Promise<ManagedCredentialStatus> {
+  return request<ManagedCredentialStatus>(
+    `/api/v1/model-providers/credentials/${encodeURIComponent(identifier)}`,
+    { cache: 'no-store' },
+  )
+}
+
+export function storeManagedCredential(
+  identifier: string,
+  secret: string,
+): Promise<ManagedCredentialStatus> {
+  return request<ManagedCredentialStatus>(
+    `/api/v1/model-providers/credentials/${encodeURIComponent(identifier)}`,
+    {
+      method: 'PUT',
+      cache: 'no-store',
+      body: JSON.stringify({ secret }),
+    },
+  )
+}
+
+export function deleteManagedCredential(
+  identifier: string,
+): Promise<ManagedCredentialStatus> {
+  return request<ManagedCredentialStatus>(
+    `/api/v1/model-providers/credentials/${encodeURIComponent(identifier)}`,
+    {
+      method: 'DELETE',
+      cache: 'no-store',
+      headers: { 'X-DeskPilot-Credential-Confirmation': identifier },
+    },
   )
 }
 

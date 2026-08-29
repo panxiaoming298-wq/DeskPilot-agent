@@ -1,7 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import gsap from 'gsap'
-import { ScrollTrigger } from 'gsap/ScrollTrigger'
+import { computed, onMounted, ref, watch } from 'vue'
 import { createTask, listTasks } from './api'
 import ApprovalCard from './components/ApprovalCard.vue'
 import EffectRuntimeOperations from './components/EffectRuntimeOperations.vue'
@@ -28,169 +26,13 @@ import type {
   TaskStatus,
 } from './types'
 
-const canUseScrollTrigger = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-if (canUseScrollTrigger) gsap.registerPlugin(ScrollTrigger)
-
-const coverPoster = `${import.meta.env.BASE_URL}media/deskpilot-ocean-poster.png`
-const coverVideo = `${import.meta.env.BASE_URL}media/deskpilot-whale-shark.mp4`
-const coverRef = ref<HTMLElement | null>(null)
-const irisRef = ref<HTMLElement | null>(null)
-const workspaceRef = ref<HTMLElement | null>(null)
-const viewTransitionRef = ref<HTMLElement | null>(null)
-const coverVisible = ref(true)
-const transitioning = ref(false)
-const viewTransitioning = ref(false)
-let coverContext: ReturnType<typeof gsap.context> | null = null
-let workspaceContext: ReturnType<typeof gsap.context> | null = null
-
-function prefersReducedMotion(): boolean {
-  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
-}
-
-function initWorkspaceMotion(): void {
-  if (!workspaceRef.value || !canUseScrollTrigger || prefersReducedMotion()) return
-  workspaceContext?.revert()
-  workspaceContext = gsap.context(() => {
-    gsap.timeline({ defaults: { ease: 'power4.out' } })
-      .fromTo('.hud-reticle', { autoAlpha: 0, scale: 0.72, rotation: -18 }, {
-        autoAlpha: 0.74,
-        scale: 1,
-        rotation: 0,
-        duration: 1.1,
-      })
-      .fromTo('.sidebar', { autoAlpha: 0, x: -34 }, {
-        autoAlpha: 1,
-        x: 0,
-        duration: 0.72,
-      }, '-=0.9')
-      .fromTo('.hud-telemetry span', { autoAlpha: 0, x: 18 }, {
-        autoAlpha: 1,
-        x: 0,
-        duration: 0.42,
-        stagger: 0.07,
-      }, '-=0.58')
-      .fromTo('.topbar', { autoAlpha: 0, y: -18 }, {
-        autoAlpha: 1,
-        y: 0,
-        duration: 0.58,
-      }, '-=0.5')
-
-    if (activeView.value !== 'tasks') return
-
-    gsap.fromTo('.composer', {
-      autoAlpha: 0.28,
-      y: 30,
-      rotationX: -7,
-      transformOrigin: '50% 0%',
-    }, {
-      autoAlpha: 1,
-      y: 0,
-      rotationX: 0,
-      duration: 0.9,
-      ease: 'power4.out',
-      scrollTrigger: {
-        trigger: '.composer',
-        start: 'top 91%',
-        once: true,
-      },
-    })
-
-    gsap.timeline({
-      defaults: { ease: 'none' },
-      scrollTrigger: {
-        trigger: '.task-grid',
-        start: 'top 92%',
-        end: 'top 42%',
-        scrub: 0.7,
-      },
-    })
-      .fromTo('.task-overview', { autoAlpha: 0.35, x: -44, rotationY: 3 }, {
-        autoAlpha: 1,
-        x: 0,
-        rotationY: 0,
-      }, 0)
-      .fromTo('.timeline-panel', { autoAlpha: 0.35, x: 44, rotationY: -3 }, {
-        autoAlpha: 1,
-        x: 0,
-        rotationY: 0,
-      }, 0)
-      .fromTo('.timeline-sweep', { yPercent: -120 }, { yPercent: 520 }, 0)
-  }, workspaceRef.value)
-  ScrollTrigger.refresh()
-}
-
-function finishCoverTransition(): void {
-  activeView.value = 'research'
-  coverVisible.value = false
-  transitioning.value = false
-  document.body.classList.remove('cover-open')
-  window.scrollTo({ top: 0 })
-  void nextTick(initWorkspaceMotion)
-}
-
-function enterWorkspace(): void {
-  if (transitioning.value) return
-  transitioning.value = true
-
-  if (prefersReducedMotion() || !coverRef.value || !irisRef.value) {
-    finishCoverTransition()
-    return
-  }
-
-  gsap.timeline({ onComplete: finishCoverTransition })
-    .to('.cover-copy [data-intro]', {
-      autoAlpha: 0,
-      scale: 0.985,
-      duration: 0.28,
-      stagger: 0.025,
-      ease: 'power2.in',
-    })
-    .to(irisRef.value, {
-      scale: 1,
-      duration: 0.82,
-      ease: 'power4.inOut',
-    }, '<0.08')
-}
-
-onMounted(() => {
-  document.body.classList.add('cover-open')
-  if (!coverRef.value) return
-  if (prefersReducedMotion()) {
-    coverRef.value.querySelector('video')?.pause()
-    return
-  }
-
-  coverContext = gsap.context(() => {
-    gsap.timeline({ defaults: { ease: 'power3.out' } })
-      .fromTo('.cover-brand', { autoAlpha: 0, y: -18 }, { autoAlpha: 1, y: 0, duration: 0.75 })
-      .fromTo('.cover-title span', { autoAlpha: 0, yPercent: 34 }, {
-        autoAlpha: 1,
-        yPercent: 0,
-        duration: 0.9,
-        stagger: 0.11,
-      }, '-=0.42')
-      .fromTo('.cover-note, .cover-manifesto, .cover-enter', { autoAlpha: 0, y: 18 }, {
-        autoAlpha: 1,
-        y: 0,
-        duration: 0.58,
-        stagger: 0.08,
-      }, '-=0.42')
-  }, coverRef.value)
-})
-
-onUnmounted(() => {
-  document.body.classList.remove('cover-open')
-  coverContext?.revert()
-  workspaceContext?.revert()
-})
-
 const goal = ref('验证 DeskPilot 前后端任务事件闭环')
 const taskKind = ref<'disk_usage' | 'file_move' | 'disk_pressure_guarded_file_move'>('disk_usage')
 const sourcePath = ref('')
 const destinationPath = ref('')
 const maximumUsedPercent = ref(80)
 type ActiveView = 'tasks' | 'research' | 'memory' | 'knowledge' | 'mcp' | 'evaluations' | 'reconciliations' | 'providers' | 'operations'
-const activeView = ref<ActiveView>('tasks')
+const activeView = ref<ActiveView>('research')
 const privacyMode = ref<TaskCreate['privacy_mode']>('local_only')
 const submitting = ref(false)
 const submitError = ref<string | null>(null)
@@ -410,81 +252,52 @@ function reconnectNow(): void {
 }
 
 function switchView(nextView: ActiveView): void {
-  if (activeView.value === nextView || viewTransitioning.value) return
-  const overlay = viewTransitionRef.value
+  if (activeView.value === nextView) return
   activeView.value = nextView
-
-  if (!overlay || prefersReducedMotion()) {
-    void nextTick(() => ScrollTrigger.refresh())
-    return
-  }
-
-  viewTransitioning.value = true
-  gsap.set(overlay, { autoAlpha: 1, scale: 0 })
-  void nextTick(() => {
-    ScrollTrigger.refresh()
-    gsap.timeline({
-      onComplete: () => {
-        gsap.set(overlay, { scale: 0 })
-        viewTransitioning.value = false
-      },
-    })
-      .to(overlay, {
-        scale: 1,
-        duration: 0.54,
-        ease: 'power4.inOut',
-      })
-      .to(overlay, {
-        autoAlpha: 0,
-        scale: 1.06,
-        duration: 0.34,
-        ease: 'power3.out',
-      })
-  })
 }
 
 const pageHeading = computed(() =>
   activeView.value === 'tasks'
-    ? '让任务过程成为可验证的数据'
+    ? '执行详情'
     : activeView.value === 'research'
-      ? '用对话交付目标，让证据解释每一步'
+      ? 'Agent 会话'
     : activeView.value === 'memory'
-      ? '让每条长期记忆都有来源、版本与去向'
+      ? '长期记忆'
     : activeView.value === 'knowledge'
-      ? '只返回来源仍然有效的本地知识'
+      ? '知识库'
       : activeView.value === 'mcp'
-        ? '显式审阅并约束每个本地 MCP 连接'
+        ? 'Agent 与 MCP'
         : activeView.value === 'evaluations'
-          ? '用可重放黄金任务衡量真实安全行为'
+          ? '评测与 Trace'
     : activeView.value === 'reconciliations'
-      ? '集中核对结果不确定的工具调用'
+      ? '历史与对账'
       : activeView.value === 'providers'
-        ? '在本地安全切换云端与本地模型'
-        : '用数据库真值观察并保护运行时',
+        ? '模型与设置'
+        : '运行时运维',
 )
 
 const pageEyebrow = computed(() => ({
-  tasks: 'WINDOWS MULTI-AGENT SYSTEM',
-  research: 'CONVERSATION-FIRST LOCAL AGENT',
-  memory: 'PROTECTED MEMORY EVIDENCE LEDGER',
-  knowledge: 'CONTENT-ADDRESSED LOCAL MEMORY',
-  mcp: 'CONTROLLED MODEL CONTEXT PROTOCOL',
-  evaluations: 'DETERMINISTIC EVALUATION TRACE',
-  reconciliations: 'DURABLE EXECUTION LEDGER',
-  providers: 'OPENAI-COMPATIBLE GATEWAY',
-  operations: 'FENCED RUNTIME CONTROL PLANE',
+  tasks: '任务运行与审批',
+  research: '本地优先的持续对话',
+  memory: '来源可追溯的上下文',
+  knowledge: '本地检索与引用',
+  mcp: '受控工具连接',
+  evaluations: '版本化验收证据',
+  reconciliations: '运行历史与恢复',
+  providers: 'Provider 与安全凭据',
+  operations: '受保护的运行时控制',
 })[activeView.value])
 
 const stageTitle = computed(() => ({
-  tasks: '阶段 2 · 可控任务',
-  research: '阶段 78 · 通用 Agent 路由',
-  memory: '阶段 73 · 长期记忆',
-  knowledge: '阶段 3 · 本地知识',
-  mcp: '阶段 3 · 受控 MCP',
-  evaluations: '阶段 3 · 评测追踪',
-  reconciliations: '阶段 2 · 持久化对账',
-  providers: '阶段 2 · 模型控制面',
-  operations: '阶段 2 · 受保护运维',
+  tasks: '可控执行',
+  research: '通用 Agent',
+  memory: '长期记忆',
+  knowledge: '本地知识',
+  mcp: '受控 MCP',
+  evaluations: '离线评测',
+  reconciliations: '持久化对账',
+  providers: '模型控制面',
+  operations: '受保护运维',
 })[activeView.value])
 
 const stageDescription = computed(() => ({
@@ -577,77 +390,7 @@ function handleOpenHistoricalTask(snapshot: Task): void {
 </script>
 
 <template>
-  <section v-if="coverVisible" ref="coverRef" class="cover" aria-label="DeskPilot 首页">
-    <div class="cover-stage" @click="enterWorkspace">
-      <video
-        class="cover-video"
-        autoplay
-        muted
-        loop
-        playsinline
-        preload="metadata"
-        :poster="coverPoster"
-        aria-hidden="true"
-      >
-        <source :src="coverVideo" type="video/mp4">
-      </video>
-      <div class="cover-shade" aria-hidden="true" />
-      <div class="cover-copy">
-        <header class="cover-brand" data-intro>
-          <div>
-            <strong>DESKPILOT</strong>
-            <small>LOCAL TASK AGENT</small>
-          </div>
-          <p>LOCAL&nbsp;&nbsp;/&nbsp;&nbsp;RESEARCH&nbsp;&nbsp;/&nbsp;&nbsp;ARTIFACTS</p>
-        </header>
-
-        <aside class="cover-note" data-intro>
-          <span>FIELD NOTE · 01</span>
-          <strong>在本地思考<br>必要时联网<br>最终交付产物</strong>
-          <p>对话是入口，任务是主对象，证据和可带走的文件是出口。</p>
-        </aside>
-
-        <h1 class="cover-title" aria-label="The task agent">
-          <span data-intro>THE</span>
-          <span data-intro>TASK</span>
-          <span data-intro>AGENT</span>
-        </h1>
-
-        <div class="cover-manifesto" data-intro>
-          <span>GENERAL PURPOSE · LOCAL FIRST</span>
-          <strong>会对话，会研究，会执行，也会把结果做成数字产物。</strong>
-        </div>
-
-        <button class="cover-enter" type="button" data-intro @click.stop="enterWorkspace">
-          <span>进入工作台</span>
-          <span aria-hidden="true">↗</span>
-        </button>
-      </div>
-      <div class="cover-iris-wrap" aria-hidden="true">
-        <div ref="irisRef" class="cover-iris" />
-      </div>
-    </div>
-  </section>
-
-  <main
-    ref="workspaceRef"
-    class="workspace"
-    :inert="coverVisible || undefined"
-    :aria-hidden="coverVisible ? 'true' : undefined"
-  >
-    <div class="hud-field" aria-hidden="true">
-      <span class="hud-grid" />
-      <span class="hud-horizon" />
-      <span class="hud-reticle hud-reticle-main"><i /><i /><i /></span>
-      <span class="hud-reticle hud-reticle-minor"><i /><i /></span>
-    </div>
-    <div class="hud-telemetry" aria-hidden="true">
-      <span>LOCAL RUNTIME</span>
-      <span>EGRESS GATED</span>
-      <span>AUDIT ON</span>
-    </div>
-    <div ref="viewTransitionRef" class="hud-transition" aria-hidden="true" />
-
+  <main class="workspace">
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark">DP</span>
@@ -658,45 +401,39 @@ function handleOpenHistoricalTask(snapshot: Task): void {
       </div>
 
       <nav aria-label="工作区导航">
+        <span class="nav-group-label">工作区</span>
         <button class="nav-item" :class="{ active: activeView === 'research' }" type="button" @click="switchView('research')">
           <span>Agent 会话</span>
-          <span class="nav-count">ASK</span>
         </button>
         <button class="nav-item" :class="{ active: activeView === 'tasks' }" type="button" @click="switchView('tasks')">
           <span>执行详情</span>
-          <span class="nav-count">RUN</span>
         </button>
         <button class="nav-item" :class="{ active: activeView === 'knowledge' }" type="button" @click="switchView('knowledge')">
           <span>知识库</span>
-          <span class="nav-count">RAG</span>
         </button>
         <button class="nav-item" :class="{ active: activeView === 'memory' }" type="button" @click="switchView('memory')">
           <span>长期记忆</span>
-          <span class="nav-count">MEM</span>
         </button>
         <button class="nav-item" :class="{ active: activeView === 'mcp' }" type="button" @click="switchView('mcp')">
           <span>Agent 与 MCP</span>
-          <span class="nav-count">MCP</span>
         </button>
+        <span class="nav-group-label">系统</span>
         <button class="nav-item" :class="{ active: activeView === 'evaluations' }" type="button" @click="switchView('evaluations')">
-          <span>评测与 Trace</span><span class="nav-count">EVAL</span>
+          <span>评测与 Trace</span>
         </button>
         <button class="nav-item" :class="{ active: activeView === 'reconciliations' }" type="button" @click="switchView('reconciliations')">
           <span>历史与对账</span>
-          <span class="nav-count">LOG</span>
         </button>
         <button class="nav-item" :class="{ active: activeView === 'providers' }" type="button" @click="switchView('providers')">
           <span>模型与设置</span>
-          <span class="nav-count">MODEL</span>
         </button>
         <button class="nav-item" :class="{ active: activeView === 'operations' }" type="button" @click="switchView('operations')">
           <span>运行时运维</span>
-          <span class="nav-count">OPS</span>
         </button>
       </nav>
 
       <div class="stage-card">
-        <span class="stage-label">当前阶段</span>
+        <span class="stage-label">当前模块</span>
         <strong>{{ stageTitle }}</strong>
         <p>{{ stageDescription }}</p>
       </div>

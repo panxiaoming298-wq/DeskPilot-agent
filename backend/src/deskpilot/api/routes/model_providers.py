@@ -1,18 +1,25 @@
 """Authenticated Provider read and administration endpoints."""
 
 import re
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Query, Response
+from fastapi import APIRouter, Depends, Header, Path, Query, Response
 
 from deskpilot.api.dependencies import (
+    get_managed_credential_service,
     get_model_gateway,
     get_provider_catalog,
     get_provider_management,
 )
 from deskpilot.api.problem_details import ProblemException
-from deskpilot.application.credential_resolver import CredentialResolutionError
+from deskpilot.application.credential_resolver import (
+    CredentialBackendUnavailableError,
+    CredentialInvalidError,
+    CredentialOperationError,
+    CredentialResolutionError,
+)
+from deskpilot.application.managed_credential_service import ManagedCredentialService
 from deskpilot.application.model_gateway import (
     DisabledModelProviderError,
     ModelGateway,
@@ -35,13 +42,20 @@ from deskpilot.application.provider_runtime_store import (
     ProviderRuntimeConfigProtectionError,
     ProviderRuntimeConfigProtectionUnavailableError,
 )
+from deskpilot.domain.managed_credentials import (
+    ManagedCredentialStatus,
+    ManagedCredentialWrite,
+)
 from deskpilot.domain.model_contracts import PROVIDER_ID_PATTERN
 from deskpilot.domain.model_routing import ModelGatewayRoutingSnapshot
 from deskpilot.domain.provider_admin import (
     ProviderConfigAuditPage,
     ProviderMutationResult,
 )
-from deskpilot.domain.provider_config import ProviderConfig
+from deskpilot.domain.provider_config import (
+    WINDOWS_CREDENTIAL_ID_PATTERN,
+    ProviderConfig,
+)
 from deskpilot.domain.provider_management import (
     ProviderCatalogSnapshot,
     ProviderHealthSnapshot,
@@ -58,8 +72,16 @@ ProviderManagementDependency = Annotated[
     Depends(get_provider_management),
 ]
 ModelGatewayDependency = Annotated[ModelGateway, Depends(get_model_gateway)]
+ManagedCredentialDependency = Annotated[
+    ManagedCredentialService,
+    Depends(get_managed_credential_service),
+]
 IfMatchHeader = Annotated[str | None, Header(alias="If-Match")]
 IdempotencyHeader = Annotated[str | None, Header(alias="Idempotency-Key")]
+CredentialConfirmationHeader = Annotated[
+    str | None,
+    Header(alias="X-DeskPilot-Credential-Confirmation"),
+]
 
 _ETAG_PATTERN = re.compile(r'^"provider-catalog-v([1-9][0-9]*)"$')
 _IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
@@ -104,6 +126,60 @@ async def get_model_provider_routing(
 ) -> ModelGatewayRoutingSnapshot:
     response.headers["Cache-Control"] = "no-store"
     return gateway.routing_snapshot()
+
+
+@router.get(
+    "/credentials/{identifier}",
+    response_model=ManagedCredentialStatus,
+)
+async def get_managed_credential_status(
+    identifier: Annotated[str, Path(pattern=WINDOWS_CREDENTIAL_ID_PATTERN)],
+    response: Response,
+    service: ManagedCredentialDependency,
+) -> ManagedCredentialStatus:
+    return _execute_credential_operation(
+        lambda: service.status(identifier),
+        response,
+    )
+
+
+@router.put(
+    "/credentials/{identifier}",
+    response_model=ManagedCredentialStatus,
+)
+async def store_managed_credential(
+    identifier: Annotated[str, Path(pattern=WINDOWS_CREDENTIAL_ID_PATTERN)],
+    command: ManagedCredentialWrite,
+    response: Response,
+    service: ManagedCredentialDependency,
+) -> ManagedCredentialStatus:
+    return _execute_credential_operation(
+        lambda: service.store(identifier, command.secret),
+        response,
+    )
+
+
+@router.delete(
+    "/credentials/{identifier}",
+    response_model=ManagedCredentialStatus,
+)
+async def delete_managed_credential(
+    identifier: Annotated[str, Path(pattern=WINDOWS_CREDENTIAL_ID_PATTERN)],
+    response: Response,
+    service: ManagedCredentialDependency,
+    confirmation: CredentialConfirmationHeader = None,
+) -> ManagedCredentialStatus:
+    if confirmation != identifier:
+        raise ProblemException(
+            status_code=400,
+            code="CREDENTIAL_DELETE_CONFIRMATION_REQUIRED",
+            title="需要确认删除凭据",
+            detail="删除 API Key 前必须明确确认当前凭据标识符。",
+        )
+    return _execute_credential_operation(
+        lambda: service.delete(identifier),
+        response,
+    )
 
 
 @router.post("", response_model=ProviderMutationResult, status_code=201)
@@ -307,6 +383,37 @@ async def _execute_mutation(
             detail="Provider 运行配置未能安全保存，未应用本次修改。",
         ) from error
     response.headers["ETag"] = provider_catalog_etag(result.catalog_version)
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+def _execute_credential_operation(
+    operation: Callable[[], ManagedCredentialStatus],
+    response: Response,
+) -> ManagedCredentialStatus:
+    try:
+        result = operation()
+    except CredentialInvalidError as error:
+        raise ProblemException(
+            status_code=422,
+            code=error.code,
+            title="API Key 无效",
+            detail="API Key 不能为空且必须符合 Windows 凭据管理器限制。",
+        ) from error
+    except CredentialBackendUnavailableError as error:
+        raise ProblemException(
+            status_code=503,
+            code=error.code,
+            title="Windows 凭据管理器不可用",
+            detail="当前运行环境不能安全管理 Provider API Key。",
+        ) from error
+    except CredentialOperationError as error:
+        raise ProblemException(
+            status_code=503,
+            code=error.code,
+            title="API Key 操作失败",
+            detail="Windows 凭据管理器未能完成本次操作。",
+        ) from error
     response.headers["Cache-Control"] = "no-store"
     return result
 

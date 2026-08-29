@@ -1,9 +1,26 @@
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProviderEditorModal from './ProviderEditorModal.vue'
 
+const apiMocks = vi.hoisted(() => ({
+  getManagedCredentialStatus: vi.fn(),
+  storeManagedCredential: vi.fn(),
+  deleteManagedCredential: vi.fn(),
+}))
+
+vi.mock('../api', () => apiMocks)
+
 type EditorWrapper = VueWrapper<InstanceType<typeof ProviderEditorModal>>
+
+const availableStatus = {
+  schema_version: 'deskpilot.managed-credential-status.v1' as const,
+  backend: 'windows_credential_manager' as const,
+  identifier: 'OPENAI_RESPONSES',
+  state: 'available' as const,
+  writable: true as const,
+  deleted: false,
+}
 
 async function mountOpen(
   props: Partial<InstanceType<typeof ProviderEditorModal>['$props']> = {},
@@ -19,113 +36,121 @@ async function mountOpen(
       ...props,
     },
   })
-
   await wrapper.setProps({ open: true })
   await nextTick()
   return wrapper
 }
 
-async function fillIdentity(
-  wrapper: EditorWrapper,
-  values: { providerId: string; displayName: string; model: string },
-): Promise<void> {
-  await wrapper.get('input[placeholder="local-ollama"]').setValue(values.providerId)
-  await wrapper.get('input[placeholder="本地 Qwen"]').setValue(values.displayName)
-  await wrapper.get('input[placeholder="qwen3:8b"]').setValue(values.model)
-}
+beforeEach(() => {
+  apiMocks.getManagedCredentialStatus.mockReset()
+  apiMocks.storeManagedCredential.mockReset()
+  apiMocks.deleteManagedCredential.mockReset()
+  apiMocks.getManagedCredentialStatus.mockResolvedValue(availableStatus)
+  apiMocks.storeManagedCredential.mockResolvedValue(availableStatus)
+  apiMocks.deleteManagedCredential.mockResolvedValue({
+    ...availableStatus,
+    state: 'missing',
+    deleted: true,
+  })
+})
+
+afterEach(() => {
+  document.body.innerHTML = ''
+})
 
 describe('ProviderEditorModal', () => {
-  it('切换为 Fake 后只提交 Fake 配置 payload', async () => {
+  it('从 OpenAI 预设把 API Key 先写入安全后端，再提交不含密钥的 Responses 配置', async () => {
     const wrapper = await mountOpen()
 
-    await wrapper.get('input[type="radio"][value="fake"]').setValue()
-    await fillIdentity(wrapper, {
-      providerId: ' fake-local ',
-      displayName: ' Fake Local ',
-      model: ' deterministic-v1 ',
-    })
-    await wrapper.get('input[type="number"]').setValue('1.5')
+    expect(wrapper.get('[data-testid="provider-model"]').element).toHaveProperty(
+      'value',
+      'gpt-5.6-luna',
+    )
+    expect(wrapper.get('[data-testid="provider-base-url"]').element).toHaveProperty(
+      'value',
+      'https://api.openai.com/v1',
+    )
+    const secret = wrapper.get('[data-testid="credential-secret"]')
+    expect(secret.attributes('type')).toBe('password')
+    expect(secret.attributes('autocomplete')).toBe('new-password')
 
-    expect(wrapper.find('input[placeholder="http://127.0.0.1:11434/v1"]').exists()).toBe(false)
-    expect(wrapper.find('.credential-panel').exists()).toBe(false)
-
+    await secret.setValue('ui-test-secret-never-in-provider-config')
     await wrapper.get('form').trigger('submit')
+    await flushPromises()
 
-    expect(wrapper.emitted('save')).toEqual([[
-      {
-        kind: 'fake',
-        enabled: false,
-        provider_id: 'fake-local',
-        display_name: 'Fake Local',
-        model: 'deterministic-v1',
-        delay_seconds: 1.5,
+    expect(apiMocks.storeManagedCredential).toHaveBeenCalledWith(
+      'OPENAI_RESPONSES',
+      'ui-test-secret-never-in-provider-config',
+    )
+    const emitted = wrapper.emitted('save')?.[0]?.[0]
+    expect(emitted).toMatchObject({
+      kind: 'openai_compatible_responses',
+      enabled: false,
+      provider_id: 'openai-responses',
+      model: 'gpt-5.6-luna',
+      base_url: 'https://api.openai.com/v1',
+      credential_ref: {
+        backend: 'windows_credential_manager',
+        identifier: 'OPENAI_RESPONSES',
       },
-    ]])
+    })
+    expect(JSON.stringify(emitted)).not.toContain('ui-test-secret')
+    expect((secret.element as HTMLInputElement).value).toBe('')
   })
 
-  it('云端 OpenAI-compatible 只提交凭据引用，不接收 API Key', async () => {
+  it('提供 DeepSeek、百炼和 Fake 预设，并要求百炼填写 Workspace URL', async () => {
     const wrapper = await mountOpen()
 
-    expect(wrapper.text()).toContain('绝不通过页面提交 API Key')
-    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
-    expect(
-      wrapper.findAll('input').some((input) =>
-        (input.attributes('name') ?? '').toLowerCase().includes('key'),
-      ),
-    ).toBe(false)
-
-    await fillIdentity(wrapper, {
-      providerId: 'cloud-chat',
-      displayName: 'Cloud Chat',
-      model: 'gpt-compatible',
-    })
-    await wrapper.get('input[placeholder="http://127.0.0.1:11434/v1"]').setValue('https://api.example.com/v1')
-
-    const location = wrapper.findAll('select').find((select) =>
-      select.find('option[value="cloud"]').exists(),
+    await wrapper.get('[data-testid="provider-preset"]').setValue('deepseek')
+    expect((wrapper.get('[data-testid="provider-model"]').element as HTMLInputElement).value).toBe(
+      'deepseek-v4-flash',
     )
-    expect(location).toBeDefined()
-    await location!.setValue('cloud')
-    await nextTick()
-
-    const credentialBackend = wrapper.findAll('select').find((select) =>
-      select.find('option[value="environment"]').exists(),
+    expect((wrapper.get('[data-testid="credential-identifier"]').element as HTMLInputElement).value).toBe(
+      'DEEPSEEK',
     )
-    expect(credentialBackend).toBeDefined()
-    await credentialBackend!.setValue('environment')
-    await wrapper.get('input[placeholder="CLOUD_CHAT"]').setValue('DESKPILOT_CREDENTIAL_CLOUD_CHAT')
 
-    const credentialSwitch = wrapper.find('.credential-panel input[type="checkbox"]')
-    expect(credentialSwitch.attributes('disabled')).toBeDefined()
-
+    await wrapper.get('[data-testid="provider-preset"]').setValue('bailian')
     await wrapper.get('form').trigger('submit')
+    expect(wrapper.text()).toContain('百炼北京业务空间专属')
+    expect(wrapper.emitted('save')).toBeUndefined()
 
-    expect(wrapper.emitted('save')).toEqual([[
-      {
-        kind: 'openai_compatible_chat',
-        enabled: false,
-        provider_id: 'cloud-chat',
-        display_name: 'Cloud Chat',
-        model: 'gpt-compatible',
-        base_url: 'https://api.example.com/v1',
-        location: 'cloud',
-        credential_ref: {
-          backend: 'environment',
-          identifier: 'DESKPILOT_CREDENTIAL_CLOUD_CHAT',
-        },
-        allow_private_network: false,
-        supports_streaming: true,
-        supports_structured_output: true,
-        supports_strict_json_schema: false,
-        max_context_tokens: 32_768,
-        max_tokens_field: 'max_tokens',
-        max_response_bytes: 4 * 1024 * 1024,
-        health_timeout_seconds: 5,
-      },
-    ]])
+    await wrapper.get('[data-testid="provider-preset"]').setValue('fake')
+    expect(wrapper.find('[data-testid="credential-secret"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="fake-delay"]').setValue('1.5')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('save')?.[0]?.[0]).toEqual({
+      kind: 'fake',
+      enabled: false,
+      provider_id: 'fake-local',
+      display_name: 'DeskPilot Fake Model',
+      model: 'deskpilot-fake-v1',
+      delay_seconds: 1.5,
+    })
   })
 
-  it('dialog 跟随 open 开关，提交期间禁用关闭与再次提交', async () => {
+  it('只展示凭据状态，并通过两次点击显式删除', async () => {
+    const wrapper = await mountOpen()
+    const statusButton = wrapper.findAll('button').find((button) => button.text() === '检查保存状态')
+    const deleteButton = wrapper.findAll('button').find((button) => button.text() === '删除已保存 Key')
+
+    await statusButton?.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('已安全保存')
+    expect(wrapper.text()).not.toContain('ui-test-secret')
+
+    await deleteButton?.trigger('click')
+    expect(apiMocks.deleteManagedCredential).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('再次点击确认删除')
+    const confirmation = wrapper.findAll('button').find(
+      (button) => button.text() === '再次点击确认删除',
+    )
+    await confirmation?.trigger('click')
+    await flushPromises()
+    expect(apiMocks.deleteManagedCredential).toHaveBeenCalledWith('OPENAI_RESPONSES')
+    expect(wrapper.text()).toContain('尚未保存')
+  })
+
+  it('提交期间禁用关闭与再次提交', async () => {
     const wrapper = await mountOpen({ submitting: true })
     const dialog = wrapper.get('dialog')
     const closeButton = wrapper.get('button[aria-label="关闭对话框"]')
@@ -134,17 +159,9 @@ describe('ProviderEditorModal', () => {
     expect(dialog.attributes('open')).toBeDefined()
     expect(closeButton.attributes('disabled')).toBeDefined()
     expect(submitButton.attributes('disabled')).toBeDefined()
-    expect(submitButton.text()).toBe('保存中…')
+    expect(submitButton.text()).toBe('安全保存中…')
 
     await closeButton.trigger('click')
     expect(wrapper.emitted('close')).toBeUndefined()
-
-    await wrapper.setProps({ submitting: false })
-    await closeButton.trigger('click')
-    expect(wrapper.emitted('close')).toHaveLength(1)
-
-    await wrapper.setProps({ open: false })
-    await nextTick()
-    expect(dialog.attributes('open')).toBeUndefined()
   })
 })

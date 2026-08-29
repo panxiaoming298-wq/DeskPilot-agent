@@ -171,8 +171,8 @@ function makeApproval(overrides: Partial<Approval> = {}): Approval {
   }
 }
 
-function mountApp(): VueWrapper {
-  return mount(App, {
+async function mountApp(): Promise<VueWrapper> {
+  const wrapper = mount(App, {
     global: {
       stubs: {
         ProviderSettings: { template: '<div data-testid="provider-settings" />' },
@@ -183,11 +183,24 @@ function mountApp(): VueWrapper {
       },
     },
   })
+  const tasksNav = wrapper.findAll('nav button').find(
+    (button) => button.text().includes('执行详情'),
+  )
+  await tasksNav?.trigger('click')
+  await nextTick()
+  return wrapper
 }
 
 async function createVisibleTask(wrapper: VueWrapper, task: Task): Promise<void> {
+  if (!wrapper.find('.composer form').exists()) {
+    const tasksNav = wrapper.findAll('nav button').find(
+      (button) => button.text().includes('执行详情'),
+    )
+    await tasksNav?.trigger('click')
+    await nextTick()
+  }
   apiMocks.createTask.mockResolvedValueOnce(task)
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('.composer form').trigger('submit')
   await flushPromises()
 }
 
@@ -282,6 +295,16 @@ beforeEach(() => {
 })
 
 describe('App task workspace', () => {
+  it('启动后直接进入 Agent 会话，不再显示品牌封面或 HUD', async () => {
+    const wrapper = mount(App)
+    await flushPromises()
+
+    expect(wrapper.find('.cover').exists()).toBe(false)
+    expect(wrapper.find('.hud-field').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Agent 会话')
+    expect(wrapper.text()).toContain('本地优先的持续对话')
+  })
+
   it('启动时恢复最新的三个未完成任务并重建独立连接', async () => {
     apiMocks.listTasks.mockResolvedValueOnce({
       items: [
@@ -311,7 +334,7 @@ describe('App task workspace', () => {
       offset: 0,
     })
 
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     await flushPromises()
 
     expect(apiMocks.listTasks).toHaveBeenCalledWith(undefined, 100, 0)
@@ -328,7 +351,7 @@ describe('App task workspace', () => {
   })
 
   it('从侧栏进入独立的任务历史与集中对账工作台', async () => {
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     const centerNav = wrapper.findAll('nav button').find(
       (button) => button.text().includes('历史与对账'),
     )
@@ -337,12 +360,12 @@ describe('App task workspace', () => {
     await centerNav?.trigger('click')
 
     expect(wrapper.find('[data-testid="reconciliation-center-stub"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('集中核对结果不确定的工具调用')
-    expect(wrapper.text()).toContain('DURABLE EXECUTION LEDGER')
+    expect(wrapper.text()).toContain('历史与对账')
+    expect(wrapper.text()).toContain('运行历史与恢复')
   })
 
   it('从侧栏进入受保护运行时运维页', async () => {
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     const operationsNav = wrapper.findAll('nav button').find(
       (button) => button.text().includes('运行时运维'),
     )
@@ -351,9 +374,9 @@ describe('App task workspace', () => {
     await operationsNav?.trigger('click')
 
     expect(wrapper.find('[data-testid="runtime-operations-stub"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('用数据库真值观察并保护运行时')
-    expect(wrapper.text()).toContain('FENCED RUNTIME CONTROL PLANE')
-    expect(wrapper.text()).toContain('阶段 2 · 受保护运维')
+    expect(wrapper.text()).toContain('运行时运维')
+    expect(wrapper.text()).toContain('受保护的运行时控制')
+    expect(wrapper.text()).toContain('受保护运维')
   })
 
   it('创建补偿后切换到新任务并重建事件与审批上下文', async () => {
@@ -388,7 +411,7 @@ describe('App task workspace', () => {
   })
 
   it('shows pause and cancel for a running task and forwards control actions', async () => {
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     await createVisibleTask(wrapper, makeTask('running'))
 
     expect(wrapper.get('[data-testid="pause-task"]').attributes('disabled')).toBeUndefined()
@@ -404,7 +427,7 @@ describe('App task workspace', () => {
   })
 
   it('shows resume and cancel for a paused task', async () => {
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     await createVisibleTask(wrapper, makeTask('paused'))
 
     expect(wrapper.get('[data-testid="resume-task"]').attributes('disabled')).toBeUndefined()
@@ -417,7 +440,7 @@ describe('App task workspace', () => {
 
   it('等待审批时展示精确审批卡和取消，并转发用户决定', async () => {
     approval.value = makeApproval()
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     await createVisibleTask(wrapper, makeTask('waiting_approval'))
 
     expect(wrapper.get('.status-pill').text()).toBe('等待审批')
@@ -432,7 +455,7 @@ describe('App task workspace', () => {
 
   it('审批和任务命令共享交互锁，避免同页并发', async () => {
     approval.value = makeApproval()
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     await createVisibleTask(wrapper, makeTask('waiting_approval'))
 
     approvalAction.value = 'approve'
@@ -447,7 +470,7 @@ describe('App task workspace', () => {
   })
 
   it('removes task commands for terminal states', async () => {
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     await createVisibleTask(wrapper, makeTask('succeeded'))
 
     expect(wrapper.find('[data-testid="pause-task"]').exists()).toBe(false)
@@ -457,7 +480,7 @@ describe('App task workspace', () => {
   })
 
   it('disables every available command while a control request is pending', async () => {
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     await createVisibleTask(wrapper, makeTask('running'))
 
     activeAction.value = 'pause'
@@ -469,7 +492,7 @@ describe('App task workspace', () => {
   })
 
   it('prefers a newer task snapshot over stale websocket status, then accepts a newer cancelled event', async () => {
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     await createVisibleTask(wrapper, makeTask('running', { last_event_seq: 5 }))
 
     events.value = [makeEvent(4, 'task.cancelled')]
@@ -496,7 +519,7 @@ describe('App task workspace', () => {
         resolveCreation = resolve
       }),
     )
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
 
     await wrapper.get('form').trigger('submit')
     await nextTick()
@@ -540,7 +563,7 @@ describe('App task workspace', () => {
   })
 
   it('submits an explicit single-file move only after both paths are provided', async () => {
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     await wrapper.get('[data-testid="task-kind"]').setValue('file_move')
 
     expect(wrapper.find('[data-testid="source-path"]').exists()).toBe(true)
@@ -570,7 +593,7 @@ describe('App task workspace', () => {
   })
 
   it('submits and presents the trusted disk-pressure conditional graph', async () => {
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     await wrapper.get('[data-testid="task-kind"]').setValue('disk_pressure_guarded_file_move')
     await wrapper.get('[data-testid="source-path"]').setValue('D:\\input\\draft.txt')
     await wrapper
@@ -611,7 +634,7 @@ describe('App task workspace', () => {
   })
 
   it('shows reconnect details, retries immediately, and then reports recovery', async () => {
-    const wrapper = mountApp()
+    const wrapper = await mountApp()
     await createVisibleTask(wrapper, makeTask('running'))
 
     streamError.value = '任务事件连接暂时不可用，正在尝试恢复。'

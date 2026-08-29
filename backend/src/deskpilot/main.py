@@ -62,7 +62,10 @@ from deskpilot.application.capability_input_binding_catalog import (
 )
 from deskpilot.application.command_profile_catalog import CommandProfileCatalog
 from deskpilot.application.context_memory_runtime import ContextMemoryRuntime
-from deskpilot.application.credential_resolver import CredentialResolver
+from deskpilot.application.credential_resolver import (
+    CredentialResolver,
+    ManagedCredentialStore,
+)
 from deskpilot.application.effect_dag_cluster_admission import (
     EffectDagClusterAdmissionController,
     EffectDagClusterAdmissionStore,
@@ -77,6 +80,7 @@ from deskpilot.application.event_broker import EventBroker
 from deskpilot.application.inbox_consumer import InboxConsumer
 from deskpilot.application.knowledge_base import LocalKnowledgeBase
 from deskpilot.application.long_term_memory_runtime import LongTermMemoryRuntime
+from deskpilot.application.managed_credential_service import ManagedCredentialService
 from deskpilot.application.mcp_control_plane import McpControlPlane
 from deskpilot.application.model_gateway import (
     ModelGateway,
@@ -153,7 +157,7 @@ from deskpilot.domain.provider_management import (
     ProviderCatalogDefinitionEntry,
 )
 from deskpilot.infrastructure.credential_resolvers import (
-    create_default_credential_resolver,
+    create_default_credential_services,
 )
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.provider_catalog_repository import (
@@ -183,6 +187,7 @@ def create_app(
     *,
     model_provider: ModelProvider | None = None,
     credential_resolver: CredentialResolver | None = None,
+    managed_credential_store: ManagedCredentialStore | None = None,
     runtime_config_protector: RuntimeConfigProtector | None = None,
     runner_supervisor: RunnerSupervisor | None = None,
     policy_engine: PolicyEngine | None = None,
@@ -238,6 +243,20 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         database = Database(resolved_settings.database_url)
         resolved_runtime_config_protector = runtime_config_protector or WindowsDpapiProtector()
+        resolved_credential_resolver = credential_resolver
+        resolved_managed_credential_store = managed_credential_store
+        if model_provider is None and resolved_credential_resolver is None:
+            (
+                resolved_credential_resolver,
+                default_managed_credential_store,
+            ) = create_default_credential_services()
+            if resolved_managed_credential_store is None:
+                resolved_managed_credential_store = default_managed_credential_store
+        managed_credential_service = (
+            ManagedCredentialService(resolved_managed_credential_store)
+            if resolved_managed_credential_store is not None
+            else None
+        )
         provider_health_service = ProviderHealthService(
             model_gateway,
             cache_ttl_seconds=resolved_settings.model_health_cache_ttl_seconds,
@@ -253,9 +272,8 @@ def create_app(
                     raise RuntimeError("Injected Provider catalog is missing")
                 await provider_catalog_repository.import_definition(provider_catalog_definition)
             else:
-                resolved_credential_resolver = (
-                    credential_resolver or create_default_credential_resolver()
-                )
+                if resolved_credential_resolver is None:
+                    raise RuntimeError("Provider credential resolver is unavailable")
                 management_repository = SqlAlchemyProviderManagementRepository(
                     database,
                     ProviderRuntimeConfigCodec(resolved_runtime_config_protector),
@@ -743,6 +761,7 @@ def create_app(
         app.state.policy_engine = resolved_policy_engine
         app.state.provider_catalog = provider_catalog
         app.state.provider_management = provider_management
+        app.state.managed_credential_service = managed_credential_service
         app.state.runner_client = resolved_runner_supervisor
         app.state.runner_supervisor = resolved_runner_supervisor
         app.state.session_security = session_security
@@ -813,6 +832,7 @@ def create_app(
             "Idempotency-Key",
             "If-Match",
             "X-DeskPilot-Client",
+            "X-DeskPilot-Credential-Confirmation",
         ],
         expose_headers=["ETag"],
     )

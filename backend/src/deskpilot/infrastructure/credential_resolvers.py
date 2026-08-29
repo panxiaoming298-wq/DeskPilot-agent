@@ -8,6 +8,7 @@ from pydantic import SecretStr
 from deskpilot.application.credential_resolver import (
     CredentialBackendUnavailableError,
     CredentialResolver,
+    ManagedCredentialStore,
 )
 from deskpilot.domain.provider_config import CredentialReference
 from deskpilot.infrastructure.environment_credentials import (
@@ -33,10 +34,21 @@ class CompositeCredentialResolver:
         return resolver.resolve(reference)
 
 
-def create_default_credential_resolver() -> CredentialResolver:
+def create_default_credential_services() -> tuple[
+    CredentialResolver,
+    ManagedCredentialStore | None,
+]:
     resolvers: dict[str, CredentialResolver] = {
         "environment": EnvironmentCredentialResolver()
     }
+    managed_store: ManagedCredentialStore | None = None
     if sys.platform == "win32":
-        resolvers["windows_credential_manager"] = WindowsCredentialManager()
-    return CompositeCredentialResolver(resolvers)
+        manager = WindowsCredentialManager()
+        resolvers["windows_credential_manager"] = manager
+        managed_store = manager
+    return CompositeCredentialResolver(resolvers), managed_store
+
+
+def create_default_credential_resolver() -> CredentialResolver:
+    resolver, _ = create_default_credential_services()
+    return resolver

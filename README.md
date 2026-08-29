@@ -225,6 +225,7 @@ flowchart LR
 158. [ADR-019：Provider 差异化费用控制与个人凭据后端](doc/ADR-019-Provider差异化费用控制与个人凭据后端.md)
 159. [阶段 115B：Provider 探针 Runner 离线实现检查点](doc/115B-Provider探针Runner离线实现.md)
 160. [阶段 115B：Provider 探针 Live CLI 接线检查点](doc/115B-Provider探针LiveCLI接线.md)
+161. [桌面工作台与前端凭据入口检查点](doc/桌面工作台与前端凭据入口检查点.md)
 
 ## 目标 MVP 与当前边界
 
@@ -279,7 +280,8 @@ flowchart LR
 
 - `backend/`：Python 3.12、FastAPI、SQLite/PostgreSQL、Alembic、带 delivery/inbox/DLQ 和数据库 claim/fencing 的事务 Outbox、默认进程内实时 broker 与可选 RabbitMQ publisher-confirm/manual-ack transport、本地会话安全、任务控制与有界历史查询、角色级 Model Gateway、版本化冻结 Agent Registry/Prompt Package/脱敏 Descriptor/精确 digest Binder、不可变 Task Contract/Executable Plan generation/纯确定性 Compiler/只读规划投影、费用/重试预算、Retry-After、EWMA/熔断、版本化 Provider catalog、安全凭据与密文运行配置、ETag/幂等写 API、Fake/OpenAI-compatible Provider、Policy/Approval、一次性审批、Runner 授权证明、签名 IPC、Runner 自动换代/退避/熔断、持久化工具调用账本、`unknown` 人工对账、内容寻址 Runner 回执证据、跨实例并发幂等冲突归一化、版本化 Tool effect graph、数据库时间 lease/CAS/fencing、v2 DAG 并行 dispatcher/node 心跳/join 恢复、条件边与内容寻址 branch-decision、进程级/集群级公平 admission、事务维护的 ready membership/count 与 v6 keyset 页证明、owner/fence 定向 graph control mailbox、四域受保护运维快照/retention/DLQ requeue/hash-chain 审计、图级终态/skip/cancel reducer、内容寻址并行补偿计划、PostgreSQL `SKIP LOCKED/RETURNING` claim，以及真实 PostgreSQL/RabbitMQ 故障门禁和现有 v1 receipt-bound saga、Windows 每调用 AppContainer/Job Object 安全边界。
 - 后端另已将结构化写请求、受信计划、Policy/审批绑定、Tool 幂等键以及 effect graph/node/mode/fence 游标保存到 current-user DPAPI 受保护 checkpoint；可证明的 created/paused/waiting-approval 可跨 API 重启精确续跑，running Tool 只转 unknown/`waiting_reconciliation`，由显式 continue/terminate 恢复且绝不重放原 call。
-- `frontend/`：Vue 3、TypeScript、Vite 7，最多三个活动 Task 各自保留事件 cursor、连接、预算、待审批/待输入和未读状态；控制请求绑定 exact Task/revision，启动时恢复最新的三个未完成任务。原有安全会话、Approval/Reconciliation、历史、运维和 Provider 控制面保持；Tauri 托盘、受监督冻结 sidecar 与 NSIS 打包已接入。
+- `frontend/`：Vue 3、TypeScript、Vite 7，默认直接进入安静的对话工作台，不再显示鲨鱼开场动画、全屏封面或 HUD；最多三个活动 Task 各自保留事件 cursor、连接、预算、待审批/待输入和未读状态。控制请求绑定 exact Task/revision，启动时恢复最新的三个未完成任务；安全会话、Approval/Reconciliation、历史、运维和 Provider 控制面保持，Tauri 托盘、受监督冻结 sidecar 与 NSIS 打包已接入。
+- 桌面设置页支持 OpenAI、DeepSeek、阿里云百炼和自定义 OpenAI-compatible Responses Provider。用户在前端输入 API Key 后，只经本机受保护 API 写入当前 Windows 用户的 Credential Manager；页面和 API 均不回显密钥，Provider 配置只保存 credential reference。环境变量后端仍供开发/兼容用途，但不是桌面产品的正常配置路径。
 - 当前 TaskProcessor 的磁盘容量任务通过离线 Fake Provider 获得结构化分类和计划，不调用网络模型；显式 `file.move` 请求使用受信任应用计划模板，路径只来自本地用户表单并强制进入 R1 一次性审批，不从自然语言或模型输出提取。
 - 统一对话入口已接入研究、本地知识、固定 MCP、Workspace 读写/检查/固定测试及 HTML/Markdown/PDF Artifact；阶段 111 已为确定性 Route 未命中接入受服务器 Offer 约束的 Turn Planner，阶段 112 已建立不重放 Provider 的通用 TaskLoop。阶段 113 新增项目根限定的递归搜索/批读、Git `status/diff/log` 和六个服务器 Command Profile，Python pytest/Ruff/mypy 与 Node/pnpm test/type-check/build 只在断网临时快照中执行，模型不能提供 executable、argv、cwd 或环境变量。
 - 阶段 116A 第二个检查点已将服务器编译的 `WorkspaceCommandPlan` 持久绑定到 exact Task/ModelPlanner Draft/Step/Offer/TaskLoop node：计划、映射和步骤证明内容寻址，Activation 与每次 command claim 都重验路径、Catalog、Profile 和 node proof。非 `passed` 结果保存失败回执并停止后续步骤，已知失败允许一次有界 Repair，重启不重放已通过或 outcome-unknown 命令。这已闭合固定命令链，但尚不是完整 116B 多 Agent 真实仓库长循环。
@@ -294,7 +296,7 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-29 校准）
 
-阶段 77～114 与 115A 已完成；116A、116B LOCAL-only 和 116C-A 离线准备层也已闭合。116C-A 冻结 8 个公开上游仓库的 20 个历史任务（Python/Node 各 10 个）与 60 个 trial 身份。2026-08-29 又新增三家 Responses adapter、不可激活的单人 `personal_preview`、无网 readiness、一次性 runner library 和默认拒绝的 live CLI。探针仍只计划每家 4 次、共 12 次公开合成请求和零重试；当前仅 MockTransport/零网络 stub 执行，三家 profile 均 disabled。自由 Shell、依赖安装与自动 push 继续禁止，未执行真实模型 capture、Production Admission、cloud activation 或 116C-B 质量结论。完整边界见[项目进度](项目进度.md)、[116C-A 检查点](doc/116C-A-离线真实仓库任务与预检harness.md)、[ADR-019](doc/ADR-019-Provider差异化费用控制与个人凭据后端.md)、[Live CLI 检查点](doc/115B-Provider探针LiveCLI接线.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+阶段 77～114 与 115A 已完成；116A、116B LOCAL-only 和 116C-A 离线准备层也已闭合。116C-A 冻结 8 个公开上游仓库的 20 个历史任务（Python/Node 各 10 个）与 60 个 trial 身份。2026-08-29 又新增三家 Responses adapter、不可激活的单人 `personal_preview`、无网 readiness、一次性 runner library、默认拒绝的 live CLI，以及桌面前端的 Windows 凭据写入入口。探针仍只计划每家 4 次、共 12 次公开合成请求和零重试；当前仅 MockTransport/零网络 stub 执行，三家 profile 均 disabled。前端能够安全保存 Key 不等于授权调用；自由 Shell、依赖安装与自动 push 继续禁止，未执行真实模型 capture、Production Admission、cloud activation 或 116C-B 质量结论。完整边界见[项目进度](项目进度.md)、[116C-A 检查点](doc/116C-A-离线真实仓库任务与预检harness.md)、[ADR-019](doc/ADR-019-Provider差异化费用控制与个人凭据后端.md)、[Live CLI 检查点](doc/115B-Provider探针LiveCLI接线.md)、[桌面工作台与前端凭据入口检查点](doc/桌面工作台与前端凭据入口检查点.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
 

@@ -597,3 +597,65 @@ describe('effect-runtime operations API', () => {
     )
   })
 })
+
+describe('managed Provider credential API', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  it('只在写请求体发送密钥，并为删除绑定精确确认头', async () => {
+    const status = {
+      schema_version: 'deskpilot.managed-credential-status.v1',
+      backend: 'windows_credential_manager',
+      identifier: 'OPENAI_RESPONSES',
+      state: 'available',
+      writable: true,
+      deleted: false,
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(session))
+      .mockResolvedValueOnce(jsonResponse(status))
+      .mockResolvedValueOnce(jsonResponse(status))
+      .mockResolvedValueOnce(jsonResponse({ ...status, state: 'missing', deleted: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const {
+      deleteManagedCredential,
+      getManagedCredentialStatus,
+      storeManagedCredential,
+    } = await import('./api')
+    const secret = 'api-spec-secret-only-in-write-body'
+
+    const read = await getManagedCredentialStatus('OPENAI_RESPONSES')
+    const stored = await storeManagedCredential('OPENAI_RESPONSES', secret)
+    const deleted = await deleteManagedCredential('OPENAI_RESPONSES')
+
+    const readInit = expectAuthenticatedRequest(
+      fetchMock,
+      1,
+      '/api/v1/model-providers/credentials/OPENAI_RESPONSES',
+    )
+    expect(readInit.cache).toBe('no-store')
+    expect(readInit.body).toBeUndefined()
+
+    const storeInit = expectAuthenticatedRequest(
+      fetchMock,
+      2,
+      '/api/v1/model-providers/credentials/OPENAI_RESPONSES',
+      'PUT',
+    )
+    expect(storeInit.body).toBe(JSON.stringify({ secret }))
+
+    const deleteInit = expectAuthenticatedRequest(
+      fetchMock,
+      3,
+      '/api/v1/model-providers/credentials/OPENAI_RESPONSES',
+      'DELETE',
+    )
+    expect(new Headers(deleteInit.headers).get('X-DeskPilot-Credential-Confirmation')).toBe(
+      'OPENAI_RESPONSES',
+    )
+    expect(JSON.stringify({ read, stored, deleted })).not.toContain(secret)
+  })
+})

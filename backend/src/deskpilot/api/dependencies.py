@@ -16,6 +16,7 @@ from deskpilot.application.evaluation_service import EvaluationService
 from deskpilot.application.event_broker import EventBroker
 from deskpilot.application.knowledge_base import LocalKnowledgeBase
 from deskpilot.application.long_term_memory_runtime import LongTermMemoryRuntime
+from deskpilot.application.managed_credential_service import ManagedCredentialService
 from deskpilot.application.mcp_control_plane import McpControlPlane
 from deskpilot.application.model_gateway import ModelGateway
 from deskpilot.application.plan_compilation_service import PlanCompilationService
@@ -131,3 +132,15 @@ def get_provider_management(request: Request) -> ProviderManagementService:
             detail="当前应用使用注入式测试 Provider，未启用持久化管理。",
         )
     return cast(ProviderManagementService, service)
+
+
+def get_managed_credential_service(request: Request) -> ManagedCredentialService:
+    service = getattr(request.app.state, "managed_credential_service", None)
+    if service is None:
+        raise ProblemException(
+            status_code=503,
+            code="MANAGED_CREDENTIAL_STORE_UNAVAILABLE",
+            title="Windows 凭据管理器不可用",
+            detail="当前运行环境不能安全管理 Provider API Key。",
+        )
+    return cast(ManagedCredentialService, service)

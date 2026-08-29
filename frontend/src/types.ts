@@ -535,7 +535,37 @@ export interface OpenAICompatibleProviderConfig {
   health_timeout_seconds: number
 }
 
-export type ProviderConfig = FakeProviderConfig | OpenAICompatibleProviderConfig
+export interface OpenAICompatibleResponsesProviderConfig {
+  kind: 'openai_compatible_responses'
+  enabled: boolean
+  provider_id: string
+  display_name: string
+  model: string
+  base_url: string
+  location: ModelLocation
+  credential_ref: CredentialReference | null
+  allow_private_network: boolean
+  supports_streaming: boolean
+  supports_structured_output: boolean
+  supports_strict_json_schema: boolean
+  max_context_tokens: number
+  max_response_bytes: number
+  health_timeout_seconds: number
+}
+
+export type ProviderConfig =
+  | FakeProviderConfig
+  | OpenAICompatibleProviderConfig
+  | OpenAICompatibleResponsesProviderConfig
+
+export interface ManagedCredentialStatus {
+  schema_version: 'deskpilot.managed-credential-status.v1'
+  backend: 'windows_credential_manager'
+  identifier: string
+  state: 'available' | 'missing' | 'invalid'
+  writable: true
+  deleted: boolean
+}
 
 export interface ProviderMutationResult {
   action: 'created' | 'updated' | 'enabled' | 'disabled' | 'default_changed' | 'deleted'
