@@ -55,6 +55,7 @@ from deskpilot.model_providers.openai_compatible_responses import (
 
 MAX_PROVIDER_PROBE_EXECUTION_SUITE_BYTES = 65_536
 MAX_PROVIDER_PROBE_EXECUTION_PERMIT_BYTES = 65_536
+_WINDOWS_REPARSE_POINT = 0x400
 
 
 class ProviderProbeExecutionError(RuntimeError):
@@ -96,6 +97,54 @@ def load_provider_probe_execution_permit(
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as error:
         raise ProviderProbeExecutionError(
             "Provider probe execution permit failed strict loading"
+        ) from error
+
+
+def validate_provider_probe_report_output(path: Path) -> Path:
+    """Validate a new local JSON destination without creating or replacing it."""
+    try:
+        if path.suffix.lower() != ".json" or path.exists() or path.is_symlink():
+            raise ProviderProbeExecutionError(
+                "Provider probe report output must be one new JSON file"
+            )
+        parent = path.parent.resolve(strict=True)
+        attributes = getattr(parent.stat(), "st_file_attributes", 0)
+        if path.parent.is_symlink() or not parent.is_dir() or attributes & _WINDOWS_REPARSE_POINT:
+            raise ProviderProbeExecutionError(
+                "Provider probe report parent must be one non-reparse directory"
+            )
+        return parent / path.name
+    except ProviderProbeExecutionError:
+        raise
+    except OSError as error:
+        raise ProviderProbeExecutionError("Provider probe report output is unavailable") from error
+
+
+def write_provider_probe_report_exclusive(
+    path: Path,
+    report: ProviderProbeRunReport,
+) -> None:
+    """Durably create one sanitized report without an overwrite path."""
+    output = validate_provider_probe_report_output(path)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    flags |= getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(output, flags, 0o600)
+    except FileExistsError as error:
+        raise ProviderProbeExecutionError("Provider probe report output already exists") from error
+    except OSError as error:
+        raise ProviderProbeExecutionError(
+            "Provider probe report output could not be created"
+        ) from error
+    payload = canonical_json_bytes(report) + b"\n"
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError as error:
+        raise ProviderProbeExecutionError(
+            "Provider probe report output could not be durably written"
         ) from error
 
 
@@ -156,8 +205,6 @@ class LiveProviderProbeFactory:
 class FilesystemProviderProbePermitLedger:
     """Atomically consume permits in an operator-staged local directory."""
 
-    _WINDOWS_REPARSE_POINT = 0x400
-
     def __init__(self, root: Path) -> None:
         self._root = root
 
@@ -170,11 +217,7 @@ class FilesystemProviderProbePermitLedger:
         try:
             root = self._root.resolve(strict=True)
             attributes = getattr(root.stat(), "st_file_attributes", 0)
-            if (
-                self._root.is_symlink()
-                or not root.is_dir()
-                or attributes & self._WINDOWS_REPARSE_POINT
-            ):
+            if self._root.is_symlink() or not root.is_dir() or attributes & _WINDOWS_REPARSE_POINT:
                 raise ProviderProbeExecutionError(
                     "Provider probe permit ledger must be one non-reparse directory"
                 )

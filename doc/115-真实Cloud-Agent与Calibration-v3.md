@@ -83,4 +83,4 @@ Calibration v3 另增加严格的单人 `personal_preview` 路径：同一 opera
 
 [ADR-018](ADR-018-三Provider探针授权与离线就绪门.md) 将 OpenAI、DeepSeek、百炼的上限进一步收敛为每家 4 个计划请求：strict JSON 非流式/流式各重复 2 次，三家总计 12 次，继续固定公开合成数据和零自动/隐藏重试。[ADR-019](ADR-019-Provider差异化费用控制与个人凭据后端.md) 的 v2 binding 最长有效 24 小时，必须确认 exact model、Windows CredentialReference、Key/Base URL 配对、当前价格、应用侧预算包络，以及各家实际存在的 hard-limit、余额或告警/账单延迟证据。
 
-新增 CLI 只能输出 manifest 或执行无网 preflight；它不解析 credential、不探测 endpoint，也没有 run/capture/activate 子命令。[离线 Runner 检查点](115B-Provider探针Runner离线实现.md) 已实现最长 15 分钟的一次性 permit、持久 claim、逐请求预算预留、首错停止与脱敏 receipt/report，但只以 MockTransport 执行，尚未接入 CLI。即使 readiness 为 ready，也不获得联网权限。本检查点没有改变第 7 节 Production 授权清单。
+CLI 的 `manifest/preflight` 始终无网。[离线 Runner 检查点](115B-Provider探针Runner离线实现.md) 已实现最长 15 分钟的一次性 permit、持久 claim、逐请求预算预留、首错停止与脱敏 receipt/report；后续 [Live CLI 接线检查点](115B-Provider探针LiveCLI接线.md) 新增 `run`，但默认拒绝、CI 永久拒绝，并同时要求专用环境开关、live permit、exact run-id、ledger 和新报告路径。该命令尚未被运行；readiness 为 ready 也不获得联网权限。本检查点没有改变第 7 节 Production 授权清单。

@@ -363,7 +363,7 @@ def test_strict_policy_and_binding_loaders_reject_alias_unknown_and_duplicate_ke
         load_provider_probe_binding(v1_path)
 
 
-def test_cli_manifest_and_preflight_never_offer_a_live_run_command(
+def test_cli_manifest_preflight_and_live_command_require_exact_arguments(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -386,8 +386,14 @@ def test_cli_manifest_and_preflight_never_offer_a_live_run_command(
         "durable_permit_claim_required": True,
         "offline_mock_supported": True,
         "live_runner_library_implemented": True,
-        "live_run_cli_available": False,
+        "live_run_cli_available": True,
+        "live_run_default_allowed": False,
+        "live_allow_variable": "DESKPILOT_PHASE115_PROVIDER_PROBE_LIVE_ALLOW",
+        "ci_live_run_allowed": False,
+        "exact_run_id_confirmation_required": True,
+        "exclusive_report_output_required": True,
     }
+    assert manifest["execution_boundary_scope"] == "manifest_and_preflight_only"
     assert not any(manifest["execution_boundary"].values())
 
     binding = _binding("deepseek")

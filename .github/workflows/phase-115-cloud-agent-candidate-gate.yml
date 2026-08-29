@@ -59,6 +59,19 @@ jobs:
           uv run python -m deskpilot.phase107_gate capture --artifact-schema-version v3 --provider-id forbidden-ci-provider --build-id forbidden-ci-build --output forbidden-ci-run.json
           if ($LASTEXITCODE -ne 2) { throw "CI live-capture guard did not fail closed" }
           if (Test-Path forbidden-ci-run.json) { throw "CI produced a live evidence artifact" }
+      - name: Prove CI cannot execute Provider probes
+        env:
+          CI: "true"
+          DESKPILOT_PHASE115_PROVIDER_PROBE_LIVE_ALLOW: "1"
+        run: |
+          uv run python -m deskpilot.phase115_provider_probe_gate run `
+            --binding forbidden-provider-binding.json `
+            --permit forbidden-provider-permit.json `
+            --ledger . `
+            --output forbidden-provider-probe-report.json `
+            --confirm-run-id forbidden-provider-run
+          if ($LASTEXITCODE -ne 2) { throw "CI Provider probe guard did not fail closed" }
+          if (Test-Path forbidden-provider-probe-report.json) { throw "CI produced a Provider probe artifact" }
       - name: Compare immutable evaluation baselines
         run: |
           $before = @(Get-ChildItem tests\baselines\evaluations -File | Sort-Object Name | ForEach-Object { "{0}|{1}" -f $_.Name,(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash })

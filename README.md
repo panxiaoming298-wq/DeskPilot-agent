@@ -4,7 +4,7 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint、116A 固定命令链、116B LOCAL-only 持久多 Agent 编码循环与 116C-A 离线真实仓库任务冻结均已完成；115B 探针 runner 的离线安全层也已实现。** 116C-A 已将 8 个公开上游仓库的 20 个历史 Python/Node 任务冻结为 60 个 trial；探针 runner 仅用 MockTransport 验证一次性许可、预算和脱敏证据，没有 live CLI。115B 真实 Provider/Judge-human 证据与激活授权仍缺失，116C-B 与 cloud-only 候选继续被阻断。详细进度见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint、116A 固定命令链、116B LOCAL-only 持久多 Agent 编码循环与 116C-A 离线真实仓库任务冻结均已完成；115B 探针 runner 与默认拒绝的 live CLI 安全层也已实现。** 116C-A 已将 8 个公开上游仓库的 20 个历史 Python/Node 任务冻结为 60 个 trial；探针 CLI 只以 MockTransport/零网络 stub 验证多重授权和脱敏证据，尚未真实运行。115B 真实 Provider/Judge-human 证据与激活授权仍缺失，116C-B 与 cloud-only 候选继续被阻断。详细进度见[项目进度](项目进度.md)。
 
 产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物。通用规划、持久执行/验证/修复循环、首版安全代码工具面、三任务桌面后台和真实仓库离线验收资产已经闭合；当前最大缺口是用真实模型跑完该任务集并达到生产质量门。后续路线保持 **Codex 优先、Marvis 后置**：先完成 115B 的真实生产授权与证据，再执行 116C-B 的真实仓库质量验收，最后进入桌面 Operator。
 
@@ -224,6 +224,7 @@ flowchart LR
 157. [ADR-018：三 Provider 探针授权与离线就绪门](doc/ADR-018-三Provider探针授权与离线就绪门.md)
 158. [ADR-019：Provider 差异化费用控制与个人凭据后端](doc/ADR-019-Provider差异化费用控制与个人凭据后端.md)
 159. [阶段 115B：Provider 探针 Runner 离线实现检查点](doc/115B-Provider探针Runner离线实现.md)
+160. [阶段 115B：Provider 探针 Live CLI 接线检查点](doc/115B-Provider探针LiveCLI接线.md)
 
 ## 目标 MVP 与当前边界
 
@@ -293,7 +294,7 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-29 校准）
 
-阶段 77～114 与 115A 已完成；116A、116B LOCAL-only 和 116C-A 离线准备层也已闭合。116C-A 冻结 8 个公开上游仓库的 20 个历史任务（Python/Node 各 10 个）与 60 个 trial 身份。2026-08-29 又新增三家 Responses adapter、不可激活的单人 `personal_preview`、无网探针就绪门，以及绑定 v2 的一次性 runner library。探针仍只计划每家 4 次、共 12 次公开合成请求和零重试；当前仅 MockTransport 执行，CLI 没有 live run，三家 profile 均 disabled。自由 Shell、依赖安装与自动 push 继续禁止，未执行真实模型 capture、Production Admission、cloud activation 或 116C-B 质量结论。完整边界见[项目进度](项目进度.md)、[116C-A 检查点](doc/116C-A-离线真实仓库任务与预检harness.md)、[ADR-019](doc/ADR-019-Provider差异化费用控制与个人凭据后端.md)、[Runner 检查点](doc/115B-Provider探针Runner离线实现.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+阶段 77～114 与 115A 已完成；116A、116B LOCAL-only 和 116C-A 离线准备层也已闭合。116C-A 冻结 8 个公开上游仓库的 20 个历史任务（Python/Node 各 10 个）与 60 个 trial 身份。2026-08-29 又新增三家 Responses adapter、不可激活的单人 `personal_preview`、无网 readiness、一次性 runner library 和默认拒绝的 live CLI。探针仍只计划每家 4 次、共 12 次公开合成请求和零重试；当前仅 MockTransport/零网络 stub 执行，三家 profile 均 disabled。自由 Shell、依赖安装与自动 push 继续禁止，未执行真实模型 capture、Production Admission、cloud activation 或 116C-B 质量结论。完整边界见[项目进度](项目进度.md)、[116C-A 检查点](doc/116C-A-离线真实仓库任务与预检harness.md)、[ADR-019](doc/ADR-019-Provider差异化费用控制与个人凭据后端.md)、[Live CLI 检查点](doc/115B-Provider探针LiveCLI接线.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
 
@@ -354,6 +355,8 @@ ADR-018 离线检查点：新增不可变三 Provider 探针策略、最长 24 �
 ADR-019 离线检查点：v1 manifest 原样保留，默认 loader 升级到 digest=`0b221968240375def2ee886c4f73e937bf399db3f7009d86330892ed7c58a141` 的 v2。OpenAI 固定 `gpt-5.6-luna` 并优先 hard-limit、DeepSeek 使用余额确认、百炼固定北京 Workspace 与费用告警/账单延迟确认；三家共同要求探针专用 Windows credential、应用侧预算包络、串行/首错停止、usage 必须存在、正文与 Header 不落日志。专项 21/21、受影响联合回归 76/76、Ruff、strict mypy 318、`pip check`、不可变基线和 workflow YAML 通过；CLI 仍不具联网执行权。完整边界见[ADR-019](doc/ADR-019-Provider差异化费用控制与个人凭据后端.md)。
 
 115B 探针 Runner 离线检查点：新增 digest=`5096f22c0d600a1282d6121437476dec2999be45bad93b09c8003d623fa1f326` 的公开合成 execution suite、最长 15 分钟的一次性 permit、跨进程不可覆盖 claim、逐请求保守预算预留和脱敏 receipt/report。三家 MockTransport 各严格执行非流式/流式各 2 次，首错/usage 缺失立即停止，正文、Header、URL、credential 和原始 response ID 不落证据。执行专项 9/9、连同 readiness 30/30、受影响回归 85/85；Ruff、strict mypy 320、依赖/基线/workflow 门通过。CLI 仍只有 `manifest/preflight` 且全部现行 execution boundary 为 false。本检查点没有执行真实模型或解锁 Production/116C-B。完整边界见[Runner 检查点](doc/115B-Provider探针Runner离线实现.md)。
+
+115B 探针 Live CLI 接线检查点：新增 `run` 子命令，但默认拒绝且 CI 永久拒绝；必须同时具备专用环境开关、当前 v2 binding、15 分钟 live permit、exact run-id、持久 ledger 与新 JSON 输出。报告写盘前重验全链 authority，最终文件只允许 `O_EXCL` 创建且不可覆盖。执行专项 13/13、readiness 联合 34/34、受影响回归 89/89，Ruff/mypy/依赖/基线/workflow 门通过。自动化仅用 MockTransport/零网络 stub，真实 credential 未解析，Provider 未访问，费用为零；Production 与 116C-B 继续阻断。完整边界见[Live CLI 检查点](doc/115B-Provider探针LiveCLI接线.md)。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 

@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -20,6 +20,7 @@ from deskpilot.application.provider_probe_execution import (
     ProviderProbeProviderFactory,
     ProviderProbeRunner,
     load_provider_probe_execution_permit,
+    write_provider_probe_report_exclusive,
 )
 from deskpilot.core.canonical_json import sha256_digest
 from deskpilot.domain.provider_probe_authorizations import (
@@ -28,10 +29,13 @@ from deskpilot.domain.provider_probe_authorizations import (
 from deskpilot.domain.provider_probe_executions import (
     ProviderProbeExecutionMode,
     ProviderProbeExecutionPermit,
+    ProviderProbeRunReport,
 )
 from deskpilot.model_providers.openai_compatible_responses import (
     OpenAICompatibleResponsesProvider,
 )
+from deskpilot.phase115_provider_probe_gate import PROVIDER_PROBE_LIVE_ALLOW_VARIABLE
+from deskpilot.phase115_provider_probe_gate import main as provider_probe_gate_main
 
 BACKEND_ROOT = Path(__file__).parents[1]
 EXECUTION_SUITE_PATH = (
@@ -109,6 +113,7 @@ def _binding(family: str) -> ProviderProbeOperatorBinding:
 def _permit(
     binding: ProviderProbeOperatorBinding,
     *,
+    execution_mode: Literal["offline_mock", "live_provider"] = "offline_mock",
     overrides: dict[str, Any] | None = None,
 ) -> ProviderProbeExecutionPermit:
     policy_bundle = ProviderProbePolicyLoader().load()
@@ -131,15 +136,19 @@ def _permit(
         "provider_family": binding.provider_family,
         "provider_id": binding.provider_id,
         "run_id": f"probe-run-{binding.provider_family}-0001",
-        "execution_mode": "offline_mock",
+        "execution_mode": execution_mode,
         "exact_request_count": 4,
         "maximum_reserved_microunits": (4 * profile.budget.maximum_per_request_microunits),
         "data_class": "public_synthetic",
-        "network_access_authorized": False,
-        "credential_resolution_authorized": False,
-        "real_model_capture_authorized": False,
+        "network_access_authorized": execution_mode == "live_provider",
+        "credential_resolution_authorized": execution_mode == "live_provider",
+        "real_model_capture_authorized": execution_mode == "live_provider",
         "automatic_retries": 0,
-        "operator_confirmation": "RUN FOUR OFFLINE MOCK PROVIDER PROBES",
+        "operator_confirmation": (
+            "RUN FOUR LIVE PUBLIC SYNTHETIC PROVIDER PROBES"
+            if execution_mode == "live_provider"
+            else "RUN FOUR OFFLINE MOCK PROVIDER PROBES"
+        ),
         "approved_by": "reviewer_operator_owner",
         "approved_at": FIXED_NOW,
         "valid_until": FIXED_NOW + timedelta(minutes=10),
@@ -164,6 +173,52 @@ def _claim_files(root: Path) -> list[Path]:
 
 def _directory_entries(root: Path) -> list[Path]:
     return list(root.iterdir())
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _failed_live_report(
+    binding: ProviderProbeOperatorBinding,
+    permit: ProviderProbeExecutionPermit,
+) -> ProviderProbeRunReport:
+    material = {
+        "schema_version": "deskpilot.provider-probe-run-report.v1",
+        "policy_digest": permit.policy_digest,
+        "execution_suite_digest": permit.execution_suite_digest,
+        "binding_digest": binding.binding_digest,
+        "readiness_report_digest": permit.readiness_report_digest,
+        "permit_digest": permit.permit_digest,
+        "run_id": permit.run_id,
+        "execution_mode": "live_provider",
+        "provider_family": binding.provider_family,
+        "provider_id": binding.provider_id,
+        "model_digest": sha256_digest({"model": binding.exact_model}),
+        "status": "failed",
+        "attempted_request_count": 0,
+        "successful_request_count": 0,
+        "reserved_microunits": 0,
+        "receipts": [],
+        "terminal_error_code": "CREDENTIAL_NOT_FOUND",
+        "started_at": FIXED_NOW,
+        "completed_at": FIXED_NOW,
+        "credentials_resolved": False,
+        "network_request_count": 0,
+        "real_model_capture": False,
+        "automatic_retries": 0,
+        "serial_execution": True,
+        "stopped_on_first_error": True,
+        "request_and_response_bodies_logged": False,
+        "headers_logged": False,
+        "credentials_logged": False,
+        "production_admission": False,
+        "cloud_activation": False,
+        "full_116c_b": False,
+    }
+    return ProviderProbeRunReport.model_validate(
+        {**material, "report_digest": sha256_digest(material)}
+    )
 
 
 def _success_response(request: httpx.Request, ordinal: int) -> httpx.Response:
@@ -282,6 +337,13 @@ async def test_offline_runner_executes_exact_four_serial_sanitized_requests(
     assert binding.base_url not in serialized
     assert binding.credential_ref.identifier not in serialized
     assert "public synthetic compatibility probe" not in serialized.lower()
+    report_path = tmp_path / "sanitized-report.json"
+    write_provider_probe_report_exclusive(report_path, report)
+    persisted = json.loads(_read_text(report_path))
+    assert persisted["report_digest"] == report.report_digest
+    assert binding.base_url not in _read_text(report_path)
+    with pytest.raises(ProviderProbeExecutionError, match="new JSON"):
+        write_provider_probe_report_exclusive(report_path, report)
     claim_files = _claim_files(tmp_path)
     assert len(claim_files) == 1
     assert binding.base_url not in claim_files[0].read_text(encoding="utf-8")
@@ -455,3 +517,172 @@ def test_runner_recomputes_execution_bundle_digest_before_accepting_it(
             permit_ledger=FilesystemProviderProbePermitLedger(tmp_path),
             clock=lambda: FIXED_NOW,
         )
+
+
+@pytest.mark.parametrize(
+    ("ci_value", "live_allow", "expected_detail"),
+    (
+        (None, None, PROVIDER_PROBE_LIVE_ALLOW_VARIABLE),
+        ("true", "1", "CI is not allowed"),
+    ),
+)
+def test_live_cli_fails_before_loading_inputs_or_building_runner(
+    ci_value: str | None,
+    live_allow: str | None,
+    expected_detail: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    if ci_value is None:
+        monkeypatch.delenv("CI", raising=False)
+    else:
+        monkeypatch.setenv("CI", ci_value)
+    if live_allow is None:
+        monkeypatch.delenv(PROVIDER_PROBE_LIVE_ALLOW_VARIABLE, raising=False)
+    else:
+        monkeypatch.setenv(PROVIDER_PROBE_LIVE_ALLOW_VARIABLE, live_allow)
+    built = False
+
+    def forbidden_builder(*_: object) -> Any:
+        nonlocal built
+        built = True
+        raise AssertionError("live runner must not be built")
+
+    output = tmp_path / "must-not-exist.json"
+    result = provider_probe_gate_main(
+        (
+            "run",
+            "--binding",
+            str(tmp_path / "missing-binding.json"),
+            "--permit",
+            str(tmp_path / "missing-permit.json"),
+            "--ledger",
+            str(tmp_path),
+            "--output",
+            str(output),
+            "--confirm-run-id",
+            "probe-run-never-0001",
+        ),
+        live_runner_builder=forbidden_builder,
+    )
+
+    assert result == 2
+    error = json.loads(capsys.readouterr().out)
+    assert expected_detail in error["detail"]
+    assert built is False
+    assert output.exists() is False
+
+
+def test_live_cli_requires_exact_run_id_and_new_output_before_runner_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv(PROVIDER_PROBE_LIVE_ALLOW_VARIABLE, "1")
+    binding = _binding("openai")
+    permit = _permit(binding, execution_mode="live_provider")
+    binding_path = tmp_path / "binding.json"
+    permit_path = tmp_path / "permit.json"
+    binding_path.write_text(binding.model_dump_json(), encoding="utf-8")
+    permit_path.write_text(permit.model_dump_json(), encoding="utf-8")
+    built = False
+
+    def forbidden_builder(*_: object) -> Any:
+        nonlocal built
+        built = True
+        raise AssertionError("live runner must not be built")
+
+    common = (
+        "run",
+        "--binding",
+        str(binding_path),
+        "--permit",
+        str(permit_path),
+        "--ledger",
+        str(tmp_path),
+        "--output",
+        str(tmp_path / "report.json"),
+    )
+    assert (
+        provider_probe_gate_main(
+            (*common, "--confirm-run-id", "probe-run-wrong-0001"),
+            live_runner_builder=forbidden_builder,
+        )
+        == 2
+    )
+    assert "run-id confirmation" in json.loads(capsys.readouterr().out)["detail"]
+
+    output = tmp_path / "report.json"
+    output.write_text("reserved", encoding="utf-8")
+    assert (
+        provider_probe_gate_main(
+            (*common, "--confirm-run-id", permit.run_id),
+            live_runner_builder=forbidden_builder,
+        )
+        == 2
+    )
+    assert "new JSON file" in json.loads(capsys.readouterr().out)["detail"]
+    assert output.read_text(encoding="utf-8") == "reserved"
+    assert built is False
+
+
+def test_live_cli_writes_only_authority_bound_sanitized_terminal_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv(PROVIDER_PROBE_LIVE_ALLOW_VARIABLE, "1")
+    binding = _binding("deepseek")
+    permit = _permit(binding, execution_mode="live_provider")
+    binding_path = tmp_path / "binding.json"
+    permit_path = tmp_path / "permit.json"
+    output = tmp_path / "terminal-report.json"
+    binding_path.write_text(binding.model_dump_json(), encoding="utf-8")
+    permit_path.write_text(permit.model_dump_json(), encoding="utf-8")
+    report = _failed_live_report(binding, permit)
+    calls = 0
+
+    class StubRunner:
+        async def run(
+            self,
+            actual_binding: ProviderProbeOperatorBinding,
+            actual_permit: ProviderProbeExecutionPermit,
+        ) -> ProviderProbeRunReport:
+            assert actual_binding == binding
+            assert actual_permit == permit
+            return report
+
+    def builder(*_: object) -> StubRunner:
+        nonlocal calls
+        calls += 1
+        return StubRunner()
+
+    result = provider_probe_gate_main(
+        (
+            "run",
+            "--binding",
+            str(binding_path),
+            "--permit",
+            str(permit_path),
+            "--ledger",
+            str(tmp_path),
+            "--output",
+            str(output),
+            "--confirm-run-id",
+            permit.run_id,
+        ),
+        live_runner_builder=builder,
+    )
+
+    assert result == 2
+    assert calls == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["report_digest"] == report.report_digest
+    assert summary["status"] == "failed"
+    persisted = _read_text(output)
+    assert json.loads(persisted)["terminal_error_code"] == "CREDENTIAL_NOT_FOUND"
+    assert binding.base_url not in persisted
+    assert binding.credential_ref.identifier not in persisted

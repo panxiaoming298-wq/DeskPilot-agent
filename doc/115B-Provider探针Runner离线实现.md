@@ -56,7 +56,7 @@ Runner 的固定顺序为：
 
 ## 当前可达性边界
 
-代码中存在 `LiveProviderProbeFactory` 作为受约束 HTTP composition，但应用和 CLI 都没有接线。`python -m deskpilot.phase115_provider_probe_gate` 仍只有 `manifest/preflight`，`run` 命令继续不存在；manifest 显示 library 已实现，同时明确 `live_run_cli_available=false` 和全部现行 execution boundary 为 false。
+本检查点提交时，`LiveProviderProbeFactory` 只存在于 library，CLI 尚无 `run`。后续 [Live CLI 接线检查点](115B-Provider探针LiveCLI接线.md) 已增加默认拒绝、CI 永久拒绝、环境开关、live permit、exact run-id 与不可覆盖报告门，但没有实际运行。manifest 的普通调用仍显示当前 invocation 的全部 execution boundary 为 false。
 
 因此，本批只证明 runner 合约在离线 MockTransport 下可执行，不能证明 OpenAI、DeepSeek 或百炼真实兼容，也没有产生真实模型 capture、费用或成功率。
 
