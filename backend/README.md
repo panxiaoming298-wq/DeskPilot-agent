@@ -188,6 +188,7 @@ DESKPILOT_RUNNER_WORKER_ACTIVE_PROCESS_LIMIT=1
 - `model_providers/openai_compatible_chat.py` 提供 `/chat/completions`、strict JSON Schema、SSE、usage、health 和脱敏 HTTP 错误归一化。
 - `model_providers/openai_compatible_responses.py` 提供保守 `/responses` 公共子集、strict JSON Schema、语义 SSE、exact model identity、usage、health 和脱敏错误归一化，可用于 disabled 的 OpenAI、DeepSeek 与阿里云百炼 profile。
 - `domain/provider_probe_authorizations.py` 与 `application/provider_probe_authorization.py` 冻结三家探针预算、零重试、24 小时 v2 operator binding 和不解析凭据的离线 readiness report；v2 固定 `gpt-5.6-luna`、Windows Credential Manager、DeepSeek 余额证据与百炼北京费用告警证据，CLI 只有 `manifest/preflight`，不提供 live run。
+- `domain/provider_probe_executions.py` 与 `application/provider_probe_execution.py` 冻结公开合成 execution suite、最长 15 分钟的一次性 permit、持久 permit claim、逐请求保守预算预留和脱敏 receipt/report。`offline_mock` 禁止 credential resolver；`live_provider` factory 仅存在于 library，未接入 CLI 或默认应用，因此当前不会解析密钥或联网。
 - `domain/provider_config.py` 定义不含密钥的 Fake/兼容 Provider 配置、credential reference 与 endpoint 安全策略。
 - `infrastructure/environment_credentials.py` 只解析 `DESKPILOT_CREDENTIAL_*` 环境变量并返回 `SecretStr`。
 - `infrastructure/windows_credentials.py` 通过 Win32 Generic Credential 保存 DeskPilot 专用 target，支持读取、写入、幂等删除和临时缓冲区清零。

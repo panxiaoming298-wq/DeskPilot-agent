@@ -376,6 +376,18 @@ def test_cli_manifest_and_preflight_never_offer_a_live_run_command(
         "windows_credential_manager"
     )
     assert manifest["future_runner_guards"]["serial_execution"] is True
+    assert manifest["execution_contract"] == {
+        "suite_digest": (
+            "5096f22c0d600a1282d6121437476dec2999be45bad93b09c8003d623fa1f326"
+        ),
+        "exact_request_count": 4,
+        "maximum_permit_validity_minutes": 15,
+        "one_shot_permit_required": True,
+        "durable_permit_claim_required": True,
+        "offline_mock_supported": True,
+        "live_runner_library_implemented": True,
+        "live_run_cli_available": False,
+    }
     assert not any(manifest["execution_boundary"].values())
 
     binding = _binding("deepseek")

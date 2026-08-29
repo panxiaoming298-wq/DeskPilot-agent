@@ -60,7 +60,7 @@ v2 额外冻结：
 - usage 缺失即停止；
 - 不记录请求/响应正文或 Header。
 
-这些只是未来 live runner 的前置合约。当前 CLI 仍只有 `manifest/preflight`，并且 readiness report 固定 `network_access=false`、`credentials_resolved=false`、`real_model_capture=false`、`production_admission=false`、`cloud_activation=false`。
+这些护栏现已由 [115B Provider 探针 Runner 离线实现检查点](115B-Provider探针Runner离线实现.md) 落成独立 library：新增最长 15 分钟的一次性执行许可、持久 claim、逐请求保守预算预留和脱敏 receipt/report，并以 MockTransport 验证三家各 4 次的串行执行。当前 CLI 仍只有 `manifest/preflight`，没有 `run`；现行 readiness report 仍固定 `network_access=false`、`credentials_resolved=false`、`real_model_capture=false`、`production_admission=false`、`cloud_activation=false`。
 
 ## 仍需 operator 后续完成的事实
 
@@ -69,7 +69,7 @@ v2 额外冻结：
 1. 在百炼北京地域创建独立 `deskpilot-probe` Workspace，复制其 API Host；
 2. 三家分别创建探针专用 Key，并由 operator 在本机安全写入 Windows Credential Manager；
 3. 在最长 24 小时的 binding 中确认当期价格、DeepSeek 余额、百炼费用告警/账单延迟，以及 OpenAI hard limit 或显式应用侧 fallback；
-4. 再次单独授权 live runner 的实现与运行。实现不等于运行。
+4. 再次单独授权 live runner 的接线与运行。library 已实现不等于 CLI 已接线，更不等于运行。
 
 ## 官方依据
 

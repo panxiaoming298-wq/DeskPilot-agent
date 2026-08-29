@@ -12,6 +12,10 @@ from deskpilot.application.provider_probe_authorization import (
     ProviderProbePolicyLoader,
     load_provider_probe_binding,
 )
+from deskpilot.application.provider_probe_execution import (
+    ProviderProbeExecutionError,
+    ProviderProbeExecutionSuiteLoader,
+)
 
 
 def _timestamp(value: str) -> datetime:
@@ -40,6 +44,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         bundle = ProviderProbePolicyLoader().load()
         if arguments.command == "manifest":
             policy = bundle.policy
+            execution_bundle = ProviderProbeExecutionSuiteLoader(bundle).load()
             print(
                 json.dumps(
                     {
@@ -78,6 +83,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "future_runner_guards": (
                             policy.future_runner_guards.model_dump(mode="json")
                         ),
+                        "execution_contract": {
+                            "suite_digest": execution_bundle.suite_digest,
+                            "exact_request_count": (
+                                execution_bundle.suite.exact_request_count
+                            ),
+                            "maximum_permit_validity_minutes": (
+                                execution_bundle.suite.maximum_permit_validity_minutes
+                            ),
+                            "one_shot_permit_required": True,
+                            "durable_permit_claim_required": True,
+                            "offline_mock_supported": True,
+                            "live_runner_library_implemented": True,
+                            "live_run_cli_available": False,
+                        },
                         "execution_boundary": policy.execution_boundary.model_dump(
                             mode="json"
                         ),
@@ -90,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = ProviderProbeOfflinePreflight(bundle).run(binding, now=arguments.now)
         print(json.dumps(report.model_dump(mode="json"), sort_keys=True))
         return 0 if report.ready else 2
-    except ProviderProbeAuthorizationError as error:
+    except (ProviderProbeAuthorizationError, ProviderProbeExecutionError) as error:
         print(json.dumps({"code": error.code, "detail": str(error)}, sort_keys=True))
         return 2
 

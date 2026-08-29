@@ -47,6 +47,7 @@ jobs:
             tests/test_phase109_model_admission.py `
             tests/test_phase115_personal_preview.py `
             tests/test_phase115_provider_probe_gate.py `
+            tests/test_phase115_provider_probe_execution.py `
             tests/test_openai_compatible_responses_provider.py `
             tests/test_provider_configuration.py `
             tests/test_agent_registry.py
@@ -72,7 +73,7 @@ jobs:
         run: |
           uv build --wheel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          uv run python -c "from pathlib import Path; import zipfile; source=Path('src/deskpilot/agents/prompts'); expected={f'deskpilot/agents/prompts/{p.name}' for p in source.iterdir() if p.is_file() and p.suffix in {'.json','.txt'}}; expected.update({'deskpilot/evaluations/phase115_provider_probe_policy_v1.yaml','deskpilot/evaluations/phase115_provider_probe_policy_v2.yaml'}); wheel=max(Path('dist').glob('*.whl'), key=lambda p:p.stat().st_mtime_ns); missing=expected-set(zipfile.ZipFile(wheel).namelist()); assert not missing, sorted(missing); print(f'verified {len(expected)} packaged resources')"
+          uv run python -c "from pathlib import Path; import zipfile; source=Path('src/deskpilot/agents/prompts'); expected={f'deskpilot/agents/prompts/{p.name}' for p in source.iterdir() if p.is_file() and p.suffix in {'.json','.txt'}}; expected.update({'deskpilot/evaluations/phase115_provider_probe_policy_v1.yaml','deskpilot/evaluations/phase115_provider_probe_policy_v2.yaml','deskpilot/evaluations/phase115_provider_probe_execution_v1.yaml'}); wheel=max(Path('dist').glob('*.whl'), key=lambda p:p.stat().st_mtime_ns); missing=expected-set(zipfile.ZipFile(wheel).namelist()); assert not missing, sorted(missing); print(f'verified {len(expected)} packaged resources')"
       - name: Run default backend suite
         run: |
           uv run pytest --junitxml=pytest-default.xml

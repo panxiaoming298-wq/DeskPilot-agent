@@ -1,0 +1,40 @@
+schema_version: deskpilot.provider-probe-execution-suite.v1
+suite_id: phase115-three-provider-public-probe-execution
+version: 1
+provider_probe_policy_digest: 0b221968240375def2ee886c4f73e937bf399db3f7009d86330892ed7c58a141
+data_class: public_synthetic
+cases:
+  - case_id: public-strict-json-nonstream-v1
+    transport: nonstream
+    repeat_count: 2
+    system_prompt: >-
+      This is a public synthetic compatibility probe. Return only the requested JSON
+      object. Do not use tools, external retrieval, or stored conversation state.
+    user_prompt_template: >-
+      Return a JSON object with provider_family set to {provider_family}, case_id set
+      to {case_id}, and status set to ok.
+    schema_name: provider_probe_result
+    expected_status: ok
+  - case_id: public-strict-json-stream-v1
+    transport: stream
+    repeat_count: 2
+    system_prompt: >-
+      This is a public synthetic compatibility probe. Return only the requested JSON
+      object. Do not use tools, external retrieval, or stored conversation state.
+    user_prompt_template: >-
+      Return a JSON object with provider_family set to {provider_family}, case_id set
+      to {case_id}, and status set to ok.
+    schema_name: provider_probe_result
+    expected_status: ok
+exact_request_count: 4
+maximum_permit_validity_minutes: 15
+serial_execution: true
+stop_on_first_error: true
+usage_required: true
+automatic_retries: 0
+hidden_retries: false
+request_and_response_bodies_logged: false
+headers_logged: false
+production_admission: false
+cloud_activation: false
+full_116c_b: false
