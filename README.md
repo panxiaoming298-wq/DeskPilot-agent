@@ -4,9 +4,9 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint 已完成；116A 固定命令链和 116B LOCAL-only 持久多 Agent 编码循环均已闭合。** 第二十一检查点在最终安装 sidecar/AppContainer 中证明三任务并发强杀只使两个已领取 pytest 收敛为 unknown 且不重放，未领取同伴跨代完成 Delivery；6 个 Attempt、4 个 verified ResultRef、2 个 unknown Attempt 与 profile journal 全部可对账。下一安全工程任务是冻结 116C 的离线真实仓库任务/harness；115B 真实 Provider/Judge-human 证据与激活授权仍缺失，cloud-only 候选继续默认 disabled。详细进度见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint、116A 固定命令链、116B LOCAL-only 持久多 Agent 编码循环与 116C-A 离线真实仓库任务冻结均已完成。** 116C-A 已将 8 个公开上游仓库的 20 个历史 Python/Node 任务冻结为 60 个 trial，并用 operator-staged bare Git mirror 完成 8/8 仓库、20/20 任务的只读预检；这不是模型质量结果。115B 真实 Provider/Judge-human 证据与激活授权仍缺失，116C-B 与 cloud-only 候选继续被阻断。详细进度见[项目进度](项目进度.md)。
 
-产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物。通用规划、持久执行/验证/修复循环、首版安全代码工具面和三任务桌面后台已经闭合；当前最大缺口是真实仓库长循环和真实模型生产闭环。后续路线保持 **Codex 优先、Marvis 后置**：先完成 116A/116B 的用户可感知纵切，再补齐 115B/116C 的真实模型质量门，最后进入桌面 Operator。
+产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物。通用规划、持久执行/验证/修复循环、首版安全代码工具面、三任务桌面后台和真实仓库离线验收资产已经闭合；当前最大缺口是用真实模型跑完该任务集并达到生产质量门。后续路线保持 **Codex 优先、Marvis 后置**：先完成 115B 的真实生产授权与证据，再执行 116C-B 的真实仓库质量验收，最后进入桌面 Operator。
 
 ## 一句话架构
 
@@ -217,6 +217,9 @@ flowchart LR
 150. [阶段 116B：持久多 Agent 编码循环第十七检查点](doc/116B-持久多Agent编码循环第十七检查点.md)
 151. [阶段 116B：持久多 Agent 编码循环第十八检查点](doc/116B-持久多Agent编码循环第十八检查点.md)
 152. [阶段 116B：持久多 Agent 编码循环第十九检查点](doc/116B-持久多Agent编码循环第十九检查点.md)
+153. [阶段 116B：持久多 Agent 编码循环第二十检查点](doc/116B-持久多Agent编码循环第二十检查点.md)
+154. [阶段 116B：持久多 Agent 编码循环第二十一检查点](doc/116B-持久多Agent编码循环第二十一检查点.md)
+155. [阶段 116C-A：离线真实仓库任务与预检 harness](doc/116C-A-离线真实仓库任务与预检harness.md)
 
 ## 目标 MVP 与当前边界
 
@@ -286,7 +289,7 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-29 校准）
 
-阶段 77～114 与 115A 已完成；116A 的固定命令链和 116B 的 LOCAL-only 持久多 Agent 编码循环也已闭合。第二十一检查点把九层 exact-digest 资产推进到安装态并发强杀：三个 Ruff 均通过后，两个 pytest running、第三个 ready 时强杀完整 sidecar；第二代只把两个 claimed Attempt 固化为 unknown，未领取同伴只执行一次 pytest 并完成 Delivery。下一步是 116C 的离线任务/harness 冻结准备；自由 Shell、依赖安装与自动 push 继续禁止，115B 真实 Provider/Judge-human 证据与激活授权仍缺失，cloud-only 候选继续 disabled。完整边界见[项目进度](项目进度.md)、[第二十一检查点](doc/116B-持久多Agent编码循环第二十一检查点.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+阶段 77～114 与 115A 已完成；116A、116B LOCAL-only 和 116C-A 离线准备层也已闭合。116C-A 冻结 8 个公开上游仓库的 20 个历史任务（Python/Node 各 10 个）与 60 个 trial 身份，固定 80% 成功门槛和所有越权项零容忍；严格 loader、CLI 和 operator-staged bare Git mirror 只读预检均已落地。自由 Shell、依赖安装与自动 push 继续禁止，115B 真实 Provider/Judge-human 证据与激活授权仍缺失，因此没有执行真实模型 capture、Production Admission、cloud activation 或 116C-B 质量结论。完整边界见[项目进度](项目进度.md)、[116C-A 检查点](doc/116C-A-离线真实仓库任务与预检harness.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
 
@@ -337,6 +340,8 @@ flowchart LR
 阶段 116B 第二十个代码 checkpoint：新增与第十九检查点 exact digest 绑定的 `workspace_coding_frozen_concurrency_v1.yaml`。三个安装态 Python 任务共享 SQLite/TaskLoop，第一代 sidecar 在 ready 边界关闭，第二代以生产 Workbench `concurrency=2` 自动运行真实 Ruff→pytest。验收暴露并修复 AppContainer journal 互删活跃 profile 和 Workbench 跨服务轮次公平性；公平依据最终改为既有 TaskLoop Node Attempt 持久进度，不再受规划/激活路线深度影响。最终首波峰值并发 2，三个 Ruff 均先于任何 pytest；两个任务 Delivery，一个任务保留两份已知失败 ResultRef 后终止，总计 7 Attempt/7 ResultRef、零 unknown/重放。默认后端 116 文件 / 876 项，`864 passed + 12 skipped`；八层契约 41/41、安装态四测试 4/4、wheel Prompt 33/33 与 Workspace YAML 8/8、前端 165/165、Rust `4 passed + 4 ignored` 及 fmt/Clippy、Ruff、strict mypy 308 均通过。完整边界见[第二十检查点](doc/116B-持久多Agent编码循环第二十检查点.md)。
 
 阶段 116B 第二十一个代码 checkpoint：新增以第二十检查点 exact digest 绑定的 `workspace_coding_frozen_concurrency_kill_v1.yaml`。三个健康任务在三个 Ruff verified、两个 pytest running、第三个 pytest ready 的边界外部强杀完整 sidecar；强杀前 AppContainer journal 恰好为 2，第二代只将两个 claimed pytest Attempt 收敛为 `CAPABILITY_OUTCOME_UNKNOWN_AFTER_LEASE`，未领取同伴只运行一次 pytest 并完成 Delivery，终态 journal 为空。最终 6 Attempt、4 verified ResultRef、2 unknown Attempt，零 Planner/Profile 重放。默认后端 117 文件 / 883 项，`871 passed + 12 skipped`；九层契约 48/48、同一最终 NSIS 安装态五测试 5/5、wheel Prompt 33/33 与 Workspace YAML 9/9、前端 165/165、Rust `4 passed + 5 ignored` 及 fmt/Clippy、Ruff、strict mypy 310 均通过。116B 的 LOCAL-only 开发完成口径至此闭合；下一步冻结 116C 离线真实仓库任务与 harness，不越过 115B 生产授权门。完整边界见[第二十一检查点](doc/116B-持久多Agent编码循环第二十一检查点.md)。
+
+阶段 116C-A 离线检查点：新增不可变 `deskpilot.workspace-repository-task-suite.v1`，冻结 8 个公开 GitHub 上游的 20 个真实历史任务、精确 base/reference commit、tree/diff digest、测试路径、固定 Profile、物化/清理规则与 3 次重复阈值。严格预检只读取 operator-staged bare Git mirror；实际对 8/8 仓库、20/20 任务和 60 个 trial 身份完成对账。默认后端 892 项，完整运行 `880 passed + 12 skipped`；专项 9/9、Ruff、strict mypy 313 个生产源码、frozen lock、60 包 `pip check`、wheel YAML 资源与 baseline/diff 门均通过。本检查点没有运行模型，不产生成功率、Admission 或 activation 结论。完整边界见[116C-A 检查点](doc/116C-A-离线真实仓库任务与预检harness.md)。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 

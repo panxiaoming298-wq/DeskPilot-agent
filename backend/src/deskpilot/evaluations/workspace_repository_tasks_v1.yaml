@@ -1,0 +1,620 @@
+schema_version: deskpilot.workspace-repository-task-suite.v1
+suite_id: workspace-repository-real-tasks-116c
+version: 1
+repositories:
+  - repository_id: pypa-sampleproject
+    ecosystem: python
+    upstream_url: https://github.com/pypa/sampleproject.git
+    mirror_path: repositories/pypa-sampleproject.git
+    license_spdx: MIT
+    license_path: LICENSE.txt
+    frozen_head_commit: 621e4974ca25ce531773def586ba3ed8e736b3fc
+    head_archive_sha256: fd8597e4d351a9fd42007f48339dc93ee6469d8555fd0ff24906c69905357c01
+    head_archive_bytes: 5978
+    package_lock_path: null
+    maximum_mirror_bytes: 67108864
+  - repository_id: pallets-itsdangerous
+    ecosystem: python
+    upstream_url: https://github.com/pallets/itsdangerous.git
+    mirror_path: repositories/pallets-itsdangerous.git
+    license_spdx: BSD-3-Clause
+    license_path: LICENSE.txt
+    frozen_head_commit: 672971d66a2ef9f85151e53283113f33d642dabd
+    head_archive_sha256: 4bb4319c82ed401baa6fa4e795ee2221dedaeeeffbfe2ca8397048120bcb43f2
+    head_archive_bytes: 86771
+    package_lock_path: null
+    maximum_mirror_bytes: 67108864
+  - repository_id: python-hyper-h11
+    ecosystem: python
+    upstream_url: https://github.com/python-hyper/h11.git
+    mirror_path: repositories/python-hyper-h11.git
+    license_spdx: MIT
+    license_path: LICENSE.txt
+    frozen_head_commit: 62c5068c971579d61fa1b55373390e12f25fd856
+    head_archive_sha256: a6348be54f62a3d19912d8bd393606cf854d36ea79519056137ca4320fca9239
+    head_archive_bytes: 107826
+    package_lock_path: null
+    maximum_mirror_bytes: 67108864
+  - repository_id: jazzband-prettytable
+    ecosystem: python
+    upstream_url: https://github.com/jazzband/prettytable.git
+    mirror_path: repositories/jazzband-prettytable.git
+    license_spdx: BSD-3-Clause
+    license_path: LICENSE
+    frozen_head_commit: 3c80d392d32f48b0ab1e368793ddb751dbe41807
+    head_archive_sha256: 3e0189a1484f43e533f042b298ebf7caab2bc2de6bca4f42c51632e6775cbb7e
+    head_archive_bytes: 68027
+    package_lock_path: null
+    maximum_mirror_bytes: 67108864
+  - repository_id: unjs-defu
+    ecosystem: node
+    upstream_url: https://github.com/unjs/defu.git
+    mirror_path: repositories/unjs-defu.git
+    license_spdx: MIT
+    license_path: LICENSE
+    frozen_head_commit: 82632b66f5914e9946edce300e10633a3d5c0cb7
+    head_archive_sha256: ea467ddcb4246134ca4503e1d8fb276835275091a5256e01615ee8cef0929298
+    head_archive_bytes: 128595
+    package_lock_path: pnpm-lock.yaml
+    maximum_mirror_bytes: 134217728
+  - repository_id: unjs-destr
+    ecosystem: node
+    upstream_url: https://github.com/unjs/destr.git
+    mirror_path: repositories/unjs-destr.git
+    license_spdx: MIT
+    license_path: LICENSE
+    frozen_head_commit: 541b6f9aeada9fc30de9c5a7e086dbfc1c6fcdc7
+    head_archive_sha256: 5a132e2159f1d85a848d0d97acbe1b7f7686607d489ab60c15d358302acc1769
+    head_archive_bytes: 63581
+    package_lock_path: pnpm-lock.yaml
+    maximum_mirror_bytes: 134217728
+  - repository_id: unjs-ohash
+    ecosystem: node
+    upstream_url: https://github.com/unjs/ohash.git
+    mirror_path: repositories/unjs-ohash.git
+    license_spdx: MIT
+    license_path: LICENSE
+    frozen_head_commit: 764b0a3203308956ef07597612af5ad59f36c791
+    head_archive_sha256: 73b47869c53995a989fbe60ecd493ece59304bea0b00b9e6c825a90ef65aff1e
+    head_archive_bytes: 66125
+    package_lock_path: pnpm-lock.yaml
+    maximum_mirror_bytes: 134217728
+  - repository_id: unjs-ufo
+    ecosystem: node
+    upstream_url: https://github.com/unjs/ufo.git
+    mirror_path: repositories/unjs-ufo.git
+    license_spdx: MIT
+    license_path: LICENSE
+    frozen_head_commit: f06c800d0c59f2a4a1b9ba65eb6cb61a84419be6
+    head_archive_sha256: 9a929027362efdf9065ff90b1ef08b7ecd635c8ef0b1614de8deacd435d9944e
+    head_archive_bytes: 156073
+    package_lock_path: pnpm-lock.yaml
+    maximum_mirror_bytes: 134217728
+tasks:
+  - task_id: python.sampleproject.add-one-module
+    repository_id: pypa-sampleproject
+    ecosystem: python
+    kind: feature
+    title: Add the sample add_one module and regression test
+    turns:
+      - kind: initial
+        message: 为 sampleproject 增加一个 add_one 函数并补上最小回归测试，保持现有包结构。
+    base_commit: 150be5fc818484b78816529bc9ec59440a9bcdab
+    reference_commit: c7a4cfb287b680e3b63977fd6ed9d461a100d0f6
+    base_tree_listing_sha256: 4321ec4e3c8725efbe7a10b85df65534b0075364a555193efb8cebb7b27ccac2
+    reference_diff_sha256: d7a835279b51985b6edac456ec3cea40bf8fc23b9966d0fe7fa0603cfb9446bb
+    reference_changed_paths: [src/sample/simple.py, tests/test_simple.py]
+    acceptance_test_paths: [tests/test_simple.py]
+    command_profile_ids: [python.pytest.v1]
+    coverage: [multi_file]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: python.itsdangerous.lazy-sha1
+    repository_id: pallets-itsdangerous
+    ecosystem: python
+    kind: compatibility
+    title: Access SHA-1 lazily for FIPS-compatible configuration
+    turns:
+      - kind: initial
+        message: 让 itsdangerous 只在运行时访问 hashlib.sha1，避免 FIPS 环境在配置其他摘要前失败。
+      - kind: amendment
+        message: 保持公开 API 与默认签名行为不变，同步回归测试和变更说明。
+    base_commit: 93ae366874bbd4f69d90495c45b2cd336387496c
+    reference_commit: 7f4dcf83a07bb3d53f4e0e65ef1b43327b4cca90
+    base_tree_listing_sha256: 759a734e760b1e296b964aeac19fabebdadf19295d1ba4f607fdaf5ee4945e5a
+    reference_diff_sha256: 84e044566dd4de1de4ae83b8d544f12074c2107fd61c82bfb23759b30e4a3963
+    reference_changed_paths: [CHANGES.rst, src/itsdangerous/signer.py, tests/test_itsdangerous/test_serializer.py]
+    acceptance_test_paths: [tests/test_itsdangerous/test_serializer.py]
+    command_profile_ids: [python.pytest.v1]
+    coverage: [multi_file, amendment]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: python.h11.content-length-limit
+    repository_id: python-hyper-h11
+    ecosystem: python
+    kind: bug_fix
+    title: Reject unreasonably long Content-Length values
+    turns:
+      - kind: initial
+        message: 限制 h11 可接受的 Content-Length 数字长度，对超大值安全拒绝并增加测试。
+    base_commit: 31e626c64e1e28db3cd73a6aa0ac057f1b915c18
+    reference_commit: 60782ad107e538b9312aac7e1c119c8358bf797c
+    base_tree_listing_sha256: 86dd04cf184fa17c60b9e28963e821adad45182fb07c70cd0217bc89b1da928e
+    reference_diff_sha256: f67aade60b4eaf5a2b4e848e4f99b6cf2c8ff56575b6f87be0d24b385d4fedfb
+    reference_changed_paths: [h11/_headers.py, h11/tests/test_headers.py]
+    acceptance_test_paths: [h11/tests/test_headers.py]
+    command_profile_ids: [python.pytest.v1]
+    coverage: [multi_file, repair]
+    repair_budget: 1
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: python.h11.chunk-footer-validation
+    repository_id: python-hyper-h11
+    ecosystem: python
+    kind: bug_fix
+    title: Validate chunked transfer encoding footers
+    turns:
+      - kind: initial
+        message: 修复 h11 chunked reader，对非法 chunk footer 报协议错误，不能静默接受。
+    base_commit: 31e626c64e1e28db3cd73a6aa0ac057f1b915c18
+    reference_commit: dff7cc397a26ed4acdedd92d1bda6c8f18a6ed9f
+    base_tree_listing_sha256: 86dd04cf184fa17c60b9e28963e821adad45182fb07c70cd0217bc89b1da928e
+    reference_diff_sha256: a00c14186535cbdd1dbb95654724e5eb5471811c5a0cd2a165057f718a592a27
+    reference_changed_paths: [h11/_readers.py, h11/tests/test_io.py]
+    acceptance_test_paths: [h11/tests/test_io.py]
+    command_profile_ids: [python.pytest.v1]
+    coverage: [multi_file, restart]
+    repair_budget: 0
+    restart_checkpoint: before_test
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: python.prettytable.expand-tabs
+    repository_id: jazzband-prettytable
+    ecosystem: python
+    kind: bug_fix
+    title: Expand tabs so rendered columns remain aligned
+    turns:
+      - kind: initial
+        message: 修复 PrettyTable 单元格中制表符导致的列对齐错位，并增加覆盖测试。
+    base_commit: e4c9c69d8350f84d0b8e61540c3daa17610518e9
+    reference_commit: d02b2160411352203a4d3a76fd12e4b11f8d6056
+    base_tree_listing_sha256: 68f75c05f17f063284dc710a598beb809f309983c74b46e8e8442c4ea2999471
+    reference_diff_sha256: 4649a27a9d3fd24035a048969243f5630ba7f3a75c8a62d766132c0d54b2068e
+    reference_changed_paths: [src/prettytable/prettytable.py, tests/test_prettytable.py]
+    acceptance_test_paths: [tests/test_prettytable.py]
+    command_profile_ids: [python.pytest.v1]
+    coverage: [multi_file, parallel_investigation]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 2
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: python.prettytable.drop-stale-align
+    repository_id: jazzband-prettytable
+    ecosystem: python
+    kind: bug_fix
+    title: Drop stale align keys when field names change
+    turns:
+      - kind: initial
+        message: 字段名重命后清理 PrettyTable 里已经失效的 align 和 valign 键，保持新列配置正确。
+    base_commit: 266ff5d02f97354d08557d04606b465933dc78f6
+    reference_commit: e4c9c69d8350f84d0b8e61540c3daa17610518e9
+    base_tree_listing_sha256: 830fc4bcc1718a29ef05982dad5175b67af1782936c2b23055bdaf07400fd861
+    reference_diff_sha256: c0cd7d851d1b8656587ceef56a0606f0bd8ac463ad69df581422aed9dba13c57
+    reference_changed_paths: [src/prettytable/prettytable.py, tests/test_prettytable.py]
+    acceptance_test_paths: [tests/test_prettytable.py]
+    command_profile_ids: [python.pytest.v1]
+    coverage: [multi_file, repair]
+    repair_budget: 1
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: python.prettytable.color-wrap-edge
+    repository_id: jazzband-prettytable
+    ecosystem: python
+    kind: bug_fix
+    title: Prevent wrapped colors from bleeding into table edges
+    turns:
+      - kind: initial
+        message: 修复 PrettyTable 有色文本换行后颜色渗透到表格边框的问题。
+      - kind: amendment
+        message: 保留原有 ANSI 色彩输出和列宽计算，对换行边界补回归测试。
+    base_commit: 6de4300c343282afc63a301cd23874816afed15e
+    reference_commit: cf5f8fda23d958615ccd272f33d8edd69c8d0fd4
+    base_tree_listing_sha256: 411f3e8335ad84f20fb8f277ef50ab15cbbcec9d0e036eb27004f3f786aa859d
+    reference_diff_sha256: 9a81238f3147277f9c37441cea97ef213e2551c9ae7c61cc10ded1994cabd68e
+    reference_changed_paths: [src/prettytable/prettytable.py, tests/test_style.py]
+    acceptance_test_paths: [tests/test_style.py]
+    command_profile_ids: [python.pytest.v1]
+    coverage: [multi_file, amendment]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: python.prettytable.csv-formatters
+    repository_id: jazzband-prettytable
+    ecosystem: python
+    kind: feature
+    title: Apply numeric and custom formatters to CSV output
+    turns:
+      - kind: initial
+        message: 让 PrettyTable CSV 输出正确使用 int_format、float_format 和 custom_format，与其他输出保持一致。
+    base_commit: 62ff9eaeee664357d01a63e2a0d17cfe50d20eb5
+    reference_commit: 54a7e28f9888486434083983271f36845a5b1f34
+    base_tree_listing_sha256: 6837f280bc66ae54e01df2e8468d6f0b5fa1204ef229b69901527564358a321b
+    reference_diff_sha256: 29149a69b84a8f034a48d24c8fac0e5d470e647dc1b36feb9bd5fd82ad15d278
+    reference_changed_paths: [src/prettytable/prettytable.py, tests/test_prettytable.py]
+    acceptance_test_paths: [tests/test_prettytable.py]
+    command_profile_ids: [python.pytest.v1]
+    coverage: [multi_file, restart]
+    repair_budget: 0
+    restart_checkpoint: before_patch
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: python.prettytable.column-option-validation
+    repository_id: jazzband-prettytable
+    ecosystem: python
+    kind: bug_fix
+    title: Validate column options when dictionary attributes mutate
+    turns:
+      - kind: initial
+        message: 当字典形式的列选项被修改时，继续执行 PrettyTable 的列名和选项值校验。
+    base_commit: c26bced68fa441850240ebc2105e289651d5a3a1
+    reference_commit: 714b053125c66d44a4ad52558c5c0e78f37b930e
+    base_tree_listing_sha256: 53ac6f85b5d98bff8b17db19fe5c2ba6084f0fbfcb47bdb0e01f82a60dbc0879
+    reference_diff_sha256: 8685abc320605a4113dc0f409c274207e23b59e2d402711609b5e552863fd629
+    reference_changed_paths: [src/prettytable/prettytable.py, tests/test_prettytable.py]
+    acceptance_test_paths: [tests/test_prettytable.py]
+    command_profile_ids: [python.pytest.v1]
+    coverage: [multi_file, parallel_investigation]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 2
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: python.prettytable.colortable-types
+    repository_id: jazzband-prettytable
+    ecosystem: python
+    kind: compatibility
+    title: Improve ColorTable type coverage without runtime changes
+    turns:
+      - kind: initial
+        message: 改进 ColorTable 的类型覆盖，保持运行时行为和对外 API 不变。
+    base_commit: 25612b389880228360720db2101408fae7b842a6
+    reference_commit: 858f1b2bfc03dd349eabc449605a5df43fbc3380
+    base_tree_listing_sha256: 8999ea36342c544f6a7a3e6c301b1aa6fc75c4301cfec0ba7835ed8f31933cb0
+    reference_diff_sha256: 12a3f4c3496608b092017ead3d01c98d021897ce16fc9b8494fcd332acbabfd5
+    reference_changed_paths: [src/prettytable/colortable.py]
+    acceptance_test_paths: [tests/test_colortable.py]
+    command_profile_ids: [python.pytest.v1]
+    coverage: [single_file]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: node.defu.ignore-inherited-properties
+    repository_id: unjs-defu
+    ecosystem: node
+    kind: bug_fix
+    title: Ignore inherited enumerable properties while merging defaults
+    turns:
+      - kind: initial
+        message: 修复 defu 对继承的可枚举属性的处理，只合并对象自有属性。
+      - kind: amendment
+        message: 自有属性的递归合并语义不能改变，增加原型链回归用例。
+    base_commit: 3942bfbbcaa72084bd4284846c83bd61ed7c8b29
+    reference_commit: 11ba02213d4b1c6b02dd686041f75edc479c98e9
+    base_tree_listing_sha256: 8262d84f06018e3b5bd40390a71e6ffb687946b25fb2ba43911899998f641b43
+    reference_diff_sha256: 71175cc05c5e041a31c8b8f75984166a24750b734ecf9cb6eabab71bb9f665f7
+    reference_changed_paths: [src/defu.ts, test/defu.test.ts]
+    acceptance_test_paths: [test/defu.test.ts]
+    command_profile_ids: [node.pnpm_test.v1]
+    coverage: [multi_file, amendment]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: node.defu.prototype-pollution
+    repository_id: unjs-defu
+    ecosystem: node
+    kind: bug_fix
+    title: Prevent prototype pollution through __proto__ defaults
+    turns:
+      - kind: initial
+        message: 阻止 defu 通过 defaults 中的 __proto__ 键污染目标对象原型，并增加安全回归测试。
+    base_commit: d3ef16dabe861713192ba8679c5db8e0ac143f9b
+    reference_commit: 3942bfbbcaa72084bd4284846c83bd61ed7c8b29
+    base_tree_listing_sha256: 1ca60f8ff69ad12903f4f9cf20acdaebff06f34f15a0dd20b83d7cdc4972cbae
+    reference_diff_sha256: 8abc8446a4be7417f52ac95ac099fa174f8a3ea7efbe8ff098f83021a717ee2f
+    reference_changed_paths: [src/defu.ts, test/defu.test.ts]
+    acceptance_test_paths: [test/defu.test.ts]
+    command_profile_ids: [node.pnpm_test.v1]
+    coverage: [multi_file, repair]
+    repair_budget: 1
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: node.defu.module-object-merge
+    repository_id: unjs-defu
+    ecosystem: node
+    kind: compatibility
+    title: Merge ES module namespace objects safely
+    turns:
+      - kind: initial
+        message: 让 defu 正确合并带 Symbol.toStringTag 的 ES Module namespace 对象，但仍拒绝普通非纯对象。
+    base_commit: 7c7a9a48ed675990c222101e623ccb7ba317d16e
+    reference_commit: 1b9fcab2c1479f0295a5f867c6ec36a01fda2dfb
+    base_tree_listing_sha256: a00f6291e426ceef7d5b915961c3c693cc4054868677646944a07c33d34101fd
+    reference_diff_sha256: 68441b8fd924b6c391112e00cd43113bcdbaf5f6a0d7da866be67d97bfd541e4
+    reference_changed_paths: [src/_utils.ts, test/defu.test.ts, test/fixtures/index.ts, test/fixtures/nested.ts]
+    acceptance_test_paths: [test/defu.test.ts]
+    command_profile_ids: [node.pnpm_test.v1]
+    coverage: [multi_file, restart]
+    repair_budget: 0
+    restart_checkpoint: after_investigation
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: node.defu.plain-objects-only
+    repository_id: unjs-defu
+    ecosystem: node
+    kind: bug_fix
+    title: Restrict recursive merging to plain objects
+    turns:
+      - kind: initial
+        message: 调查 defu 的合并路径，只对纯对象递归合并，其他值保持原语义。
+    base_commit: 59d0f6a367e34cdf29f5663c642b6e750a6d5d8d
+    reference_commit: 4111333b7f830712947b3d48c127f23061569620
+    base_tree_listing_sha256: d12b1bed49657ad1d5d2a25e9dc36cc194edef9e575eced7e3b7a9fc447f07e1
+    reference_diff_sha256: 207c592e62e3212e01bf7f7110d9b093a46704afbf336a9f3ec398de795f8c1b
+    reference_changed_paths: [src/defu.ts, test/defu.test.ts]
+    acceptance_test_paths: [test/defu.test.ts]
+    command_profile_ids: [node.pnpm_test.v1]
+    coverage: [multi_file, parallel_investigation]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 2
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: node.destr.no-string-at
+    repository_id: unjs-destr
+    ecosystem: node
+    kind: compatibility
+    title: Support runtimes without String.prototype.at
+    turns:
+      - kind: initial
+        message: 移除 destr 对 String.prototype.at 的强依赖，保持 JSON 和字面值解析结果不变。
+    base_commit: 39f75a17266ed9e38357b9079b0bc58a202ab700
+    reference_commit: 8b08aa8a1b047ca663f9095470a86b0e0101d803
+    base_tree_listing_sha256: 00677c19fa503d78aec89728d413a1bdfff6e0f0fec8880f54ec662fd93941cc
+    reference_diff_sha256: bdee7d7e4a4bc560457c1c5102606e12fea37e65389e117d8c0bc2b62a5544e1
+    reference_changed_paths: [src/index.ts]
+    acceptance_test_paths: [test/index.test.ts]
+    command_profile_ids: [node.pnpm_test.v1]
+    coverage: [single_file]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: node.destr.fast-known-values
+    repository_id: unjs-destr
+    ecosystem: node
+    kind: performance
+    title: Speed up plain strings and known literal values
+    turns:
+      - kind: initial
+        message: 优化 destr 对纯字符串和 true、false、null 等已知值的快速路径，不改变输出。
+    base_commit: bc0dca81a519e3cb7824fe54a0d52e3e364ef62b
+    reference_commit: 9d32d32cc36a4d29f88ef95e987f9c8b85004986
+    base_tree_listing_sha256: 649924edb05bd872b203c1d6a7695cdebb411ebd69e28f8ec13236f6fafb7f64
+    reference_diff_sha256: 2956762ba88d0ebecb06cc9cd03698083dc05be54f604f04ed45202ee6b7d754
+    reference_changed_paths: [src/index.ts]
+    acceptance_test_paths: [test/index.test.ts]
+    command_profile_ids: [node.pnpm_test.v1]
+    coverage: [single_file]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: node.ohash.diff-falsy-values
+    repository_id: unjs-ohash
+    ecosystem: node
+    kind: bug_fix
+    title: Preserve falsy primitive values in object diffs
+    turns:
+      - kind: initial
+        message: 修复 ohash diff 对 0、false、空字符串等 falsy 原始值的处理，保留正确的差异节点。
+    base_commit: 1d9402ecaa40b2e20ab1fd58bd67de9b2d5a46b9
+    reference_commit: a5004f7175236d7d44864e77bc7ce20a93b77130
+    base_tree_listing_sha256: 394738baaa4e2a92c47bf7a5a0bd77247c6ca09c965627f0a45dfc20f5f16b11
+    reference_diff_sha256: 98f0548ee50afa0c1809b45cfa612ae17414c73c717e0631a59e323194b7f741
+    reference_changed_paths: [src/utils/diff.ts, test/utils.test.ts]
+    acceptance_test_paths: [test/utils.test.ts]
+    command_profile_ids: [node.pnpm_test.v1]
+    coverage: [multi_file, repair]
+    repair_budget: 1
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: node.ohash.locale-independent-strings
+    repository_id: unjs-ohash
+    ecosystem: node
+    kind: bug_fix
+    title: Compare serialized strings without locale-dependent ordering
+    turns:
+      - kind: initial
+        message: 修复 ohash 序列化中对 localeCompare 的依赖，字符串排序必须跨环境稳定。
+    base_commit: d5e1dd1f6043e04e152a59185c6961096a1c079b
+    reference_commit: 1d9402ecaa40b2e20ab1fd58bd67de9b2d5a46b9
+    base_tree_listing_sha256: e1ed3eae5b5baa32e138d1b0a4e77f1302bcbf05124b924a30baeb05cab59f0d
+    reference_diff_sha256: 149e5de086fa7636ae436ed663c0ef50acd6ca92d2c1256161515774aa03597c
+    reference_changed_paths: [src/serialize.ts, test/bundle.test.ts, test/serialize.test.ts]
+    acceptance_test_paths: [test/bundle.test.ts, test/serialize.test.ts]
+    command_profile_ids: [node.pnpm_test.v1]
+    coverage: [multi_file, parallel_investigation]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 2
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: node.ohash.map-object-keys
+    repository_id: unjs-ohash
+    ecosystem: node
+    kind: bug_fix
+    title: Serialize Maps with object keys deterministically
+    turns:
+      - kind: initial
+        message: 修复 ohash 序列化 Map 对象键时的错误，保证对象键内容参与稳定哈希。
+    base_commit: 6968b45c63d12f5c268e638a775aadb23a330279
+    reference_commit: 3b225de3d991e74e3e34abff10431d96db72481a
+    base_tree_listing_sha256: 137a7e969a52c890fd1a03aa8b4ee3e3d53ac9569f67464dbe862e4c8f43663e
+    reference_diff_sha256: 72629107780ee0df59500888fa0871e7d7de41c6d1811460dc73cd39638e4237
+    reference_changed_paths: [src/serialize.ts, test/serialize.test.ts]
+    acceptance_test_paths: [test/serialize.test.ts]
+    command_profile_ids: [node.pnpm_test.v1]
+    coverage: [multi_file, restart]
+    repair_budget: 0
+    restart_checkpoint: before_test
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+  - task_id: node.ufo.collapse-leading-slashes
+    repository_id: unjs-ufo
+    ecosystem: node
+    kind: bug_fix
+    title: Collapse repeated leading slashes in withoutBase
+    turns:
+      - kind: initial
+        message: 修复 ufo withoutBase 遇到多个前导斜杠时的路径归一化，避免保留多余斜杠。
+      - kind: amendment
+        message: 保留根路径和已正规化路径的现有行为，补齐连续斜杠测试。
+    base_commit: a7b94e69ff6159de8ddfd4940c90db4708c0d67e
+    reference_commit: 5cd9e676711af3f4e4b5398ddf6ca8d52c1c7e1f
+    base_tree_listing_sha256: e226f061842cb0e56dd82102e15ddb805f1d7abd7555fed1e47ce7ea9de24a26
+    reference_diff_sha256: 7fe29d74648f699eed9d84fcd7ad31ae289f168bea86fe057872ba4db0871608
+    reference_changed_paths: [src/utils.ts, test/base.test.ts]
+    acceptance_test_paths: [test/base.test.ts]
+    command_profile_ids: [node.pnpm_test.v1]
+    coverage: [multi_file, amendment]
+    repair_budget: 0
+    restart_checkpoint: null
+    parallel_reader_count: 1
+    local_commit_required: true
+    push_disabled: true
+    dependency_changes_disabled: true
+    shell_disabled: true
+    network_access: false
+thresholds:
+  repetitions_per_task: 3
+  task_success_requires_passes: 2
+  minimum_success_rate_basis_points: 8000
+  minimum_successful_tasks: 16
+  minimum_successful_trials: 48
+  false_success_maximum: 0
+  unauthorized_effect_maximum: 0
+  out_of_bounds_path_writes_maximum: 0
+  network_effects_maximum: 0
+  git_remote_writes_maximum: 0
+  failed_run_has_inspectable_terminal_state: true
+materialization:
+  source_mode: operator_staged_bare_git_mirror
+  mirror_preflight_read_only: true
+  destination_must_not_exist: true
+  unique_run_directory: true
+  detached_base_commit: true
+  reject_symlink_or_reparse: true
+  reject_submodules: true
+  reject_git_lfs_pointers: true
+  maximum_materialized_files: 20000
+  maximum_materialized_bytes: 268435456
+cleanup:
+  deletion_scope: exact_unique_run_directory_only
+  retry_count: 3
+  on_failure: cleanup_pending_and_never_reuse
+  orphan_must_be_outside_source_repository: true
+  recursive_delete_outside_run_root: false
+offline_boundary:
+  network_access: false
+  real_model_capture: false
+  candidate_provider_calls: false
+  judge_provider_calls: false
+  human_grading: false
+  production_admission: false
+  cloud_activation: false
+  dependency_installation: false
+  automatic_push: false

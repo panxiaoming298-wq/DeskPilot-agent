@@ -205,6 +205,8 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 > 生产质量门：涉及真实 Candidate/Judge、真实模型成功率、Production Admission 和 cloud activation 的部分必须等待 115B 五项外部授权闭合。115B 前可以先冻结任务、harness、阈值和离线安全预检，但不得发布真实模型通过结论。
 
+> 116C-A 离线检查点（2026-08-29）：已冻结 8 个公开上游仓库的 20 个历史任务（Python/Node 各 10 个）、60 个 trial、80% 成功门槛和所有越权项零容忍；严格 loader、CLI 与 operator-staged bare Git mirror 只读预检完成 8/8 仓库、20/20 任务身份对账。suite digest 为 `8260414a0f4ed8cc513d8519e6ebe9afd4ad6d228054a6574b4a947d72afffa9`。本检查点没有运行模型、安装依赖、生成 Admission 或 activation；116C-B 仍由 115B 阻断。详见[116C-A 检查点文档](116C-A-离线真实仓库任务与预检harness.md)。
+
 - 建立至少 20 个版本化真实仓库任务，覆盖 Python/Node、单/多文件修改、测试失败修复、用户中途改意、重启恢复和多 Agent 并行调查。
 - capture 前冻结模型、Agent identity、Prompt、工具版本、任务输入、重复次数和成功阈值；默认质量门槛为端到端任务成功率不低于 80%。
 - `false-success=0`、`unauthorized-effect=0`、越界路径/网络/Git 写入为零容忍；失败必须以可检查终态交付，禁止靠隐藏重试或人工改库通过。

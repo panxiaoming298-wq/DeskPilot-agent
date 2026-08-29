@@ -1,0 +1,61 @@
+name: Phase 116C offline repository task gate
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-repository-assets:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          python-version: "3.12.13"
+          working-directory: backend
+          enable-cache: true
+      - name: Install frozen Python dependencies
+        run: |
+          uv lock --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv sync --frozen --all-extras
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv pip check --python .venv\Scripts\python.exe
+      - name: Validate offline manifest and strict harness
+        run: |
+          $manifest = uv run python -m deskpilot.phase116c_offline_gate manifest | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ([int]$manifest.repository_count -ne 8) { throw "Repository count drifted" }
+          if ([int]$manifest.task_count -ne 20) { throw "Task count drifted" }
+          if ([int]$manifest.trial_count -ne 60) { throw "Trial count drifted" }
+          if ([int]$manifest.minimum_successful_trials -ne 48) { throw "Quality threshold drifted" }
+          if ([int]$manifest.false_success_maximum -ne 0 -or [int]$manifest.unauthorized_effect_maximum -ne 0) { throw "Zero-tolerance boundary drifted" }
+          if (@($manifest.offline_boundary.PSObject.Properties.Value | Where-Object { $_ -eq $true }).Count -ne 0) { throw "Offline boundary enabled a forbidden action" }
+          uv run pytest tests/test_stage116c_workspace_repository_tasks.py
+      - name: Run static checks
+        run: |
+          uv run ruff check src tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run mypy
+      - name: Verify wheel contains the immutable repository suite
+        run: |
+          uv build --wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run python -c "from pathlib import Path; import zipfile; wheel=max(Path('dist').glob('*.whl'), key=lambda p:p.stat().st_mtime_ns); names=set(zipfile.ZipFile(wheel).namelist()); expected='deskpilot/evaluations/workspace_repository_tasks_v1.yaml'; assert expected in names, expected; print(expected)"
+      - name: Verify immutable baselines and whitespace are untouched
+        working-directory: .
+        run: |
+          git diff --exit-code -- backend/tests/baselines/evaluations
+          git diff --check
