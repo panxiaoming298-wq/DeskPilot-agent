@@ -218,6 +218,8 @@ Tauri 增加托盘和受监督本地后端 sidecar：
 
 > 117A-A 离线检查点（2026-08-29）：已新增 digest=`2aeb30b31161f41ba48841c86d6f80f7847327f58d31cfd500b2ed936633177f` 的不可变 Browser policy、内容寻址 origin allowlist snapshot、action proposal、最长 5 分钟逐次审批 binding 和离线 readiness。默认 allowlist 为空，自动验收只接受 loopback，四项有后果动作精确绑定 origin/target/content；23 项专项测试通过。没有创建 Profile、启动 Edge、访问网络、执行动作或调用模型。详见[117A-A 检查点文档](117A-Edge安全策略与离线预检.md)。
 
+> 117A-B 离线控制面检查点（2026-08-29）：新增 `0066_browser_control_plane`，持久化固定 `edge-deskpilot-v1` Profile 合同、空 allowlist revision 和内容摘要；启动/读取均重验冻结 policy 与持久 digest。`GET /api/v1/browser/control-plane` 只向已认证本地前端投影公开策略和固定关闭状态，没有任何写路由。未创建 Profile、启动 Edge、访问网站或获得 Browser Operator。详见[117A-B 检查点文档](117A-B-Edge控制面持久化与只读API.md)。
+
 - 使用独立 DeskPilot Microsoft Edge Profile，用户只在可见窗口手动登录。
 - 默认域名 allowlist 为空；自动验收使用本地 loopback 页面。
 - 首版支持导航、DOM 读取、截图和表单预填。

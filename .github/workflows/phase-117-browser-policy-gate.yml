@@ -1,4 +1,4 @@
-name: Phase 117A Browser policy offline gate
+name: Phase 117A Browser control plane offline gate
 
 on:
   pull_request:
@@ -43,9 +43,9 @@ jobs:
           if (@($manifest.actions).Count -ne 8) { throw "Browser action matrix drifted" }
           if (@($manifest.actions | Where-Object { $_.requires_fresh_approval }).Count -ne 4) { throw "Consequential Browser approval matrix drifted" }
           if (@($manifest.offline_execution_boundary.PSObject.Properties.Value | Where-Object { $_ -eq $true }).Count -ne 0) { throw "Offline Browser boundary enabled an effect" }
-      - name: Run Browser policy tests and static checks
+      - name: Run Browser policy and control-plane tests
         run: |
-          uv run pytest tests/test_phase117_browser_policy.py
+          uv run pytest tests/test_phase117_browser_policy.py tests/test_browser_control_plane.py tests/test_migrations.py::test_browser_control_plane_migration_round_trip
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run ruff check src tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

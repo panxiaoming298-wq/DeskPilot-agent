@@ -22,6 +22,7 @@ from deskpilot.api.routes import (
     agent_runtime,
     agents,
     approvals,
+    browser,
     context_memory,
     evaluations,
     health,
@@ -46,6 +47,7 @@ from deskpilot.application.agent_release_lifecycle import load_agent_release_act
 from deskpilot.application.agent_supervisor_runtime import AgentSupervisorRuntime
 from deskpilot.application.artifact_delivery_runtime import ArtifactDeliveryRuntime
 from deskpilot.application.artifact_export_runtime import ArtifactExportRuntime
+from deskpilot.application.browser_control_plane import BrowserControlPlaneService
 from deskpilot.application.browser_verifier import (
     BrowserVerifier,
     IsolatedChromiumVerifier,
@@ -270,6 +272,8 @@ def create_app(
         provider_management: ProviderManagementService | None = None
         try:
             await database.migrate()
+            browser_control_plane = BrowserControlPlaneService(database)
+            await browser_control_plane.initialize()
             provider_catalog_repository = SqlAlchemyProviderCatalogRepository(database)
             if model_provider is not None:
                 if provider_catalog_definition is None:
@@ -717,6 +721,7 @@ def create_app(
         processor.bind_effect_graph_control_router(effect_graph_control_router)
 
         app.state.database = database
+        app.state.browser_control_plane = browser_control_plane
         app.state.event_broker = broker
         app.state.outbox_publisher = outbox_publisher
         app.state.rabbitmq_transport = rabbitmq_transport
@@ -854,6 +859,7 @@ def create_app(
     app.include_router(tasks.router, prefix=resolved_settings.api_prefix)
     app.include_router(task_workbench.router, prefix=resolved_settings.api_prefix)
     app.include_router(approvals.router, prefix=resolved_settings.api_prefix)
+    app.include_router(browser.router, prefix=resolved_settings.api_prefix)
     app.include_router(reconciliations.router, prefix=resolved_settings.api_prefix)
     app.include_router(operations.router, prefix=resolved_settings.api_prefix)
     app.include_router(knowledge.router, prefix=resolved_settings.api_prefix)

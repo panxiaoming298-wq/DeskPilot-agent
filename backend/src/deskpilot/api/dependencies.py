@@ -9,6 +9,7 @@ from deskpilot.application.agent_execution_runtime import AgentExecutionRuntime
 from deskpilot.application.agent_registry import AgentRegistry
 from deskpilot.application.artifact_delivery_runtime import ArtifactDeliveryRuntime
 from deskpilot.application.artifact_export_runtime import ArtifactExportRuntime
+from deskpilot.application.browser_control_plane import BrowserControlPlaneService
 from deskpilot.application.capability_catalog import CapabilityCatalog
 from deskpilot.application.context_memory_runtime import ContextMemoryRuntime
 from deskpilot.application.effect_runtime_operations import EffectRuntimeOperationsService
@@ -60,6 +61,13 @@ def get_artifact_delivery_runtime(request: Request) -> ArtifactDeliveryRuntime:
 
 def get_artifact_export_runtime(request: Request) -> ArtifactExportRuntime:
     return cast(ArtifactExportRuntime, request.app.state.artifact_export_runtime)
+
+
+def get_browser_control_plane(request: Request) -> BrowserControlPlaneService:
+    return cast(
+        BrowserControlPlaneService,
+        request.app.state.browser_control_plane,
+    )
 
 
 def get_task_workbench_service(request: Request) -> TaskWorkbenchService:

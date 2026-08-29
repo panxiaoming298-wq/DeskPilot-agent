@@ -59,4 +59,4 @@ readiness 固定：
 
 ## 下一检查点
 
-117A-B 才实现本地持久化的 Browser Profile/allowlist 管理与只读 API。此后仍需单独实现 Edge Operator、ActionReceipt、权限弹窗暂停和 loopback 真实验收；在这些完成前不得创建或操控 Edge Profile。
+117A-B 已实现本地持久控制面和受认证只读 API，但仍没有 allowlist 写 API，也不会创建或操控 Edge Profile，详见[117A-B 检查点](117A-B-Edge控制面持久化与只读API.md)。下一步 117A-C 先实现带版本/确认/审计的 allowlist 管理；此后仍需分别实现 Profile 创建、Edge Operator、ActionReceipt、权限弹窗暂停和 loopback 真实验收。

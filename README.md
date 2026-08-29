@@ -4,7 +4,7 @@
 
 DeskPilot 是一个面向 Windows 的本地优先通用任务 Agent。用户通过自然语言提出和修订目标，系统负责生成可检查的计划，使用受控文件/系统/应用/搜索/浏览器能力，形成带证据的可编辑产物，并在高风险或不可证明处请求用户决定。项目后端使用 Python，前后端分离，模型层采用 OpenAI-compatible 抽象，可在云端模型与 Ollama 等本地模型之间切换。
 
-当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint、116A 固定命令链、116B LOCAL-only 持久多 Agent 编码循环与 116C-A 离线真实仓库任务冻结均已完成；115B 探针 runner 与默认拒绝的 live CLI 安全层也已实现。** 116C-A 已将 8 个公开上游仓库的 20 个历史 Python/Node 任务冻结为 60 个 trial；探针 CLI 只以 MockTransport/零网络 stub 验证多重授权和脱敏证据，尚未真实运行。115B 真实 Provider/Judge-human 证据与激活授权仍缺失，116C-B 与 cloud-only 候选继续被阻断。详细进度见[项目进度](项目进度.md)。
+当前仓库阶段：**阶段 77～114 已通过，115A 内部 checkpoint、116A 固定命令链、116B LOCAL-only 持久多 Agent 编码循环、116C-A 离线真实仓库任务冻结及 117A-A/B Edge 离线控制面均已完成；115B 探针 runner 与默认拒绝的 live CLI 安全层也已实现。** 117A-B 只持久化固定 Edge/Profile 合同与空 allowlist，并提供受认证只读 API；没有创建或启动 Edge，也没有浏览器动作写接口。115B 真实 Provider/Judge-human 证据与激活授权仍缺失，116C-B 与 cloud-only 候选继续被阻断。详细进度见[项目进度](项目进度.md)。
 
 产品口径下，当前仍是“安全、可验证的多 Agent 原型”，还不是 Codex/Marvis 等价物。通用规划、持久执行/验证/修复循环、首版安全代码工具面、三任务桌面后台和真实仓库离线验收资产已经闭合；当前最大缺口是用真实模型跑完该任务集并达到生产质量门。后续路线保持 **Codex 优先、Marvis 后置**：先完成 115B 的真实生产授权与证据，再执行 116C-B 的真实仓库质量验收，最后进入桌面 Operator。
 
@@ -228,6 +228,7 @@ flowchart LR
 161. [桌面工作台与前端凭据入口检查点](doc/桌面工作台与前端凭据入口检查点.md)
 162. [Provider 探针桌面无网准备检查点](doc/Provider探针桌面无网准备检查点.md)
 163. [阶段 117A-A：Edge 安全策略与离线预检](doc/117A-Edge安全策略与离线预检.md)
+164. [阶段 117A-B：Edge 控制面持久化与只读 API](doc/117A-B-Edge控制面持久化与只读API.md)
 
 ## 目标 MVP 与当前边界
 
@@ -298,7 +299,7 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-29 校准）
 
-阶段 77～114 与 115A 已完成；116A、116B LOCAL-only 和 116C-A 离线准备层也已闭合。116C-A 冻结 8 个公开上游仓库的 20 个历史任务（Python/Node 各 10 个）与 60 个 trial 身份。2026-08-29 又新增三家 Responses adapter、不可激活的单人 `personal_preview`、无网 readiness、一次性 runner library、默认拒绝的 live CLI，以及桌面前端的 Windows 凭据写入和三 Provider 无网准备入口。该入口位于默认关闭的“开发者验收工具”内，只有主动展开后才读取 manifest；页面可生成 24 小时 binding 并运行既有 offline preflight，但不解析 Key、不联网、不创建 live permit。阶段 117A-A 同时冻结了 Edge Browser Agent 的独立 Profile、空域名 allowlist、八动作矩阵、敏感数据禁令和四项逐次审批合同，但尚未创建 Profile、启动 Edge 或访问网站。探针仍只计划每家 4 次、共 12 次公开合成请求和零重试；当前仅 MockTransport/零网络 stub 执行，三家 profile 均 disabled。前端能够安全保存 Key 或无网 preflight ready 都不等于授权调用；自由 Shell、依赖安装与自动 push 继续禁止，未执行真实模型 capture、Production Admission、cloud activation 或 116C-B 质量结论。完整边界见[项目进度](项目进度.md)、[116C-A 检查点](doc/116C-A-离线真实仓库任务与预检harness.md)、[ADR-019](doc/ADR-019-Provider差异化费用控制与个人凭据后端.md)、[Live CLI 检查点](doc/115B-Provider探针LiveCLI接线.md)、[桌面工作台与前端凭据入口检查点](doc/桌面工作台与前端凭据入口检查点.md)、[Provider 探针桌面无网准备检查点](doc/Provider探针桌面无网准备检查点.md)、[117A-A 检查点](doc/117A-Edge安全策略与离线预检.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+阶段 77～114 与 115A 已完成；116A、116B LOCAL-only、116C-A 离线准备层和 117A-A/B Edge 离线控制面也已闭合。116C-A 冻结 8 个公开上游仓库的 20 个历史任务（Python/Node 各 10 个）与 60 个 trial 身份。2026-08-29 又新增三家 Responses adapter、不可激活的单人 `personal_preview`、无网 readiness、一次性 runner library、默认拒绝的 live CLI，以及桌面前端的 Windows 凭据写入和三 Provider 无网准备入口。阶段 117A-A 冻结独立 Profile、空 allowlist、八动作矩阵、敏感数据禁令和四项逐次审批；117A-B 新增 `0066` 本地持久化、启动完整性校验和受认证只读投影，但没有 allowlist 写 API、Profile 创建、Edge 启动或网站访问。探针仍只计划每家 4 次、共 12 次公开合成请求和零重试；当前仅 MockTransport/零网络 stub 执行，三家 profile 均 disabled。保存 Key、无网 preflight ready 或读取 Browser 控制面都不等于授权调用；自由 Shell、依赖安装与自动 push 继续禁止，未执行真实模型 capture、Production Admission、cloud activation 或 116C-B 质量结论。完整边界见[项目进度](项目进度.md)、[116C-A 检查点](doc/116C-A-离线真实仓库任务与预检harness.md)、[117A-A 检查点](doc/117A-Edge安全策略与离线预检.md)、[117A-B 检查点](doc/117A-B-Edge控制面持久化与只读API.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
 

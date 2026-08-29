@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -4931,3 +4932,78 @@ class ProviderIdempotencyRecord(Base):
     response: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class BrowserControlPlaneStateRecord(Base):
+    """Singleton Edge policy state; it deliberately carries no execution handle."""
+
+    __tablename__ = "browser_control_plane_state"
+    __table_args__ = (
+        CheckConstraint(
+            "configuration_id = 'edge-deskpilot-v1'",
+            name="ck_browser_control_plane_configuration",
+        ),
+        CheckConstraint(
+            "revision >= 1 AND active_allowlist_revision >= 1",
+            name="ck_browser_control_plane_revisions",
+        ),
+        CheckConstraint(
+            "browser_product = 'microsoft_edge' AND profile_name = 'DeskPilot' "
+            "AND profile_mode = 'application_managed_dedicated'",
+            name="ck_browser_control_plane_profile",
+        ),
+        CheckConstraint(
+            "profile_created = false AND operator_enabled = false",
+            name="ck_browser_control_plane_disabled",
+        ),
+    )
+
+    configuration_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    policy_digest: Mapped[str] = mapped_column(String(64))
+    revision: Mapped[int] = mapped_column(Integer)
+    browser_product: Mapped[str] = mapped_column(String(64))
+    profile_name: Mapped[str] = mapped_column(String(64))
+    profile_mode: Mapped[str] = mapped_column(String(64))
+    profile_created: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+    )
+    operator_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+    )
+    active_allowlist_revision: Mapped[int] = mapped_column(Integer)
+    active_allowlist_digest: Mapped[str] = mapped_column(String(64))
+    control_plane_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class BrowserOriginAllowlistSnapshotRecord(Base):
+    """Append-only origin allowlist revision; origins contain no URL paths."""
+
+    __tablename__ = "browser_origin_allowlist_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "configuration_id = 'edge-deskpilot-v1' AND revision >= 1",
+            name="ck_browser_origin_allowlist_identity",
+        ),
+        CheckConstraint(
+            "updated_by = 'local_user'",
+            name="ck_browser_origin_allowlist_actor",
+        ),
+        Index("ix_browser_origin_allowlist_updated_at", "updated_at"),
+    )
+
+    configuration_id: Mapped[str] = mapped_column(
+        ForeignKey("browser_control_plane_state.configuration_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    policy_digest: Mapped[str] = mapped_column(String(64))
+    origins: Mapped[list[str]] = mapped_column(JSON)
+    updated_by: Mapped[str] = mapped_column(String(32))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    snapshot_digest: Mapped[str] = mapped_column(String(64), unique=True)

@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from deskpilot.infrastructure.database import Database
 from deskpilot.infrastructure.models import TaskEventRecord, TaskRecord
 
-CURRENT_REVISION = "0065_confirmed_change_task_loop"
+CURRENT_REVISION = "0066_browser_control_plane"
 
 
 def _sync_url(path: Path) -> str:
@@ -132,6 +132,8 @@ async def test_migrate_empty_database_and_repeat_safely(tmp_path: Path) -> None:
             "model_provider_runtime_configs",
             "model_provider_config_audit_events",
             "model_provider_idempotency_records",
+            "browser_control_plane_state",
+            "browser_origin_allowlist_snapshots",
             "workbench_runtime_items",
             "agent_delegations",
             "agent_task_graphs",
@@ -657,6 +659,79 @@ def test_stage_113_single_offer_task_loop_constraint_round_trips(tmp_path: Path)
     engine.dispose()
     assert "BETWEEN 2 AND 8" in constraints["ck_model_planner_draft_steps"]
     assert revision == "0054_task_loop_cycle_events"
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+
+def test_browser_control_plane_migration_round_trip(tmp_path: Path) -> None:
+    database_path = tmp_path / "browser-control-plane-migration.db"
+    config = _alembic_config(database_path)
+
+    command.upgrade(config, "head")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        state_columns = {
+            item["name"] for item in inspector.get_columns("browser_control_plane_state")
+        }
+        allowlist_columns = {
+            item["name"]
+            for item in inspector.get_columns("browser_origin_allowlist_snapshots")
+        }
+        foreign_keys = inspector.get_foreign_keys(
+            "browser_origin_allowlist_snapshots"
+        )
+        check_names = {
+            item["name"]
+            for item in inspector.get_check_constraints("browser_control_plane_state")
+        }
+    engine.dispose()
+
+    assert state_columns == {
+        "configuration_id",
+        "policy_digest",
+        "revision",
+        "browser_product",
+        "profile_name",
+        "profile_mode",
+        "profile_created",
+        "operator_enabled",
+        "active_allowlist_revision",
+        "active_allowlist_digest",
+        "control_plane_digest",
+        "created_at",
+        "updated_at",
+    }
+    assert allowlist_columns == {
+        "configuration_id",
+        "revision",
+        "policy_digest",
+        "origins",
+        "updated_by",
+        "updated_at",
+        "snapshot_digest",
+    }
+    assert foreign_keys[0]["referred_table"] == "browser_control_plane_state"
+    assert foreign_keys[0]["options"].get("ondelete") == "CASCADE"
+    assert {
+        "ck_browser_control_plane_configuration",
+        "ck_browser_control_plane_revisions",
+        "ck_browser_control_plane_profile",
+        "ck_browser_control_plane_disabled",
+    }.issubset(check_names)
+
+    command.downgrade(config, "0065_confirmed_change_task_loop")
+    engine = create_engine(_sync_url(database_path))
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    engine.dispose()
+    assert "browser_control_plane_state" not in tables
+    assert "browser_origin_allowlist_snapshots" not in tables
+    assert revision == "0065_confirmed_change_task_loop"
 
     command.upgrade(config, "head")
     command.check(config)
