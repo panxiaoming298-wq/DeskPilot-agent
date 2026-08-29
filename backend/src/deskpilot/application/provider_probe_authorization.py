@@ -25,9 +25,7 @@ from deskpilot.domain.provider_probe_authorizations import (
 MAX_PROVIDER_PROBE_POLICY_BYTES = 65_536
 MAX_PROVIDER_PROBE_BINDING_BYTES = 65_536
 _BAILIAN_WORKSPACE_HOST = re.compile(
-    r"^[a-z0-9][a-z0-9-]{1,62}\."
-    r"(cn-beijing|ap-southeast-1|us-east-1|eu-central-1|ap-northeast-1)"
-    r"\.maas\.aliyuncs\.com$"
+    r"^[a-z0-9][a-z0-9-]{1,62}\.cn-beijing\.maas\.aliyuncs\.com$"
 )
 
 
@@ -82,7 +80,7 @@ class ProviderProbePolicyLoader:
         self._policy_path = policy_path or (
             Path(__file__).parents[1]
             / "evaluations"
-            / "phase115_provider_probe_policy_v1.yaml"
+            / "phase115_provider_probe_policy_v2.yaml"
         )
 
     def load(self) -> ProviderProbePolicyBundle:
@@ -152,8 +150,7 @@ class ProviderProbeOfflinePreflight:
             violations.append("CREDENTIAL_PRESENCE_NOT_CONFIRMED")
         if not binding.base_url_key_pair_confirmed:
             violations.append("BASE_URL_KEY_PAIR_NOT_CONFIRMED")
-        if not binding.dashboard_hard_limit_confirmed:
-            violations.append("DASHBOARD_HARD_LIMIT_NOT_CONFIRMED")
+        self._check_cost_control(profile, binding, checked_at, violations)
         if not self._model_is_allowed(profile, binding.exact_model):
             violations.append("MODEL_NOT_ALLOWED")
         if not self._base_url_is_allowed(profile, binding.base_url):
@@ -187,7 +184,7 @@ class ProviderProbeOfflinePreflight:
             public_config_digest = "0" * 64
 
         return ProviderProbeReadinessReport(
-            schema_version="deskpilot.provider-probe-readiness.v1",
+            schema_version="deskpilot.provider-probe-readiness.v2",
             policy_digest=self._bundle.policy_digest,
             binding_digest=binding.binding_digest,
             provider_family=binding.provider_family,
@@ -202,6 +199,18 @@ class ProviderProbeOfflinePreflight:
             maximum_per_request_microunits=(
                 profile.budget.maximum_per_request_microunits
             ),
+            planned_budget_envelope_microunits=(
+                self._bundle.policy.planned_requests_per_provider
+                * profile.budget.maximum_per_request_microunits
+            ),
+            cost_control_mode=binding.cost_control_mode,
+            provider_hard_limit_enforcing=binding.provider_hard_limit_enforcing,
+            dedicated_probe_credential_confirmed=(
+                binding.dedicated_probe_credential_confirmed
+            ),
+            application_budget_envelope_confirmed=(
+                binding.application_budget_envelope_confirmed
+            ),
             ready=not violations,
             violations=tuple(violations),
             checked_at=checked_at,
@@ -212,6 +221,55 @@ class ProviderProbeOfflinePreflight:
             if profile.provider_family == family:
                 return profile
         raise ProviderProbeAuthorizationError("Provider probe family is not frozen")
+
+    @staticmethod
+    def _check_cost_control(
+        profile: ProviderProbeProfilePolicy,
+        binding: ProviderProbeOperatorBinding,
+        checked_at: datetime,
+        violations: list[str],
+    ) -> None:
+        control = profile.budget.cost_control
+        if binding.cost_control_mode not in control.allowed_modes:
+            violations.append("COST_CONTROL_MODE_NOT_ALLOWED")
+        if not binding.dedicated_probe_credential_confirmed:
+            violations.append("DEDICATED_PROBE_CREDENTIAL_NOT_CONFIRMED")
+        if not binding.application_budget_envelope_confirmed:
+            violations.append("APPLICATION_BUDGET_ENVELOPE_NOT_CONFIRMED")
+
+        if binding.cost_control_mode == "openai_project_hard_limit":
+            if not binding.provider_hard_limit_enforcing:
+                violations.append("PROVIDER_HARD_LIMIT_NOT_ENFORCING")
+        elif binding.provider_hard_limit_enforcing:
+            violations.append("PROVIDER_HARD_LIMIT_EVIDENCE_UNEXPECTED")
+
+        if control.prepaid_balance_check_required:
+            balance_checked_at = binding.prepaid_balance_checked_at
+            if (
+                not binding.prepaid_balance_available_confirmed
+                or balance_checked_at is None
+                or balance_checked_at > binding.confirmed_at
+                or checked_at - balance_checked_at > timedelta(hours=24)
+            ):
+                violations.append("PREPAID_BALANCE_NOT_CURRENT")
+        elif (
+            binding.prepaid_balance_available_confirmed
+            or binding.prepaid_balance_checked_at is not None
+        ):
+            violations.append("PREPAID_BALANCE_EVIDENCE_UNEXPECTED")
+
+        if binding.billing_alert_confirmed != control.billing_alert_required:
+            violations.append("BILLING_ALERT_EVIDENCE_MISMATCH")
+        if (
+            binding.billing_delay_acknowledged
+            != control.billing_delay_acknowledgement_required
+        ):
+            violations.append("BILLING_DELAY_EVIDENCE_MISMATCH")
+        if (
+            binding.free_quota_stop_enabled
+            and not control.free_quota_stop_if_available_recommended
+        ):
+            violations.append("FREE_QUOTA_STOP_EVIDENCE_UNEXPECTED")
 
     @staticmethod
     def _model_is_allowed(
@@ -250,6 +308,7 @@ class ProviderProbeOfflinePreflight:
         binding: ProviderProbeOperatorBinding,
     ) -> bool:
         reference = binding.credential_ref
-        if reference.backend == "environment":
-            return reference.identifier == profile.environment_credential_identifier
-        return reference.identifier == profile.windows_credential_identifier
+        return (
+            reference.backend == profile.credential_backend
+            and reference.identifier == profile.credential_identifier
+        )

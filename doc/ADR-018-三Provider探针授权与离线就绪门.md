@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受，2026-08-29 起生效。本 ADR 落实 ADR-017 的已批准上限，但本 checkpoint 本身不授权网络请求。
+已接受，2026-08-29 起生效。本 ADR 落实 ADR-017 的已批准上限，但本 checkpoint 本身不授权网络请求。v1 历史策略继续不可变保留；个人开发的 Provider-specific 费用控制、Windows 凭据后端和北京 Workspace 选择由 [ADR-019](ADR-019-Provider差异化费用控制与个人凭据后端.md) 版本化替代。
 
 ## 背景
 

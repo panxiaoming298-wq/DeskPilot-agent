@@ -64,9 +64,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 ),
                                 "maximum_requests": item.budget.maximum_requests,
                                 "automatic_retries": item.budget.automatic_retries,
+                                "credential_backend": item.credential_backend,
+                                "planned_budget_envelope_microunits": (
+                                    policy.planned_requests_per_provider
+                                    * item.budget.maximum_per_request_microunits
+                                ),
+                                "cost_control": item.budget.cost_control.model_dump(
+                                    mode="json"
+                                ),
                             }
                             for item in policy.profiles
                         ],
+                        "future_runner_guards": (
+                            policy.future_runner_guards.model_dump(mode="json")
+                        ),
                         "execution_boundary": policy.execution_boundary.model_dump(
                             mode="json"
                         ),

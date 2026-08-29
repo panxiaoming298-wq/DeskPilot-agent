@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -18,33 +19,43 @@ from deskpilot.domain.provider_probe_authorizations import (
 from deskpilot.phase115_provider_probe_gate import main as provider_probe_gate_main
 
 BACKEND_ROOT = Path(__file__).parents[1]
-POLICY_PATH = (
+POLICY_V1_PATH = (
     BACKEND_ROOT
     / "src"
     / "deskpilot"
     / "evaluations"
     / "phase115_provider_probe_policy_v1.yaml"
 )
+POLICY_PATH = (
+    BACKEND_ROOT
+    / "src"
+    / "deskpilot"
+    / "evaluations"
+    / "phase115_provider_probe_policy_v2.yaml"
+)
 FIXED_NOW = datetime(2026, 8, 29, 8, tzinfo=UTC)
 
 _BINDINGS = {
     "openai": (
-        "openai-probe",
-        "operator-confirmed-openai-model",
+        "openai-gpt56-luna",
+        "gpt-5.6-luna",
         "https://api.openai.com/v1",
-        "DESKPILOT_CREDENTIAL_OPENAI_RESPONSES",
+        "OPENAI_RESPONSES",
+        "openai_application_envelope",
     ),
     "deepseek": (
         "deepseek-v4-flash",
         "deepseek-v4-flash",
         "https://api.deepseek.com",
-        "DESKPILOT_CREDENTIAL_DEEPSEEK",
+        "DEEPSEEK",
+        "deepseek_prepaid_balance",
     ),
     "bailian": (
         "bailian-qwen38-max",
         "qwen3.8-max",
         "https://workspace-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-        "DESKPILOT_CREDENTIAL_BAILIAN",
+        "BAILIAN",
+        "bailian_billing_alert",
     ),
 }
 
@@ -58,16 +69,18 @@ def _binding(
     profile = next(
         item for item in bundle.policy.profiles if item.provider_family == family
     )
-    provider_id, model, base_url, credential_identifier = _BINDINGS[family]
+    provider_id, model, base_url, credential_identifier, cost_control_mode = _BINDINGS[
+        family
+    ]
     material: dict[str, Any] = {
-        "schema_version": "deskpilot.provider-probe-operator-binding.v1",
+        "schema_version": "deskpilot.provider-probe-operator-binding.v2",
         "policy_digest": bundle.policy_digest,
         "provider_family": family,
         "provider_id": provider_id,
         "exact_model": model,
         "base_url": base_url,
         "credential_ref": {
-            "backend": "environment",
+            "backend": "windows_credential_manager",
             "identifier": credential_identifier,
         },
         "currency": profile.budget.currency,
@@ -80,7 +93,15 @@ def _binding(
         "exact_model_confirmed": True,
         "credential_presence_confirmed": True,
         "base_url_key_pair_confirmed": True,
-        "dashboard_hard_limit_confirmed": True,
+        "cost_control_mode": cost_control_mode,
+        "provider_hard_limit_enforcing": False,
+        "dedicated_probe_credential_confirmed": True,
+        "application_budget_envelope_confirmed": True,
+        "prepaid_balance_available_confirmed": family == "deepseek",
+        "prepaid_balance_checked_at": FIXED_NOW if family == "deepseek" else None,
+        "billing_alert_confirmed": family == "bailian",
+        "billing_delay_acknowledged": family == "bailian",
+        "free_quota_stop_enabled": False,
         "pricing_source_checked_at": FIXED_NOW,
         "confirmed_by": "reviewer_operator_owner",
         "confirmed_at": FIXED_NOW,
@@ -98,7 +119,11 @@ def test_policy_freezes_three_profiles_budget_and_non_execution_boundary() -> No
 
     assert (
         bundle.policy_digest
-        == "51b9b24743508f6546f37e3274e0a8f748b2424369c6c2e93b3449ab1472bb47"
+        == "0b221968240375def2ee886c4f73e937bf399db3f7009d86330892ed7c58a141"
+    )
+    normalized_v1 = POLICY_V1_PATH.read_bytes().replace(b"\r\n", b"\n")
+    assert sha256(normalized_v1).hexdigest() == (
+        "03b8fe6035d25d8bb9b8dd9c830412f7dcaf138714f1e76417ca938ba6183c78"
     )
     assert [item.provider_family for item in policy.profiles] == [
         "openai",
@@ -110,6 +135,24 @@ def test_policy_freezes_three_profiles_budget_and_non_execution_boundary() -> No
     assert policy.maximum_aggregate_requests == 36
     assert [item.budget.maximum_requests for item in policy.profiles] == [16, 10, 10]
     assert [item.budget.automatic_retries for item in policy.profiles] == [0, 0, 0]
+    assert [item.recommended_model for item in policy.profiles] == [
+        "gpt-5.6-luna",
+        "deepseek-v4-flash",
+        "qwen3.8-max",
+    ]
+    assert [item.credential_backend for item in policy.profiles] == [
+        "windows_credential_manager",
+        "windows_credential_manager",
+        "windows_credential_manager",
+    ]
+    assert [item.budget.cost_control.allowed_modes for item in policy.profiles] == [
+        ("openai_project_hard_limit", "openai_application_envelope"),
+        ("deepseek_prepaid_balance",),
+        ("bailian_billing_alert",),
+    ]
+    assert policy.future_runner_guards.serial_execution is True
+    assert policy.future_runner_guards.stop_on_first_error is True
+    assert policy.future_runner_guards.usage_required is True
     assert not any(policy.execution_boundary.model_dump().values())
 
 
@@ -129,9 +172,29 @@ def test_offline_preflight_accepts_exact_public_binding_without_resolving_secret
     assert report.real_model_capture is False
     assert report.production_admission is False
     assert report.cloud_activation is False
+    assert report.planned_budget_envelope_microunits in {400_000, 1_000_000, 8_000_000}
+    assert report.dedicated_probe_credential_confirmed is True
+    assert report.application_budget_envelope_confirmed is True
     serialized = report.model_dump_json()
     assert binding.base_url not in serialized
     assert binding.credential_ref.identifier not in serialized
+
+
+def test_openai_project_hard_limit_mode_requires_and_accepts_enforcing_evidence() -> None:
+    bundle = ProviderProbePolicyLoader().load()
+    report = ProviderProbeOfflinePreflight(bundle).run(
+        _binding(
+            "openai",
+            overrides={
+                "cost_control_mode": "openai_project_hard_limit",
+                "provider_hard_limit_enforcing": True,
+            },
+        ),
+        now=FIXED_NOW,
+    )
+
+    assert report.ready is True
+    assert report.provider_hard_limit_enforcing is True
 
 
 @pytest.mark.parametrize(
@@ -141,6 +204,11 @@ def test_offline_preflight_accepts_exact_public_binding_without_resolving_secret
             "openai",
             {"base_url": "https://proxy.example.test/v1"},
             "BASE_URL_NOT_ALLOWED",
+        ),
+        (
+            "openai",
+            {"exact_model": "gpt-5.6-terra"},
+            "MODEL_NOT_ALLOWED",
         ),
         (
             "deepseek",
@@ -155,9 +223,52 @@ def test_offline_preflight_accepts_exact_public_binding_without_resolving_secret
             "BASE_URL_NOT_ALLOWED",
         ),
         (
+            "bailian",
+            {
+                "base_url": "https://workspace-123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+            },
+            "BASE_URL_NOT_ALLOWED",
+        ),
+        (
             "deepseek",
-            {"dashboard_hard_limit_confirmed": False},
-            "DASHBOARD_HARD_LIMIT_NOT_CONFIRMED",
+            {"dedicated_probe_credential_confirmed": False},
+            "DEDICATED_PROBE_CREDENTIAL_NOT_CONFIRMED",
+        ),
+        (
+            "openai",
+            {"application_budget_envelope_confirmed": False},
+            "APPLICATION_BUDGET_ENVELOPE_NOT_CONFIRMED",
+        ),
+        (
+            "deepseek",
+            {
+                "prepaid_balance_available_confirmed": False,
+                "prepaid_balance_checked_at": None,
+            },
+            "PREPAID_BALANCE_NOT_CURRENT",
+        ),
+        (
+            "deepseek",
+            {"prepaid_balance_checked_at": FIXED_NOW - timedelta(hours=25)},
+            "PREPAID_BALANCE_NOT_CURRENT",
+        ),
+        (
+            "bailian",
+            {"billing_alert_confirmed": False},
+            "BILLING_ALERT_EVIDENCE_MISMATCH",
+        ),
+        (
+            "bailian",
+            {"billing_delay_acknowledged": False},
+            "BILLING_DELAY_EVIDENCE_MISMATCH",
+        ),
+        (
+            "openai",
+            {
+                "cost_control_mode": "openai_project_hard_limit",
+                "provider_hard_limit_enforcing": False,
+            },
+            "PROVIDER_HARD_LIMIT_NOT_ENFORCING",
         ),
         (
             "bailian",
@@ -229,7 +340,7 @@ def test_strict_policy_and_binding_loaders_reject_alias_unknown_and_duplicate_ke
     binding_path.write_text(
         payload.replace(
             '"schema_version":',
-            '"schema_version":"deskpilot.provider-probe-operator-binding.v1",'
+            '"schema_version":"deskpilot.provider-probe-operator-binding.v2",'
             '"schema_version":',
             1,
         ),
@@ -237,6 +348,19 @@ def test_strict_policy_and_binding_loaders_reject_alias_unknown_and_duplicate_ke
     )
     with pytest.raises(ProviderProbeAuthorizationError, match="duplicate JSON key"):
         load_provider_probe_binding(binding_path)
+
+    v1_material = binding.model_dump(mode="json", exclude={"binding_digest"})
+    v1_material["schema_version"] = "deskpilot.provider-probe-operator-binding.v1"
+    v1_path = tmp_path / "obsolete-v1.json"
+    v1_path.write_text(
+        json.dumps(
+            {**v1_material, "binding_digest": sha256_digest(v1_material)},
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ProviderProbeAuthorizationError, match="strict loading"):
+        load_provider_probe_binding(v1_path)
 
 
 def test_cli_manifest_and_preflight_never_offer_a_live_run_command(
@@ -247,6 +371,11 @@ def test_cli_manifest_and_preflight_never_offer_a_live_run_command(
     manifest = json.loads(capsys.readouterr().out)
     assert manifest["planned_aggregate_requests"] == 12
     assert manifest["maximum_aggregate_requests"] == 36
+    assert manifest["profiles"][0]["recommended_model"] == "gpt-5.6-luna"
+    assert manifest["profiles"][0]["credential_backend"] == (
+        "windows_credential_manager"
+    )
+    assert manifest["future_runner_guards"]["serial_execution"] is True
     assert not any(manifest["execution_boundary"].values())
 
     binding = _binding("deepseek")

@@ -1,0 +1,118 @@
+schema_version: deskpilot.provider-probe-policy.v2
+policy_id: phase115-three-provider-public-probe
+version: 2
+data_class: public_synthetic
+cases:
+  - case_id: public-strict-json-nonstream-v1
+    transport: nonstream
+    output_mode: strict_json_schema
+    repeat_count: 2
+    maximum_input_characters: 4096
+    maximum_output_tokens: 256
+    store_response: false
+    tools_enabled: false
+    external_retrieval_enabled: false
+    data_class: public_synthetic
+    contains_repository_content: false
+  - case_id: public-strict-json-stream-v1
+    transport: stream
+    output_mode: strict_json_schema
+    repeat_count: 2
+    maximum_input_characters: 4096
+    maximum_output_tokens: 256
+    store_response: false
+    tools_enabled: false
+    external_retrieval_enabled: false
+    data_class: public_synthetic
+    contains_repository_content: false
+profiles:
+  - provider_family: openai
+    protocol: openai_responses
+    recommended_model: gpt-5.6-luna
+    exact_model_confirmation_required: true
+    base_url_policy: openai_public_v1
+    credential_backend: windows_credential_manager
+    credential_identifier: OPENAI_RESPONSES
+    budget:
+      currency: USD
+      maximum_total_microunits: 5000000
+      maximum_per_request_microunits: 250000
+      maximum_requests: 16
+      automatic_retries: 0
+      hidden_retries: false
+      cost_control:
+        allowed_modes:
+          - openai_project_hard_limit
+          - openai_application_envelope
+        provider_hard_limit_preferred: true
+        prepaid_balance_check_required: false
+        billing_alert_required: false
+        billing_delay_acknowledgement_required: false
+        free_quota_stop_if_available_recommended: false
+        dedicated_probe_credential_required: true
+        application_budget_envelope_required: true
+  - provider_family: deepseek
+    protocol: openai_responses
+    recommended_model: deepseek-v4-flash
+    exact_model_confirmation_required: true
+    base_url_policy: deepseek_public_responses
+    credential_backend: windows_credential_manager
+    credential_identifier: DEEPSEEK
+    budget:
+      currency: USD
+      maximum_total_microunits: 2000000
+      maximum_per_request_microunits: 100000
+      maximum_requests: 10
+      automatic_retries: 0
+      hidden_retries: false
+      cost_control:
+        allowed_modes:
+          - deepseek_prepaid_balance
+        provider_hard_limit_preferred: false
+        prepaid_balance_check_required: true
+        billing_alert_required: false
+        billing_delay_acknowledgement_required: false
+        free_quota_stop_if_available_recommended: false
+        dedicated_probe_credential_required: true
+        application_budget_envelope_required: true
+  - provider_family: bailian
+    protocol: openai_responses
+    recommended_model: qwen3.8-max
+    exact_model_confirmation_required: true
+    base_url_policy: bailian_beijing_workspace_responses
+    credential_backend: windows_credential_manager
+    credential_identifier: BAILIAN
+    budget:
+      currency: CNY
+      maximum_total_microunits: 20000000
+      maximum_per_request_microunits: 2000000
+      maximum_requests: 10
+      automatic_retries: 0
+      hidden_retries: false
+      cost_control:
+        allowed_modes:
+          - bailian_billing_alert
+        provider_hard_limit_preferred: false
+        prepaid_balance_check_required: false
+        billing_alert_required: true
+        billing_delay_acknowledgement_required: true
+        free_quota_stop_if_available_recommended: true
+        dedicated_probe_credential_required: true
+        application_budget_envelope_required: true
+planned_requests_per_provider: 4
+planned_aggregate_requests: 12
+maximum_aggregate_requests: 36
+future_runner_guards:
+  serial_execution: true
+  stop_on_first_error: true
+  usage_required: true
+  request_and_response_bodies_logged: false
+  headers_logged: false
+execution_boundary:
+  network_access: false
+  resolves_credentials: false
+  real_model_capture: false
+  production_admission: false
+  cloud_activation: false
+  repository_content: false
+  full_116c_b: false

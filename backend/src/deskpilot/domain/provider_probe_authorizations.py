@@ -16,7 +16,13 @@ ProviderProbeCurrency = Literal["USD", "CNY"]
 ProviderProbeBaseUrlPolicy = Literal[
     "openai_public_v1",
     "deepseek_public_responses",
-    "bailian_workspace_responses",
+    "bailian_beijing_workspace_responses",
+]
+ProviderProbeCostControlMode = Literal[
+    "openai_project_hard_limit",
+    "openai_application_envelope",
+    "deepseek_prepaid_balance",
+    "bailian_billing_alert",
 ]
 
 MAX_PROVIDER_PROBE_BINDING_VALIDITY = timedelta(hours=24)
@@ -32,9 +38,29 @@ class ProviderProbeCasePolicy(BaseModel):
     transport: Literal["nonstream", "stream"]
     output_mode: Literal["strict_json_schema"] = "strict_json_schema"
     repeat_count: Literal[2] = 2
+    maximum_input_characters: Literal[4096] = 4096
     maximum_output_tokens: Literal[256] = 256
+    store_response: Literal[False] = False
+    tools_enabled: Literal[False] = False
+    external_retrieval_enabled: Literal[False] = False
     data_class: Literal["public_synthetic"] = "public_synthetic"
     contains_repository_content: Literal[False] = False
+
+
+class ProviderProbeCostControlPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allowed_modes: tuple[ProviderProbeCostControlMode, ...] = Field(
+        min_length=1,
+        max_length=2,
+    )
+    provider_hard_limit_preferred: bool
+    prepaid_balance_check_required: bool
+    billing_alert_required: bool
+    billing_delay_acknowledgement_required: bool
+    free_quota_stop_if_available_recommended: bool
+    dedicated_probe_credential_required: Literal[True] = True
+    application_budget_envelope_required: Literal[True] = True
 
 
 class ProviderProbeBudgetPolicy(BaseModel):
@@ -46,7 +72,7 @@ class ProviderProbeBudgetPolicy(BaseModel):
     maximum_requests: int = Field(ge=1, le=100)
     automatic_retries: Literal[0] = 0
     hidden_retries: Literal[False] = False
-    provider_dashboard_hard_limit_required: Literal[True] = True
+    cost_control: ProviderProbeCostControlPolicy
 
 
 class ProviderProbeProfilePolicy(BaseModel):
@@ -57,9 +83,21 @@ class ProviderProbeProfilePolicy(BaseModel):
     recommended_model: str | None = Field(default=None, min_length=1, max_length=200)
     exact_model_confirmation_required: Literal[True] = True
     base_url_policy: ProviderProbeBaseUrlPolicy
-    environment_credential_identifier: str
-    windows_credential_identifier: str
+    credential_backend: Literal["windows_credential_manager"] = (
+        "windows_credential_manager"
+    )
+    credential_identifier: str
     budget: ProviderProbeBudgetPolicy
+
+
+class ProviderProbeFutureRunnerGuards(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    serial_execution: Literal[True] = True
+    stop_on_first_error: Literal[True] = True
+    usage_required: Literal[True] = True
+    request_and_response_bodies_logged: Literal[False] = False
+    headers_logged: Literal[False] = False
 
 
 class ProviderProbeExecutionBoundary(BaseModel):
@@ -79,15 +117,16 @@ class ProviderProbePolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["deskpilot.provider-probe-policy.v1"]
+    schema_version: Literal["deskpilot.provider-probe-policy.v2"]
     policy_id: Literal["phase115-three-provider-public-probe"]
-    version: Literal[1] = 1
+    version: Literal[2] = 2
     data_class: Literal["public_synthetic"] = "public_synthetic"
     cases: tuple[ProviderProbeCasePolicy, ...] = Field(min_length=2, max_length=2)
     profiles: tuple[ProviderProbeProfilePolicy, ...] = Field(min_length=3, max_length=3)
     planned_requests_per_provider: Literal[4] = 4
     planned_aggregate_requests: Literal[12] = 12
     maximum_aggregate_requests: Literal[36] = 36
+    future_runner_guards: ProviderProbeFutureRunnerGuards
     execution_boundary: ProviderProbeExecutionBoundary
 
     @model_validator(mode="after")
@@ -110,46 +149,70 @@ class ProviderProbePolicy(BaseModel):
             raise ValueError("Provider probe profile order changed")
         expected = {
             "openai": (
-                None,
+                "gpt-5.6-luna",
                 "openai_public_v1",
+                "OPENAI_RESPONSES",
                 "USD",
                 5_000_000,
                 250_000,
                 16,
-                "DESKPILOT_CREDENTIAL_OPENAI_RESPONSES",
-                "OPENAI_RESPONSES",
+                (
+                    "openai_project_hard_limit",
+                    "openai_application_envelope",
+                ),
+                True,
+                False,
+                False,
+                False,
+                False,
             ),
             "deepseek": (
                 "deepseek-v4-flash",
                 "deepseek_public_responses",
+                "DEEPSEEK",
                 "USD",
                 2_000_000,
                 100_000,
                 10,
-                "DESKPILOT_CREDENTIAL_DEEPSEEK",
-                "DEEPSEEK",
+                ("deepseek_prepaid_balance",),
+                False,
+                True,
+                False,
+                False,
+                False,
             ),
             "bailian": (
                 "qwen3.8-max",
-                "bailian_workspace_responses",
+                "bailian_beijing_workspace_responses",
+                "BAILIAN",
                 "CNY",
                 20_000_000,
                 2_000_000,
                 10,
-                "DESKPILOT_CREDENTIAL_BAILIAN",
-                "BAILIAN",
+                ("bailian_billing_alert",),
+                False,
+                False,
+                True,
+                True,
+                True,
             ),
         }
         for profile in self.profiles:
+            control = profile.budget.cost_control
             actual = (
                 profile.recommended_model,
                 profile.base_url_policy,
+                profile.credential_identifier,
                 profile.budget.currency,
                 profile.budget.maximum_total_microunits,
                 profile.budget.maximum_per_request_microunits,
                 profile.budget.maximum_requests,
-                profile.environment_credential_identifier,
-                profile.windows_credential_identifier,
+                control.allowed_modes,
+                control.provider_hard_limit_preferred,
+                control.prepaid_balance_check_required,
+                control.billing_alert_required,
+                control.billing_delay_acknowledgement_required,
+                control.free_quota_stop_if_available_recommended,
             )
             if actual != expected[profile.provider_family]:
                 raise ValueError("Provider probe profile policy changed")
@@ -174,7 +237,7 @@ class ProviderProbeOperatorBinding(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["deskpilot.provider-probe-operator-binding.v1"]
+    schema_version: Literal["deskpilot.provider-probe-operator-binding.v2"]
     policy_digest: str = Field(pattern=DIGEST_PATTERN)
     provider_family: ProviderProbeFamily
     provider_id: str = Field(pattern=PROVIDER_ID_PATTERN)
@@ -189,7 +252,15 @@ class ProviderProbeOperatorBinding(BaseModel):
     exact_model_confirmed: bool
     credential_presence_confirmed: bool
     base_url_key_pair_confirmed: bool
-    dashboard_hard_limit_confirmed: bool
+    cost_control_mode: ProviderProbeCostControlMode
+    provider_hard_limit_enforcing: bool
+    dedicated_probe_credential_confirmed: bool
+    application_budget_envelope_confirmed: bool
+    prepaid_balance_available_confirmed: bool
+    prepaid_balance_checked_at: datetime | None = None
+    billing_alert_confirmed: bool
+    billing_delay_acknowledged: bool
+    free_quota_stop_enabled: bool
     pricing_source_checked_at: datetime
     confirmed_by: str = Field(pattern=REVIEWER_PATTERN)
     confirmed_at: datetime
@@ -203,7 +274,10 @@ class ProviderProbeOperatorBinding(BaseModel):
             self.confirmed_at,
             self.valid_until,
         )
-        if any(item.tzinfo is None for item in timestamps):
+        if any(item.tzinfo is None for item in timestamps) or (
+            self.prepaid_balance_checked_at is not None
+            and self.prepaid_balance_checked_at.tzinfo is None
+        ):
             raise ValueError("Provider probe binding timestamps must be timezone-aware")
         if (
             self.pricing_source_checked_at > self.confirmed_at
@@ -226,7 +300,7 @@ class ProviderProbeReadinessReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["deskpilot.provider-probe-readiness.v1"]
+    schema_version: Literal["deskpilot.provider-probe-readiness.v2"]
     policy_digest: str = Field(pattern=DIGEST_PATTERN)
     binding_digest: str = Field(pattern=DIGEST_PATTERN)
     provider_family: ProviderProbeFamily
@@ -239,6 +313,11 @@ class ProviderProbeReadinessReport(BaseModel):
     currency: ProviderProbeCurrency
     maximum_total_microunits: int = Field(ge=1)
     maximum_per_request_microunits: int = Field(ge=1)
+    planned_budget_envelope_microunits: int = Field(ge=1)
+    cost_control_mode: ProviderProbeCostControlMode
+    provider_hard_limit_enforcing: bool
+    dedicated_probe_credential_confirmed: bool
+    application_budget_envelope_confirmed: bool
     ready: bool
     violations: tuple[str, ...] = Field(max_length=20)
     checked_at: datetime
