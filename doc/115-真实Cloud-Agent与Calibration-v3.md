@@ -78,3 +78,9 @@ Calibration v3 使用 `deskpilot.phase115-calibration-run.v3`，并保持 v1/v2 
 Calibration v3 另增加严格的单人 `personal_preview` 路径：同一 operator 必须复核全部样本，Judge-human agreement 与 acceptance 为 100%，只允许 `public_synthetic` 数据，最长 14 天且 `activates_runtime=false`。它解决个人开发者不便组织双人评审的问题，但不满足本文件第 5 节 Production Admission，也不改变第 7 节的生产授权清单。
 
 生产规则仍是两名独立真人 primary reviewer；第三名 arbiter 只在两人分歧时需要，而不是每次固定三人。Production builder 会显式拒绝个人预发布 review/report，旧 v1 生产工件的规范化序列化与 digest 保持不变。
+
+## 9. 三家真实探针的离线就绪门
+
+[ADR-018](ADR-018-三Provider探针授权与离线就绪门.md) 将 OpenAI、DeepSeek、百炼的上限进一步收敛为每家 4 个计划请求：strict JSON 非流式/流式各重复 2 次，三家总计 12 次，继续固定公开合成数据和零自动/隐藏重试。operator binding 最长有效 24 小时，必须确认 exact model、凭据存在、Key/Base URL 配对、当前价格来源和控制台硬限额。
+
+新增 CLI 只能输出 manifest 或执行无网 preflight；它不解析 credential、不探测 endpoint，也没有 run/capture/activate 子命令。即使 report 为 ready，也仍需后续实现的 live runner 逐请求执行预算检查。本检查点没有改变第 7 节 Production 授权清单。

@@ -114,6 +114,10 @@ python -m deskpilot.phase115_personal_preview_gate `
 - 真实兼容性、质量、延迟和费用仍没有结论；需要凭据和 live capture 后才能签发。
 - 115B Production 和 116C-B 完整质量门保持阻断。
 
+## 2026-08-29 后续落实
+
+[ADR-018](ADR-018-三Provider探针授权与离线就绪门.md) 已把本 ADR 的三家费用上限、零重试、公开合成数据和 exact operator 输入冻结成不可变策略与无网 preflight。计划实际只发起每家 4 次、共 12 次请求；当前 checkpoint 只有 `manifest/preflight`，没有 live run 入口，因此仍未产生费用或 Provider 兼容性结论。
+
 ## 官方依据
 
 - [OpenAI Responses：Create a model response](https://developers.openai.com/api/reference/cli/resources/responses/methods/create)
