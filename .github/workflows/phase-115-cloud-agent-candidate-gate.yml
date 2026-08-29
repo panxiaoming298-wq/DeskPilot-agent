@@ -45,6 +45,9 @@ jobs:
             tests/test_phase115_release_gate.py `
             tests/test_phase107_calibration_gate.py `
             tests/test_phase109_model_admission.py `
+            tests/test_phase115_personal_preview.py `
+            tests/test_openai_compatible_responses_provider.py `
+            tests/test_provider_configuration.py `
             tests/test_agent_registry.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prove CI cannot capture or activate production evidence

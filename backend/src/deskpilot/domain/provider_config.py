@@ -79,50 +79,95 @@ class OpenAICompatibleChatProviderConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_endpoint_and_credential_policy(self) -> Self:
-        parsed = urlsplit(self.base_url)
-        if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
-            raise ValueError("Provider base_url must use HTTP(S) and include a host")
-        if parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError(
-                "Provider base_url cannot contain credentials, query, or fragment"
-            )
-        try:
-            _ = parsed.port
-        except ValueError as error:
-            raise ValueError("Provider base_url contains an invalid port") from error
-
-        if self.location is ModelLocation.CLOUD:
-            if parsed.scheme != "https":
-                raise ValueError("Cloud Provider base_url must use HTTPS")
-            if self.credential_ref is None:
-                raise ValueError("Cloud Provider requires a credential_ref")
-            if self.allow_private_network:
-                raise ValueError(
-                    "Cloud Provider cannot enable the private-network exception"
-                )
-            return self
-
-        host = parsed.hostname.lower()
-        if host == "localhost":
-            return self
-        try:
-            address = ip_address(host)
-        except ValueError as error:
-            raise ValueError(
-                "Local Provider host must be localhost or an IP literal"
-            ) from error
-        if address.is_loopback:
-            return self
-        if not (address.is_private or address.is_link_local):
-            raise ValueError("Local Provider cannot target a public IP address")
-        if not self.allow_private_network:
-            raise ValueError(
-                "Private-network Provider requires allow_private_network=true"
-            )
+        _validate_endpoint_and_credential_policy(
+            base_url=self.base_url,
+            location=self.location,
+            credential_ref=self.credential_ref,
+            allow_private_network=self.allow_private_network,
+        )
         return self
 
 
+class OpenAICompatibleResponsesProviderConfig(BaseModel):
+    """Configuration for cloud or local OpenAI Responses-compatible endpoints."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["openai_compatible_responses"] = "openai_compatible_responses"
+    enabled: bool = True
+    provider_id: str = Field(pattern=PROVIDER_ID_PATTERN)
+    display_name: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+    base_url: str = Field(min_length=1, max_length=2_048)
+    location: ModelLocation
+    credential_ref: CredentialReference | None = None
+    allow_private_network: bool = False
+    supports_streaming: bool = True
+    supports_structured_output: bool = True
+    supports_strict_json_schema: bool = True
+    max_context_tokens: int = Field(default=128_000, ge=1, le=10_000_000)
+    max_response_bytes: int = Field(
+        default=4 * 1024 * 1024,
+        ge=1_024,
+        le=64 * 1024 * 1024,
+    )
+    health_timeout_seconds: float = Field(default=5, gt=0, le=30)
+
+    @model_validator(mode="after")
+    def validate_endpoint_and_credential_policy(self) -> Self:
+        _validate_endpoint_and_credential_policy(
+            base_url=self.base_url,
+            location=self.location,
+            credential_ref=self.credential_ref,
+            allow_private_network=self.allow_private_network,
+        )
+        return self
+
+
+def _validate_endpoint_and_credential_policy(
+    *,
+    base_url: str,
+    location: ModelLocation,
+    credential_ref: CredentialReference | None,
+    allow_private_network: bool,
+) -> None:
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        raise ValueError("Provider base_url must use HTTP(S) and include a host")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Provider base_url cannot contain credentials, query, or fragment")
+    try:
+        _ = parsed.port
+    except ValueError as error:
+        raise ValueError("Provider base_url contains an invalid port") from error
+
+    if location is ModelLocation.CLOUD:
+        if parsed.scheme != "https":
+            raise ValueError("Cloud Provider base_url must use HTTPS")
+        if credential_ref is None:
+            raise ValueError("Cloud Provider requires a credential_ref")
+        if allow_private_network:
+            raise ValueError("Cloud Provider cannot enable the private-network exception")
+        return
+
+    host = parsed.hostname.lower()
+    if host == "localhost":
+        return
+    try:
+        address = ip_address(host)
+    except ValueError as error:
+        raise ValueError("Local Provider host must be localhost or an IP literal") from error
+    if address.is_loopback:
+        return
+    if not (address.is_private or address.is_link_local):
+        raise ValueError("Local Provider cannot target a public IP address")
+    if not allow_private_network:
+        raise ValueError("Private-network Provider requires allow_private_network=true")
+
+
 ProviderConfig = Annotated[
-    FakeProviderConfig | OpenAICompatibleChatProviderConfig,
+    FakeProviderConfig
+    | OpenAICompatibleChatProviderConfig
+    | OpenAICompatibleResponsesProviderConfig,
     Field(discriminator="kind"),
 ]

@@ -106,6 +106,13 @@ class AgentModelAdmissionBundle(BaseModel):
 
     @model_validator(mode="after")
     def bundle_is_unique_and_digested(self) -> Self:
+        if (
+            self.reviews.review_mode != "production"
+            or self.report.review_mode != "production"
+        ):
+            raise ValueError(
+                "Production admission bundle cannot consume personal preview evidence"
+            )
         keys = tuple(item.key for item in self.admissions)
         if len(keys) != len(set(keys)):
             raise ValueError("Agent model admission bundle contains a duplicate route")

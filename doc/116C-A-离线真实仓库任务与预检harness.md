@@ -79,3 +79,5 @@ python -m deskpilot.phase116c_offline_gate preflight --mirror-root <operator-sta
 2. 完成 115B 真实 capture、盲审/真人评审、Production Admission 与激活/回滚验收；
 3. 由 operator staging 冻结 mirrors，先运行本检查点的只读预检；
 4. 在 116C-B 按 20 任务 / 60 trial 执行真实模型质量验收，仍不自动 push。
+
+2026-08-29 已新增 [ADR-017](ADR-017-Responses多Provider兼容与个人预发布门.md) 的三家 Responses 离线兼容层和不可激活的 `personal_preview`。该预览层只能帮助个人 operator 在公开合成样本上形成短期证据，不能替代上述第 2 步，也不能直接运行本套件或签发 116C-B 质量结论。完整 20 任务 / 60 trial 仍未获授权；未来最多先执行另行预检后的两任务 canary。

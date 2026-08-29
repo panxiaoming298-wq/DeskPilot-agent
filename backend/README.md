@@ -186,6 +186,7 @@ DESKPILOT_RUNNER_WORKER_ACTIVE_PROCESS_LIMIT=1
 - `application/model_gateway.py` 提供能力/隐私/角色/费用联合路由、全链 timeout、Retry-After fallback、EWMA 与 closed/open/half-open 熔断。
 - `model_providers/fake.py` 提供无需网络和 API Key 的确定性本地 Provider。
 - `model_providers/openai_compatible_chat.py` 提供 `/chat/completions`、strict JSON Schema、SSE、usage、health 和脱敏 HTTP 错误归一化。
+- `model_providers/openai_compatible_responses.py` 提供保守 `/responses` 公共子集、strict JSON Schema、语义 SSE、exact model identity、usage、health 和脱敏错误归一化，可用于 disabled 的 OpenAI、DeepSeek 与阿里云百炼 profile。
 - `domain/provider_config.py` 定义不含密钥的 Fake/兼容 Provider 配置、credential reference 与 endpoint 安全策略。
 - `infrastructure/environment_credentials.py` 只解析 `DESKPILOT_CREDENTIAL_*` 环境变量并返回 `SecretStr`。
 - `infrastructure/windows_credentials.py` 通过 Win32 Generic Credential 保存 DeskPilot 专用 target，支持读取、写入、幂等删除和临时缓冲区清零。

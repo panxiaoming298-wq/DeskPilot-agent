@@ -70,3 +70,11 @@ Calibration v3 使用 `deskpilot.phase115-calibration-run.v3`，并保持 v1/v2 
 5. Admission/Release 有效期和生产 activation actor。
 
 在这些授权缺失时，正确生产状态仍是所有 cloud 候选 disabled、本地稳定版本 preferred，并停在 115A checkpoint；开发状态则转入 `codex/stage-116-dev`，仅推进 116A/116B，不执行 live capture、Production Admission、cloud activation 或 116C 真实模型质量签发。
+
+## 8. 2026-08-29 离线兼容与个人预发布补充
+
+新增 `openai_compatible_responses` adapter，以保守公共子集覆盖 OpenAI、DeepSeek 和阿里云百炼的 `/responses` 请求、strict structured output、语义 SSE 与统一错误模型。三家只完成 MockTransport 离线合约，配置模板均保持 disabled；没有放置凭据、健康探测或真实 capture。协议选择、当前模型/端点和出站费用边界见 [ADR-017](ADR-017-Responses多Provider兼容与个人预发布门.md)。
+
+Calibration v3 另增加严格的单人 `personal_preview` 路径：同一 operator 必须复核全部样本，Judge-human agreement 与 acceptance 为 100%，只允许 `public_synthetic` 数据，最长 14 天且 `activates_runtime=false`。它解决个人开发者不便组织双人评审的问题，但不满足本文件第 5 节 Production Admission，也不改变第 7 节的生产授权清单。
+
+生产规则仍是两名独立真人 primary reviewer；第三名 arbiter 只在两人分歧时需要，而不是每次固定三人。Production builder 会显式拒绝个人预发布 review/report，旧 v1 生产工件的规范化序列化与 digest 保持不变。

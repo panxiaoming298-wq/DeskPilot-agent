@@ -220,6 +220,7 @@ flowchart LR
 153. [阶段 116B：持久多 Agent 编码循环第二十检查点](doc/116B-持久多Agent编码循环第二十检查点.md)
 154. [阶段 116B：持久多 Agent 编码循环第二十一检查点](doc/116B-持久多Agent编码循环第二十一检查点.md)
 155. [阶段 116C-A：离线真实仓库任务与预检 harness](doc/116C-A-离线真实仓库任务与预检harness.md)
+156. [ADR-017：Responses 多 Provider 兼容与个人预发布门](doc/ADR-017-Responses多Provider兼容与个人预发布门.md)
 
 ## 目标 MVP 与当前边界
 
@@ -289,7 +290,7 @@ flowchart LR
 
 ### 当前实施顺序（2026-08-29 校准）
 
-阶段 77～114 与 115A 已完成；116A、116B LOCAL-only 和 116C-A 离线准备层也已闭合。116C-A 冻结 8 个公开上游仓库的 20 个历史任务（Python/Node 各 10 个）与 60 个 trial 身份，固定 80% 成功门槛和所有越权项零容忍；严格 loader、CLI 和 operator-staged bare Git mirror 只读预检均已落地。自由 Shell、依赖安装与自动 push 继续禁止，115B 真实 Provider/Judge-human 证据与激活授权仍缺失，因此没有执行真实模型 capture、Production Admission、cloud activation 或 116C-B 质量结论。完整边界见[项目进度](项目进度.md)、[116C-A 检查点](doc/116C-A-离线真实仓库任务与预检harness.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
+阶段 77～114 与 115A 已完成；116A、116B LOCAL-only 和 116C-A 离线准备层也已闭合。116C-A 冻结 8 个公开上游仓库的 20 个历史任务（Python/Node 各 10 个）与 60 个 trial 身份，固定 80% 成功门槛和所有越权项零容忍。2026-08-29 又新增 OpenAI/DeepSeek/阿里云百炼共用的保守 Responses adapter 和不可激活的单人 `personal_preview` 门；当前只通过离线 mock 与 fail-closed 合约，三家 profile 均保持 disabled。自由 Shell、依赖安装与自动 push 继续禁止，未执行真实模型 capture、Production Admission、cloud activation 或 116C-B 质量结论。完整边界见[项目进度](项目进度.md)、[116C-A 检查点](doc/116C-A-离线真实仓库任务与预检harness.md)、[ADR-016](doc/ADR-016-115B生产门与116开发纵切解耦.md)、[ADR-017](doc/ADR-017-Responses多Provider兼容与个人预发布门.md)与[阶段 111～117 实施路线](doc/111-117-通用多Agent与Codex纵切实施路线.md)。
 
 阶段 113 最终门禁：默认后端 772 项，`760 passed + 12 skipped`；Ruff 全仓、严格 mypy 282 个生产源码通过。Alembic 唯一 head 为 `0055_planner_only_single_task_loop`，SQLite current/upgrade/check、integrity/foreign-key 通过。Evaluation 与 Phase75 v16 compare 通过，17 份 immutable baseline SHA-256 不变；wheel Prompt 24/24；前端 22 个文件 / 157 项、type-check/build 通过。专用 `deskpilot_test` 的 PostgreSQL 11/11（含固定容器重启）和临时 RabbitMQ 1/1 通过，环境已恢复且未改 baseline。
 
@@ -342,6 +343,8 @@ flowchart LR
 阶段 116B 第二十一个代码 checkpoint：新增以第二十检查点 exact digest 绑定的 `workspace_coding_frozen_concurrency_kill_v1.yaml`。三个健康任务在三个 Ruff verified、两个 pytest running、第三个 pytest ready 的边界外部强杀完整 sidecar；强杀前 AppContainer journal 恰好为 2，第二代只将两个 claimed pytest Attempt 收敛为 `CAPABILITY_OUTCOME_UNKNOWN_AFTER_LEASE`，未领取同伴只运行一次 pytest 并完成 Delivery，终态 journal 为空。最终 6 Attempt、4 verified ResultRef、2 unknown Attempt，零 Planner/Profile 重放。默认后端 117 文件 / 883 项，`871 passed + 12 skipped`；九层契约 48/48、同一最终 NSIS 安装态五测试 5/5、wheel Prompt 33/33 与 Workspace YAML 9/9、前端 165/165、Rust `4 passed + 5 ignored` 及 fmt/Clippy、Ruff、strict mypy 310 均通过。116B 的 LOCAL-only 开发完成口径至此闭合；下一步冻结 116C 离线真实仓库任务与 harness，不越过 115B 生产授权门。完整边界见[第二十一检查点](doc/116B-持久多Agent编码循环第二十一检查点.md)。
 
 阶段 116C-A 离线检查点：新增不可变 `deskpilot.workspace-repository-task-suite.v1`，冻结 8 个公开 GitHub 上游的 20 个真实历史任务、精确 base/reference commit、tree/diff digest、测试路径、固定 Profile、物化/清理规则与 3 次重复阈值。严格预检只读取 operator-staged bare Git mirror；实际对 8/8 仓库、20/20 任务和 60 个 trial 身份完成对账。默认后端 892 项，完整运行 `880 passed + 12 skipped`；专项 9/9、Ruff、strict mypy 313 个生产源码、frozen lock、60 包 `pip check`、wheel YAML 资源与 baseline/diff 门均通过。本检查点没有运行模型，不产生成功率、Admission 或 activation 结论。完整边界见[116C-A 检查点](doc/116C-A-离线真实仓库任务与预检harness.md)。
+
+ADR-017 离线检查点：新增 `openai_compatible_responses` adapter，以无状态文本/strict JSON Schema 公共子集离线覆盖 OpenAI、DeepSeek 和阿里云百炼；新增单人 `personal_preview`，最长 14 天、只限公开合成数据且固定不激活。默认后端 902 项，完整运行 `890 passed + 12 skipped`；Ruff、strict mypy 317、`pip check`、Evaluation/Phase75 immutable compare、workflow YAML 与敏感信息扫描通过。本机缺少 `uv`/Hatch build backend，未临时安装依赖重建 wheel，frozen CI 继续执行打包门。三家 profile 均 disabled，实际模型调用和费用为零，Production 双人门与 116C-B 阻断不变。完整边界见[ADR-017](doc/ADR-017-Responses多Provider兼容与个人预发布门.md)。
 
 以下内容保留阶段 93～110 的实现记录，不再代表当前开发优先级。
 

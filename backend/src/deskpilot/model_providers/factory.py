@@ -7,11 +7,15 @@ from deskpilot.domain.model_contracts import ModelProviderDescriptor
 from deskpilot.domain.provider_config import (
     FakeProviderConfig,
     OpenAICompatibleChatProviderConfig,
+    OpenAICompatibleResponsesProviderConfig,
     ProviderConfig,
 )
 from deskpilot.model_providers.fake import FakeModelProvider
 from deskpilot.model_providers.openai_compatible_chat import (
     OpenAICompatibleChatProvider,
+)
+from deskpilot.model_providers.openai_compatible_responses import (
+    OpenAICompatibleResponsesProvider,
 )
 
 
@@ -52,6 +56,20 @@ def describe_model_provider_config(
             supports_strict_json_schema=config.supports_strict_json_schema,
             max_context_tokens=config.max_context_tokens,
             max_tokens_field=config.max_tokens_field,
+            max_response_bytes=config.max_response_bytes,
+            health_timeout_seconds=config.health_timeout_seconds,
+        ).descriptor
+    if isinstance(config, OpenAICompatibleResponsesProviderConfig):
+        return OpenAICompatibleResponsesProvider(
+            provider_id=config.provider_id,
+            display_name=config.display_name,
+            model=config.model,
+            base_url=config.base_url,
+            location=config.location,
+            supports_streaming=config.supports_streaming,
+            supports_structured_output=config.supports_structured_output,
+            supports_strict_json_schema=config.supports_strict_json_schema,
+            max_context_tokens=config.max_context_tokens,
             max_response_bytes=config.max_response_bytes,
             health_timeout_seconds=config.health_timeout_seconds,
         ).descriptor
@@ -107,6 +125,29 @@ def create_model_providers(
                     supports_strict_json_schema=config.supports_strict_json_schema,
                     max_context_tokens=config.max_context_tokens,
                     max_tokens_field=config.max_tokens_field,
+                    max_response_bytes=config.max_response_bytes,
+                    health_timeout_seconds=config.health_timeout_seconds,
+                )
+            )
+            continue
+        if isinstance(config, OpenAICompatibleResponsesProviderConfig):
+            credential = (
+                credential_resolver.resolve(config.credential_ref)
+                if config.credential_ref is not None
+                else None
+            )
+            providers.append(
+                OpenAICompatibleResponsesProvider(
+                    provider_id=config.provider_id,
+                    display_name=config.display_name,
+                    model=config.model,
+                    base_url=config.base_url,
+                    api_key=credential,
+                    location=config.location,
+                    supports_streaming=config.supports_streaming,
+                    supports_structured_output=config.supports_structured_output,
+                    supports_strict_json_schema=config.supports_strict_json_schema,
+                    max_context_tokens=config.max_context_tokens,
                     max_response_bytes=config.max_response_bytes,
                     health_timeout_seconds=config.health_timeout_seconds,
                 )

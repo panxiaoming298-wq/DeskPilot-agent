@@ -13,6 +13,7 @@ from deskpilot.domain.provider_config import (
     CredentialReference,
     FakeProviderConfig,
     OpenAICompatibleChatProviderConfig,
+    OpenAICompatibleResponsesProviderConfig,
 )
 from deskpilot.infrastructure.environment_credentials import (
     EnvironmentCredentialResolver,
@@ -47,6 +48,24 @@ def local_ollama_config() -> OpenAICompatibleChatProviderConfig:
         location=ModelLocation.LOCAL,
         supports_strict_json_schema=False,
         max_context_tokens=32_768,
+    )
+
+
+def disabled_responses_config(
+    provider_id: str,
+    model: str,
+    base_url: str,
+    credential_id: str,
+) -> OpenAICompatibleResponsesProviderConfig:
+    return OpenAICompatibleResponsesProviderConfig(
+        enabled=False,
+        provider_id=provider_id,
+        display_name=f"Disabled {provider_id}",
+        model=model,
+        base_url=base_url,
+        location=ModelLocation.CLOUD,
+        credential_ref=CredentialReference(identifier=credential_id),
+        max_context_tokens=1_000_000,
     )
 
 
@@ -148,6 +167,40 @@ def test_settings_parses_secret_free_provider_catalog_from_json_environment(
     serialized = settings.model_dump_json()
     assert CLOUD_CREDENTIAL_ID in serialized
     assert CLOUD_SECRET not in serialized
+
+
+def test_disabled_deepseek_and_bailian_responses_profiles_parse_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = [
+        {"kind": "fake", "provider_id": "fake-local"},
+        disabled_responses_config(
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
+            "https://api.deepseek.com",
+            "DESKPILOT_CREDENTIAL_DEEPSEEK",
+        ).model_dump(mode="json"),
+        disabled_responses_config(
+            "bailian-qwen38-max",
+            "qwen3.8-max",
+            "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            "DESKPILOT_CREDENTIAL_BAILIAN",
+        ).model_dump(mode="json"),
+    ]
+    monkeypatch.setenv("DESKPILOT_MODEL_PROVIDERS", json.dumps(catalog))
+
+    settings = Settings(_env_file=None)
+    providers = create_configured_model_providers(
+        settings,
+        EnvironmentCredentialResolver({}),
+    )
+
+    assert [provider.descriptor.provider_id for provider in providers] == [
+        "fake-local"
+    ]
+    configured = {item.provider_id: item for item in settings.model_providers}
+    assert configured["deepseek-v4-flash"].kind == "openai_compatible_responses"
+    assert configured["bailian-qwen38-max"].kind == "openai_compatible_responses"
 
 
 def test_settings_parses_role_routing_and_pricing_policy_from_environment(

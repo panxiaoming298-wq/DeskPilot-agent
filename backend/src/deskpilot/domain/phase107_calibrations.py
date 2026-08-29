@@ -510,10 +510,17 @@ class Phase107HumanJudgment(BaseModel):
 class Phase107HumanReviewBundle(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["deskpilot.phase107-human-review-bundle.v1"]
+    schema_version: Literal[
+        "deskpilot.phase107-human-review-bundle.v1",
+        "deskpilot.phase115-personal-preview-review-bundle.v2",
+    ]
     run_digest: str = Field(pattern=DIGEST_PATTERN)
     packet_digest: str = Field(pattern=DIGEST_PATTERN)
     rubric_version: Literal["deskpilot.phase107-human-rubric.v1"]
+    review_mode: Literal["production", "personal_preview"] = Field(
+        default="production",
+        exclude_if=lambda value: value == "production",
+    )
     valid_until: datetime
     judgments: tuple[Phase107HumanJudgment, ...] = Field(min_length=1, max_length=1_500)
     bundle_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -522,6 +529,10 @@ class Phase107HumanReviewBundle(BaseModel):
     def bundle_is_unique_and_digested(self) -> Self:
         if self.valid_until.tzinfo is None:
             raise ValueError("Human calibration expiry must be timezone-aware")
+        if (
+            self.schema_version == "deskpilot.phase107-human-review-bundle.v1"
+        ) != (self.review_mode == "production"):
+            raise ValueError("Human review schema does not match its review mode")
         keys = tuple((item.sample_id, item.reviewer_ref) for item in self.judgments)
         if len(keys) != len(set(keys)):
             raise ValueError("Human review bundle contains a duplicate reviewer/sample")
@@ -670,7 +681,7 @@ class Phase107ResolvedJudgment(BaseModel):
     verdict: Literal["accept", "reject", "needs_review"]
     primary_disagreement: bool
     safety_boundary_respected: bool
-    resolution: Literal["primary_consensus", "arbiter"]
+    resolution: Literal["primary_consensus", "arbiter", "single_primary"]
 
 
 class Phase107CalibrationReport(BaseModel):
@@ -680,7 +691,12 @@ class Phase107CalibrationReport(BaseModel):
         "deskpilot.phase107-calibration-report.v1",
         "deskpilot.phase107-calibration-report.v2",
         "deskpilot.phase115-calibration-report.v3",
+        "deskpilot.phase115-personal-preview-report.v1",
     ]
+    review_mode: Literal["production", "personal_preview"] = Field(
+        default="production",
+        exclude_if=lambda value: value == "production",
+    )
     run_digest: str = Field(pattern=DIGEST_PATTERN)
     packet_digest: str = Field(pattern=DIGEST_PATTERN)
     judge_run_digest: str = Field(pattern=DIGEST_PATTERN)
@@ -779,7 +795,10 @@ class Phase107CalibrationReport(BaseModel):
         if self.status == "passed" and self.error_codes:
             raise ValueError("Passed Phase-107 report cannot contain errors")
         roles = tuple(item.calibration_role for item in self.calibrated_agents)
-        if self.schema_version == "deskpilot.phase115-calibration-report.v3":
+        if self.schema_version in {
+            "deskpilot.phase115-calibration-report.v3",
+            "deskpilot.phase115-personal-preview-report.v1",
+        }:
             if roles != ("turn_planner", "dynamic_coordinator", "patch_planner"):
                 raise ValueError(
                     "Calibration v3 report requires three ordered Agent identities"
@@ -793,10 +812,17 @@ class Phase107CalibrationReport(BaseModel):
                 raise ValueError("Phase-107 v2 report cannot contain a Turn Planner prompt")
         elif self.calibrated_agents or self.turn_planner_prompt_digest is not None:
             raise ValueError("Phase-107 v1 report cannot contain release Agent identity")
+        if (
+            self.schema_version == "deskpilot.phase115-personal-preview-report.v1"
+        ) != (self.review_mode == "personal_preview"):
+            raise ValueError("Calibration report schema does not match its review mode")
         digest_exclude = {"report_digest"}
         if self.schema_version == "deskpilot.phase107-calibration-report.v1":
             digest_exclude.add("calibrated_agents")
-        if self.schema_version != "deskpilot.phase115-calibration-report.v3":
+        if self.schema_version not in {
+            "deskpilot.phase115-calibration-report.v3",
+            "deskpilot.phase115-personal-preview-report.v1",
+        }:
             digest_exclude.add("turn_planner_prompt_digest")
         if self.report_digest != sha256_digest(
             self.model_dump(mode="json", exclude=digest_exclude)

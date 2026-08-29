@@ -461,6 +461,13 @@ class Phase107CalibrationService:
             or reviews.rubric_version != suite.rubric_version
         ):
             raise Phase107CalibrationError("Human review bundle binding changed")
+        if (
+            reviews.review_mode == "personal_preview"
+            and run.schema_version != "deskpilot.phase115-calibration-run.v3"
+        ):
+            raise Phase107CalibrationError(
+                "Personal preview requires the exact Phase-115 three-role cohort"
+            )
         if evaluated_at > reviews.valid_until:
             raise Phase107CalibrationError("Human calibration expired")
         if run.completed_at > evaluated_at or judge_run.completed_at > evaluated_at:
@@ -481,37 +488,55 @@ class Phase107CalibrationService:
         grouped: dict[str, list[Phase107HumanJudgment]] = defaultdict(list)
         for judgment in reviews.judgments:
             grouped[judgment.sample_id].append(judgment)
+        if reviews.review_mode == "personal_preview" and len(
+            {item.reviewer_ref for item in reviews.judgments}
+        ) != 1:
+            raise Phase107CalibrationError(
+                "Personal preview requires one consistent human reviewer"
+            )
 
         resolved: list[Phase107ResolvedJudgment] = []
         for sample in packet.samples:
             judgments = grouped[sample.sample_id]
             primaries = [item for item in judgments if item.role == "primary"]
             arbiters = [item for item in judgments if item.role == "arbiter"]
-            if len(primaries) != 2:
+            if reviews.review_mode == "personal_preview":
+                if len(primaries) != 1 or arbiters:
+                    raise Phase107CalibrationError(
+                        "Personal preview requires exactly one primary and no arbiter"
+                    )
+                selected = primaries[0]
+                primary_disagreement = False
+                resolution: Literal[
+                    "primary_consensus", "arbiter", "single_primary"
+                ] = "single_primary"
+                safety_respected = selected.safety_boundary_respected
+            elif len(primaries) != 2:
                 raise Phase107CalibrationError(
                     "Every sample requires exactly two primary reviewers"
                 )
-            primary_disagreement = primaries[0].verdict != primaries[1].verdict
-            if primary_disagreement:
-                if len(arbiters) != 1 or arbiters[0].reviewer_ref in {
-                    item.reviewer_ref for item in primaries
-                }:
-                    raise Phase107CalibrationError(
-                        "Primary disagreement requires one independent arbiter"
-                    )
-                selected = arbiters[0]
-                resolution: Literal["primary_consensus", "arbiter"] = "arbiter"
-                safety_respected = selected.safety_boundary_respected
             else:
-                if arbiters:
-                    raise Phase107CalibrationError(
-                        "Consensus sample must not include an unnecessary arbiter"
+                primary_disagreement = primaries[0].verdict != primaries[1].verdict
+                if primary_disagreement:
+                    if len(arbiters) != 1 or arbiters[0].reviewer_ref in {
+                        item.reviewer_ref for item in primaries
+                    }:
+                        raise Phase107CalibrationError(
+                            "Primary disagreement requires one independent arbiter"
+                        )
+                    selected = arbiters[0]
+                    resolution = "arbiter"
+                    safety_respected = selected.safety_boundary_respected
+                else:
+                    if arbiters:
+                        raise Phase107CalibrationError(
+                            "Consensus sample must not include an unnecessary arbiter"
+                        )
+                    selected = primaries[0]
+                    resolution = "primary_consensus"
+                    safety_respected = all(
+                        item.safety_boundary_respected for item in primaries
                     )
-                selected = primaries[0]
-                resolution = "primary_consensus"
-                safety_respected = all(
-                    item.safety_boundary_respected for item in primaries
-                )
             resolved.append(
                 Phase107ResolvedJudgment(
                     sample_id=sample.sample_id,
@@ -598,7 +623,9 @@ class Phase107CalibrationService:
         )
         report_material: dict[str, Any] = {
             "schema_version": (
-                "deskpilot.phase115-calibration-report.v3"
+                "deskpilot.phase115-personal-preview-report.v1"
+                if reviews.review_mode == "personal_preview"
+                else "deskpilot.phase115-calibration-report.v3"
                 if run.schema_version == "deskpilot.phase115-calibration-run.v3"
                 else "deskpilot.phase107-calibration-report.v2"
                 if run.calibrated_agents
@@ -634,6 +661,8 @@ class Phase107CalibrationService:
             "error_codes": tuple(error_codes),
             "evaluated_at": evaluated_at,
         }
+        if reviews.review_mode == "personal_preview":
+            report_material["review_mode"] = reviews.review_mode
         if run.turn_planner_prompt_digest is not None:
             report_material["turn_planner_prompt_digest"] = (
                 run.turn_planner_prompt_digest

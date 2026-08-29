@@ -60,6 +60,8 @@ def build_phase115_admission_bundle(
         run.schema_version != "deskpilot.phase115-calibration-run.v3"
         or report.schema_version != "deskpilot.phase115-calibration-report.v3"
         or report.status != "passed"
+        or reviews.review_mode != "production"
+        or report.review_mode != "production"
         or run.provider.location is not ModelLocation.CLOUD
         or run.provider.protocol.value == "fake"
         or approved_at.tzinfo is None
