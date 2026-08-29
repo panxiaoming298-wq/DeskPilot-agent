@@ -8,6 +8,8 @@
 
 ## 桌面工作流
 
+Provider 设置页默认只展示日常连接管理。“开发者验收工具”默认收起，普通用户保存 API Key、添加 Provider 或进行日常对话都不需要运行；前端只在首次展开后挂载准备组件并读取 manifest，收起后保留本次填写状态。
+
 1. 本机 API 读取 v2 冻结策略，向前端返回三家 Provider 的 exact model、公开 Base URL 要求、Windows credential identifier、请求数与费用上限。
 2. 用户确认模型、Key 存在性、Base URL/Key 归属、专用小额凭据、应用内预算上限和当日官方价格。
 3. DeepSeek 额外确认当日预付费余额；百炼填写北京 Workspace Responses 兼容地址，并确认账单告警与账单延迟边界；OpenAI 可选已生效的项目硬限额或应用内小额包络。
@@ -44,4 +46,5 @@ preflight 通过只表示“这份公开准备材料符合当前冻结策略”�
 
 - 后端覆盖三家 manifest、OpenAI ready binding、百炼错误 Base URL 阻断和计费确认必填。
 - 前端覆盖冻结边界、未完成项即时提示、公开请求体、ready 投影与百炼 Workspace 差异。
+- 设置页覆盖开发者工具默认收起、首次展开才挂载，以及收起后不丢失本次状态。
 - 设置页没有真实模型执行按钮，也没有在加载页面时做健康检查或 Provider 请求。

@@ -135,4 +135,37 @@ describe('ProviderSettings', () => {
     expect(management.deleteProvider).toHaveBeenCalledWith('local-fake')
     expect(card.find('[role="alertdialog"]').exists()).toBe(false)
   })
+
+  it('默认收起开发者验收工具，并仅在首次展开后挂载无网准备区', async () => {
+    const management = managementMock()
+    vi.mocked(useProviderManagement).mockReturnValue(
+      management as unknown as ReturnType<typeof useProviderManagement>,
+    )
+
+    const wrapper = mount(ProviderSettings, {
+      global: {
+        stubs: {
+          ProviderEditorModal: true,
+          ProviderProbePreparation: {
+            template: '<div data-testid="probe-preparation-stub" />',
+          },
+        },
+      },
+    })
+    await flushPromises()
+
+    const details = wrapper.get<HTMLDetailsElement>('.developer-tools')
+    expect(details.element.open).toBe(false)
+    expect(details.get('summary').text()).toContain('开发者验收工具')
+    expect(details.get('summary').text()).toContain('日常无需运行')
+    expect(wrapper.find('[data-testid="probe-preparation-stub"]').exists()).toBe(false)
+
+    details.element.open = true
+    await details.trigger('toggle')
+    expect(wrapper.find('[data-testid="probe-preparation-stub"]').exists()).toBe(true)
+
+    details.element.open = false
+    await details.trigger('toggle')
+    expect(wrapper.find('[data-testid="probe-preparation-stub"]').exists()).toBe(true)
+  })
 })

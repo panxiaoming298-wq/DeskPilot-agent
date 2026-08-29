@@ -898,6 +898,94 @@ summary:focus-visible {
   font-size: 18px;
 }
 
+.developer-tools {
+  margin-top: 12px;
+}
+
+.developer-tools-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--muted-ink);
+  background: var(--surface);
+  cursor: pointer;
+  list-style: none;
+}
+
+.developer-tools-summary::-webkit-details-marker {
+  display: none;
+}
+
+.developer-tools-summary:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-raised);
+}
+
+.developer-tools-marker {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--task-card);
+}
+
+.developer-tools-marker::before {
+  content: "+";
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+
+.developer-tools[open] .developer-tools-marker::before {
+  content: "−";
+}
+
+.developer-tools-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.developer-tools-copy strong,
+.developer-tools-copy small,
+.developer-tools-status {
+  white-space: nowrap;
+}
+
+.developer-tools-copy strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.developer-tools-copy small {
+  overflow: hidden;
+  color: var(--quiet-ink);
+  font-size: 9px;
+  text-overflow: ellipsis;
+}
+
+.developer-tools-status {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--quiet-ink);
+  background: var(--task-card);
+  font-size: 9px;
+}
+
+.developer-tools > .probe-preparation {
+  margin-top: 8px;
+}
+
 .settings-layout {
   gap: 12px;
   margin-top: 12px;
@@ -1297,6 +1385,10 @@ summary:focus-visible {
   .provider-metrics,
   .provider-model-row {
     grid-template-columns: 1fr;
+  }
+
+  .developer-tools-copy small {
+    display: none;
   }
 
   .provider-model-row div:first-child {

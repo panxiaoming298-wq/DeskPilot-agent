@@ -45,6 +45,7 @@ const editorOpen = ref(false)
 const editorMode = ref<'create' | 'edit'>('create')
 const selectedProvider = ref<ProviderCatalogEntry | null>(null)
 const pendingDelete = ref<string | null>(null)
+const probeToolsActivated = ref(false)
 
 const cloudCount = computed(() => providers.value.length - localCount.value)
 const healthyCount = computed(
@@ -80,6 +81,11 @@ function openEdit(provider: ProviderCatalogEntry): void {
 function closeEditor(): void {
   editorOpen.value = false
   selectedProvider.value = null
+}
+
+function activateProbeTools(event: Event): void {
+  const details = event.currentTarget as HTMLDetailsElement
+  if (details.open) probeToolsActivated.value = true
 }
 
 async function saveProvider(config: ProviderConfig): Promise<void> {
@@ -210,7 +216,17 @@ function formatCost(micros: number | null): string {
       <article><span>韧性状态</span><strong>{{ openCircuitCount }} / {{ totalRetryCount }}</strong><small>非闭合熔断 / 累计重试</small></article>
     </div>
 
-    <ProviderProbePreparation />
+    <details class="developer-tools" @toggle="activateProbeTools">
+      <summary class="developer-tools-summary">
+        <span class="developer-tools-marker" aria-hidden="true" />
+        <span class="developer-tools-copy">
+          <strong>开发者验收工具</strong>
+          <small>正式 Provider 兼容评测前使用</small>
+        </span>
+        <span class="developer-tools-status">日常无需运行</span>
+      </summary>
+      <ProviderProbePreparation v-if="probeToolsActivated" />
+    </details>
 
     <div class="settings-layout">
       <section class="provider-list-panel" aria-labelledby="provider-list-title">
